@@ -6,6 +6,7 @@
 #define STANDARD_MATH_H
 
 #include <iostream>
+#include <immintrin.h>
 #include "../math_dis.h"
 
 namespace cobraml::core {
@@ -79,8 +80,7 @@ namespace cobraml::core {
         }
     }
 
-#define ROW_COUNT 2
-
+#define ROW_COUNT 4
 
     template<typename NumType>
     void gemv_parallel_simd_2(
@@ -91,38 +91,49 @@ namespace cobraml::core {
         const NumType beta,
         const size_t rows,
         const size_t columns) {
+
         set_num_threads();
         size_t start;
+        size_t const remainder = rows % ROW_COUNT;
+        size_t const row_count = rows - remainder;
 
-#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, rows, columns) private(start) schedule(dynamic)
-        for (start = 0; start < rows; start += ROW_COUNT) {
-            NumType partial;
+#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, row_count, columns) private(start) schedule(dynamic)
+        for (start = 0; start < row_count; start += ROW_COUNT) {
+            NumType partial = 0;
+            NumType partial_2 = 0;
+            NumType partial_3 = 0;
+            NumType partial_4 = 0;
 
-            size_t const end_row = start + ROW_COUNT;
-            size_t start_row = start;
+#pragma omp simd reduction(+:partial) reduction(+:partial_2) reduction(+:partial_3) reduction(+:partial_4) aligned(vector: 32) aligned(matrix: 32)
+            for (size_t i = 0; i < columns; ++i) {
+                partial += static_cast<NumType>(vector[i] * matrix[start * columns + i]);
+                partial_2 += static_cast<NumType>(vector[i] * matrix[(start + 1) * columns + i]);
+                partial_3 += static_cast<NumType>(vector[i] * matrix[(start + 2) * columns + i]);
+                partial_4 += static_cast<NumType>(vector[i] * matrix[(start + 3) * columns + i]);
 
-            if (end_row > rows) {
-                for (; start_row < rows; ++start_row) {
-                    partial = 0;
-#pragma omp simd reduction(+:partial) aligned(vector: 32) aligned(matrix: 32)
-                    for (size_t i = 0; i < columns; ++i) {
-                        partial += static_cast<NumType>(vector[i] * matrix[start_row * columns + i]);
-                    }
-
-                    dest[start_row] = static_cast<NumType>(dest[start_row] * beta + partial * alpha);
-                }
-            }else {
-                partial = 0;
-                NumType partial_2 = 0;
-#pragma omp simd reduction(+:partial) reduction(+:partial_2) aligned(vector: 32) aligned(matrix: 32)
-                for (size_t i = 0; i < columns; ++i) {
-                    partial += static_cast<NumType>(vector[i] * matrix[start * columns + i]);
-                    partial_2 += static_cast<NumType>(vector[i] * matrix[(start + 1) * columns + i]);
-                }
-
-                dest[start] = static_cast<NumType>(dest[start] * beta + partial * alpha);
-                dest[start + 1] = static_cast<NumType>(dest[start + 1] * beta + partial_2 * alpha);
+                // _mm_prefetch(&matrix[(start + 320)], _MM_HINT_T0);
+                // _mm_prefetch(&matrix[(start + 320)], _MM_HINT_T0);
+                // _mm_prefetch(&matrix[(start + 320)], _MM_HINT_T0);
+                // _mm_prefetch(&matrix[(start + 320)], _MM_HINT_T0);
             }
+
+            dest[start] = static_cast<NumType>(dest[start] * beta + partial * alpha);
+            dest[start + 1] = static_cast<NumType>(dest[start + 1] * beta + partial_2 * alpha);
+            dest[start + 2] = static_cast<NumType>(dest[start + 2] * beta + partial_3 * alpha);
+            dest[start + 3] = static_cast<NumType>(dest[start + 3] * beta + partial_4 * alpha);
+        }
+
+
+#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, rows, row_count, columns) private(start) schedule(dynamic)
+        for (start = row_count; start < rows; ++start) {
+            NumType partial = 0;
+
+#pragma omp simd reduction(+:partial) aligned(vector: 32) aligned(matrix: 32)
+            for (size_t i = 0; i < columns; ++i) {
+                partial += static_cast<NumType>(vector[i] * matrix[start * columns + i]);
+            }
+
+            dest[start] = static_cast<NumType>(dest[start] * beta + partial * alpha);
         }
     }
 

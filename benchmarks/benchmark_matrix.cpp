@@ -27,6 +27,44 @@ namespace {
         }
     };
 
+    BENCHMARK_DEFINE_F(CPUFixture, BatchedDotProductVtune3)(benchmark::State &st){
+
+        cobraml::core::func_pos = 3;
+
+        cobraml::core::Matrix const mat = from_vector(
+            create_vector(5005, 5005), cobraml::core::CPU);
+
+        cobraml::core::Matrix const vec = from_vector(
+            create_vector(1, 5005), cobraml::core::CPU);
+
+        cobraml::core::Matrix res(1, 5005, cobraml::core::CPU, cobraml::core::FLOAT64);
+
+        constexpr double alpha1{1};
+
+        for (auto _: st) {
+            gemv(mat, vec, res, alpha1, alpha1);
+        }
+    }
+
+    BENCHMARK_DEFINE_F(CPUFixture, BatchedDotProductVtune2)(benchmark::State &st){
+
+        cobraml::core::func_pos = 2;
+
+        cobraml::core::Matrix const mat = from_vector(
+            create_vector(5005, 5005), cobraml::core::CPU);
+
+        cobraml::core::Matrix const vec = from_vector(
+            create_vector(1, 5005), cobraml::core::CPU);
+
+        cobraml::core::Matrix res(1, 5005, cobraml::core::CPU, cobraml::core::FLOAT64);
+
+        constexpr double alpha1{1};
+
+        for (auto _: st) {
+            gemv(mat, vec, res, alpha1, alpha1);
+        }
+    }
+
     BENCHMARK_DEFINE_F(CPUFixture, BatchedDotProduct)(benchmark::State &st) {
         size_t const rows{static_cast<size_t>(st.range(0))};
         size_t const col{static_cast<size_t>(st.range(1))};
@@ -52,6 +90,12 @@ namespace {
         st.counters["columns"] = col;
         st.counters["type"] = pos;
     }
+
+    BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProductVtune3)
+    ->Threads(1);
+
+    BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProductVtune2)
+    ->Threads(1);
 
     BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProduct)
     ->Args({100, 100, 0})

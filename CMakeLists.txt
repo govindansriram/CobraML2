@@ -23,7 +23,7 @@ set(SOURCES
         include/barray.h
 )
 
-list(APPEND CMAKE_PREFIX_PATH "/opt/intel/oneapi/tbb/latest/lib/cmake") # path to intel onetbb
+#list(APPEND CMAKE_PREFIX_PATH "/opt/intel/oneapi/tbb/latest/lib/cmake") # path to intel onetbb
 
 add_library(CmlContentBasedFiltering SHARED ${SOURCES})
 
@@ -53,6 +53,7 @@ endif()
 
 option(ENABLE_TESTING "Enable testing-specific compile options" ON)
 option(IS_THREAD "Test for thread related issues" OFF)
+option(VTUNE "Test for thread related issues" OFF)
 
 if(DEFINED THREAD_COUNT)
     add_definitions(-DNUM_THREADS=${THREAD_COUNT})
@@ -127,11 +128,20 @@ else ()
 
     find_package(benchmark REQUIRED)
 
-    set(COMMON_COMPILE_OPTIONS
+    if(VTUNE)
+        set(COMMON_COMPILE_OPTIONS
+            -g
             -O2
             -flto
             -fopenmp
-    )
+        )
+    else ()
+        set(COMMON_COMPILE_OPTIONS
+                -O2
+                -flto
+                -fopenmp
+        )
+    endif ()
 
     # Append additional flags if provided via the command line
     if(DEFINED ADDITIONAL_COMPILE_OPTIONS)

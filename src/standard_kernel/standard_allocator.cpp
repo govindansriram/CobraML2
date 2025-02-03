@@ -15,15 +15,22 @@ namespace cobraml::core {
 
     static size_t compute_aligned_size(size_t const bytes) {
 
-        size_t const remainder = bytes % MIN_LENGTH;
+        size_t const bits = bytes * 8;
 
-        if (remainder == bytes)
-            return MIN_LENGTH;
+        size_t const remainder = bits % MIN_LENGTH;
+        size_t quotient = bits / MIN_LENGTH;
 
-        if (remainder == 0)
-            return bytes;
+        quotient += remainder > 0 ? 1 : 0;
 
-        return bytes + (MIN_LENGTH - remainder);
+        // if (remainder == bytes)
+        //     return MIN_LENGTH;
+        //
+        // if (remainder == 0)
+        //     return bytes;
+
+        // std::cout << bits << " " << quotient * (MIN_LENGTH / 8) << std::endl;
+
+        return quotient * (MIN_LENGTH / 8);
     }
 
     void * StandardAllocator::malloc(std::size_t const bytes) {

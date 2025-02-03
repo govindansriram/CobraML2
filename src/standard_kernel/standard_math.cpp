@@ -5,6 +5,7 @@
 #include "standard_math.h"
 #include <omp.h>
 #include "enums.h"
+#include <cstring>
 
 
 namespace cobraml::core {
@@ -168,7 +169,7 @@ namespace cobraml::core {
 
         constexpr size_t skip = get_block_len<double>();
 
-#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
+#pragma omp parallel for default(none) shared(std::cout, alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
         for (start = 0; start < row_count / ROW_COUNT2; ++start) {
             double partial_1 = 0;
             double partial_2 = 0;
@@ -176,30 +177,45 @@ namespace cobraml::core {
             const size_t row_start = start * ROW_COUNT2;
 
             for (size_t i = 0; i < columns; i += skip) {
+
+                __m256d mat_block_1;
+                __m256d mat_block_2;
                 __m256d const vector_block = _mm256_load_pd(&vector[i]);
-                __m256d const mat_block_1 = _mm256_load_pd(&matrix[start * columns + i]);
-                __m256d const mat_block_2 = _mm256_load_pd(&matrix[(start + 1) * columns + i]);
+
+                if (i + skip > columns) {
+                    size_t const amt = columns - i;
+                    alignas(32) double block_1[skip]{};
+                    alignas(32) double block_2[skip]{};
+
+                    std::memcpy(block_1, &matrix[row_start * columns + i], amt * 8);
+                    std::memcpy(block_2, &matrix[(row_start + 1) * columns + i], amt * 8);
+
+                    mat_block_1 = _mm256_load_pd(block_1);
+                    mat_block_2 = _mm256_load_pd(block_2);
+                }else {
+                    mat_block_1 = _mm256_loadu_pd(&matrix[row_start * columns + i]);
+                    mat_block_2 = _mm256_loadu_pd(&matrix[(row_start + 1) * columns + i]);
+                }
 
                 __m256d const result1 = _mm256_mul_pd(vector_block, mat_block_1);
                 __m256d const result2 = _mm256_mul_pd(vector_block, mat_block_2);
 
-                alignas(256) double temp1[skip];
-                alignas(256) double temp2[skip];
+                alignas(32) double temp1[skip];
+                alignas(32) double temp2[skip];
 
                 _mm256_store_pd(temp1, result1);
                 _mm256_store_pd(temp2, result2);
 
-                partial_1 += temp1[0] + temp1[1] + temp1[2] + temp1[3] + temp1[4];
-                // test with haddps
-                partial_2 += temp2[0] + temp2[1] + temp2[2] + temp2[3] + temp2[4];
-                // test with haddps
+                partial_1 += temp1[0] + temp1[1] + temp1[2] + temp1[3];
+                partial_2 += temp2[0] + temp2[1] + temp2[2] + temp2[3];
             }
 
             dest[row_start] = dest[row_start] * beta + partial_1 * alpha;
             dest[row_start + 1] = dest[row_start + 1] * beta + partial_2 * alpha;
         }
 
-#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, rows, row_count, columns) private(start) schedule(dynamic)
+
+#pragma omp parallel for default(none) shared(std::cout, alpha, beta, matrix, vector, dest, rows, row_count, columns) private(start) schedule(dynamic)
         for (start = row_count; start < rows; ++start) {
             double partial = 0;
 

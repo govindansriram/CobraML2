@@ -91,7 +91,6 @@ namespace cobraml::core {
         const NumType beta,
         const size_t rows,
         const size_t columns) {
-
         set_num_threads();
         size_t start;
         size_t const remainder = rows % ROW_COUNT;
@@ -137,6 +136,74 @@ namespace cobraml::core {
         }
     }
 
+    template <typename Numtype>
+    constexpr size_t get_block_len() {
+        return 256 / (dtype_to_bytes(get_dtype_from_type<Numtype>::type) * 8);
+    }
+
+#define ROW_COUNT2 2
+
+    void float32_gemv_kernel(const float *matrix,
+                             const float *vector,
+                             float *dest,
+                             float const &alpha,
+                             float const &beta,
+                             size_t const &rows,
+                             size_t const &columns,
+                             size_t const &row_count);
+
+    void float64_gemv_kernel(const double *matrix,
+                             const double *vector,
+                             double *dest,
+                             double const &alpha,
+                             double const &beta,
+                             size_t const &rows,
+                             size_t const &columns,
+                             size_t const &row_count);
+
+
+    template<typename NumType>
+    void gemv_parallel_simd_3(
+        const NumType *matrix,
+        const NumType *vector,
+        NumType *dest,
+        const NumType alpha,
+        const NumType beta,
+        const size_t rows,
+        const size_t columns) {
+
+        set_num_threads();
+        size_t const remainder = rows % ROW_COUNT2;
+        size_t const row_count = rows - remainder;
+
+        if constexpr (std::is_same_v<NumType, float>){
+            float32_gemv_kernel(matrix, vector, dest, alpha, beta, rows, columns, row_count);
+            return;
+        }
+
+        if constexpr (std::is_same_v<NumType, double>){
+            float64_gemv_kernel(matrix, vector, dest, alpha, beta, rows, columns, row_count);
+            return;
+        }
+
+        gemv_parallel_simd(matrix, vector, dest, alpha, beta, rows, columns);
+
+        // switch (get_dtype_from_type<NumType>::type) {
+        //     case FLOAT32: {
+        //         float32_gemv_kernel(matrix, vector, dest, alpha, beta, rows, columns, row_count);
+        //         return;
+        //     }
+        //     case FLOAT64: {
+        //         float64_gemv_kernel(matrix, vector, dest, alpha, beta, rows, columns, row_count);
+        //         return;
+        //     }
+        //     default:
+        //         gemv_parallel_simd(matrix, vector, dest, alpha, beta, rows, columns);
+        // }
+
+    }
+
+
 #ifdef BENCHMARK
 
     template<typename NumType>
@@ -165,6 +232,10 @@ namespace cobraml::core {
                 gemv_parallel_simd_2(mat, vec, dest, alpha, beta, rows, columns);
                 return;
             }
+            case 4: {
+                gemv_parallel_simd_3(mat, vec, dest, alpha, beta, rows, columns);
+                return;
+            }
             default: {
                 throw std::runtime_error("invalid gemv type provided");
             }
@@ -181,7 +252,7 @@ namespace cobraml::core {
         const NumType beta,
         size_t const rows,
         size_t const columns) {
-        gemv_parallel_simd_2(mat, vec, dest, alpha, beta, rows, columns);
+        gemv_parallel_simd_3(mat, vec, dest, alpha, beta, rows, columns);
     }
 #endif
 

@@ -72,6 +72,7 @@ if(ENABLE_TESTING)
             -Wsign-conversion
             -Werror
             -fopenmp
+            -mavx2
     )
 
     target_compile_options(CmlContentBasedFiltering PRIVATE ${COMMON_COMPILE_OPTIONS})
@@ -132,6 +133,7 @@ else ()
         set(COMMON_COMPILE_OPTIONS
             -g
             -O2
+            -mavx2
             -flto
             -fopenmp
         )
@@ -139,6 +141,7 @@ else ()
         set(COMMON_COMPILE_OPTIONS
                 -O2
                 -flto
+                -mavx2
                 -fopenmp
         )
     endif ()

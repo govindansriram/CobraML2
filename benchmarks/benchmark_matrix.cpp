@@ -27,17 +27,17 @@ namespace {
         }
     };
 
-    BENCHMARK_DEFINE_F(CPUFixture, BatchedDotProductVtune3)(benchmark::State &st){
+    BENCHMARK_DEFINE_F(CPUFixture, BatchedDotProductVtuneBig2)(benchmark::State &st){
 
-        cobraml::core::func_pos = 3;
+        cobraml::core::func_pos = 2;
 
         cobraml::core::Matrix const mat = from_vector(
-            create_vector(5005, 5005), cobraml::core::CPU);
+            create_vector(10015, 10015), cobraml::core::CPU);
 
         cobraml::core::Matrix const vec = from_vector(
-            create_vector(1, 5005), cobraml::core::CPU);
+            create_vector(1, 10015), cobraml::core::CPU);
 
-        cobraml::core::Matrix res(1, 5005, cobraml::core::CPU, cobraml::core::FLOAT64);
+        cobraml::core::Matrix res(1, 10015, cobraml::core::CPU, cobraml::core::FLOAT64);
 
         constexpr double alpha1{1};
 
@@ -46,17 +46,93 @@ namespace {
         }
     }
 
-    BENCHMARK_DEFINE_F(CPUFixture, BatchedDotProductVtune2)(benchmark::State &st){
+    BENCHMARK_DEFINE_F(CPUFixture, BatchedDotProductVtuneSmall2)(benchmark::State &st){
 
         cobraml::core::func_pos = 2;
 
         cobraml::core::Matrix const mat = from_vector(
-            create_vector(5005, 5005), cobraml::core::CPU);
+            create_vector(2515, 2515), cobraml::core::CPU);
 
         cobraml::core::Matrix const vec = from_vector(
-            create_vector(1, 5005), cobraml::core::CPU);
+            create_vector(1, 2515), cobraml::core::CPU);
 
-        cobraml::core::Matrix res(1, 5005, cobraml::core::CPU, cobraml::core::FLOAT64);
+        cobraml::core::Matrix res(1, 2515, cobraml::core::CPU, cobraml::core::FLOAT64);
+
+        constexpr double alpha1{1};
+
+        for (auto _: st) {
+            gemv(mat, vec, res, alpha1, alpha1);
+        }
+    }
+
+    BENCHMARK_DEFINE_F(CPUFixture, BatchedDotProductVtuneBig3)(benchmark::State &st){
+
+        cobraml::core::func_pos = 3;
+
+        cobraml::core::Matrix const mat = from_vector(
+            create_vector(10015, 10015), cobraml::core::CPU);
+
+        cobraml::core::Matrix const vec = from_vector(
+            create_vector(1, 10015), cobraml::core::CPU);
+
+        cobraml::core::Matrix res(1, 10015, cobraml::core::CPU, cobraml::core::FLOAT64);
+
+        constexpr double alpha1{1};
+
+        for (auto _: st) {
+            gemv(mat, vec, res, alpha1, alpha1);
+        }
+    }
+
+    BENCHMARK_DEFINE_F(CPUFixture, BatchedDotProductVtuneSmall3)(benchmark::State &st){
+
+        cobraml::core::func_pos = 3;
+
+        cobraml::core::Matrix const mat = from_vector(
+            create_vector(2515, 2515), cobraml::core::CPU);
+
+        cobraml::core::Matrix const vec = from_vector(
+            create_vector(1, 2515), cobraml::core::CPU);
+
+        cobraml::core::Matrix res(1, 2515, cobraml::core::CPU, cobraml::core::FLOAT64);
+
+        constexpr double alpha1{1};
+
+        for (auto _: st) {
+            gemv(mat, vec, res, alpha1, alpha1);
+        }
+    }
+
+    BENCHMARK_DEFINE_F(CPUFixture, BatchedDotProductVtuneBig4)(benchmark::State &st){
+
+        cobraml::core::func_pos = 4;
+
+        cobraml::core::Matrix const mat = from_vector(
+            create_vector(10015, 10015), cobraml::core::CPU);
+
+        cobraml::core::Matrix const vec = from_vector(
+            create_vector(1, 10015), cobraml::core::CPU);
+
+        cobraml::core::Matrix res(1, 10015, cobraml::core::CPU, cobraml::core::FLOAT64);
+
+        constexpr double alpha1{1};
+
+        for (auto _: st) {
+            gemv(mat, vec, res, alpha1, alpha1);
+        }
+    }
+
+    BENCHMARK_DEFINE_F(CPUFixture, BatchedDotProductVtuneSmall4)(benchmark::State &st){
+
+        cobraml::core::func_pos = 4;
+
+        cobraml::core::Matrix const mat = from_vector(
+            create_vector(2515, 2515), cobraml::core::CPU);
+
+        cobraml::core::Matrix const vec = from_vector(
+            create_vector(1, 2515), cobraml::core::CPU);
+
+        cobraml::core::Matrix res(1, 2515, cobraml::core::CPU, cobraml::core::FLOAT64);
 
         constexpr double alpha1{1};
 
@@ -91,10 +167,22 @@ namespace {
         st.counters["type"] = pos;
     }
 
-    BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProductVtune3)
+    BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProductVtuneBig2)
     ->Threads(1);
 
-    BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProductVtune2)
+    // BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProductVtuneBig3)
+    // ->Threads(1);
+
+    BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProductVtuneBig4)
+    ->Threads(1);
+
+    BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProductVtuneSmall2)
+    ->Threads(1);
+    //
+    // BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProductVtuneSmall3)
+    // ->Threads(1);
+
+    BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProductVtuneSmall4)
     ->Threads(1);
 
     BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProduct)

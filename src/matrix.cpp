@@ -14,7 +14,7 @@
 namespace cobraml::core {
 
     Matrix::Matrix(size_t const rows, size_t const columns, Device const device, Dtype const dtype):
-        Array(rows * columns, device, dtype),
+        Barray(rows * columns, device, dtype),
         rows(rows),
         columns(columns){
         is_invalid(dtype);
@@ -27,8 +27,8 @@ namespace cobraml::core {
         return sh;
     }
 
-    Matrix::Matrix(Array const &other): Array(other), rows(0), columns(0) {}
-    Matrix::Matrix(Matrix const &other): Array(other), rows(other.rows), columns(other.columns) {}
+    Matrix::Matrix(Barray const &other): Barray(other), rows(0), columns(0) {}
+    Matrix::Matrix(Matrix const &other): Barray(other), rows(other.rows), columns(other.columns) {}
 
 
     Matrix::~Matrix() = default;
@@ -77,45 +77,12 @@ namespace cobraml::core {
 
     Matrix::Matrix(): rows(0), columns(0) {}
 
-    void print_num(void *buffer, Dtype const dtype) {
-        switch (dtype) {
-            case INT8: {
-                const auto num = *static_cast<char *>(buffer);
-                std::cout << static_cast<int>(num);
-                return;
-            }
-            case INT16: {
-                std::cout << *static_cast<int16_t *>(buffer);
-                return;
-            }
-            case INT32: {
-                std::cout << *static_cast<int32_t *>(buffer);
-                return;
-            }
-            case INT64: {
-                std::cout << *static_cast<int64_t *>(buffer);
-                return;
-            }
-            case FLOAT32: {
-                std::cout << *static_cast<float *>(buffer);
-                return;
-            }
-            case FLOAT64: {
-                std::cout << *static_cast<double *>(buffer);
-                return;
-            }
-            case INVALID: {
-                is_invalid(dtype);
-            }
-        }
-    }
-
     Matrix& Matrix::operator=(const Matrix &other) {
         if (this == &other) {
             return *this;
         }
 
-        Array::operator=(other);
+        Barray::operator=(other);
         this->rows = other.rows;
         this->columns = other.columns;
 
@@ -139,9 +106,41 @@ namespace cobraml::core {
         if (show_description)
             print_description(this);
 
-        for (size_t i = 0; i < this->get_shape().rows; ++i) {
-            Array vec{(*this)[i]};
+        std::cout << "[\n";
+
+        if (rows == 1) {
+            std::cout << "    ";
+            Barray vec{(*this)};
+            vec.print(false);
+            std::cout << "]";
+            return;
+        }
+
+        size_t stop{this->rows / 2};
+        size_t start_1{stop};
+        bool print_dots{};
+
+        if (this->get_shape().rows > PRINT_LIMIT) {
+            print_dots = true;
+            stop = 3;
+            start_1 = this->rows - 3;
+        }
+
+        for (size_t i = 0; i < stop; ++i) {
+            Barray vec{(*this)[i]};
+            std::cout << "    ";
             vec.print(false);
         }
+
+        if (print_dots)
+            std::cout << "    ..." << std::endl;
+
+        for (; start_1 < this->rows; ++start_1) {
+            std::cout << "    ";
+            Barray vec{(*this)[start_1]};
+            vec.print(false);
+        }
+
+        std::cout << "]";
     }
 }

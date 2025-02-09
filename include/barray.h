@@ -9,7 +9,10 @@
 #include "enums.h"
 
 namespace cobraml::core {
-    class Array {
+
+#define PRINT_LIMIT 30
+
+    class Barray {
 
     protected:
         struct ArrayImpl;
@@ -62,21 +65,21 @@ namespace cobraml::core {
          * @param beta β
          */
         void gemv(
-            const Array &matrix,
-            const Array &vector,
+            const Barray &matrix,
+            const Barray &vector,
             size_t rows,
             size_t columns,
             const void * alpha,
             const void * beta);
 
     public:
-        Array(size_t total_items, Device device, Dtype dtype);
-        virtual ~Array();
-        Array();
-        Array(const Array &other);
-        Array& operator=(const Array& other);
+        Barray(size_t total_items, Device device, Dtype dtype);
+        virtual ~Barray();
+        Barray();
+        Barray(const Barray &other);
+        Barray& operator=(const Barray& other);
         [[nodiscard]] size_t len() const;
-        [[nodiscard]] virtual Array deep_copy() const;
+        [[nodiscard]] virtual Barray deep_copy() const;
         virtual void print(bool show_description) const;
 
         /**
@@ -95,12 +98,12 @@ namespace cobraml::core {
          * @return the raw ptr buffer
          */
         template<typename T>
-        friend const T *get_buffer(const Array &arr);
+        friend const T *get_buffer(const Barray &arr);
 
         template<typename T>
-        friend Array from_vector(std::vector<T> vec, Device device, Dtype dtype);
+        friend Barray from_vector(std::vector<T> vec, Device device, Dtype dtype);
 
-        Array operator[](size_t index) const;
+        Barray operator[](size_t index) const;
 
         template<typename T>
         T item() const {
@@ -135,7 +138,7 @@ namespace cobraml::core {
     };
 
     template<typename T>
-    const T *get_buffer(const Array &arr) {
+    const T *get_buffer(const Barray &arr) {
         const Dtype current{arr.get_dtype()};
         if (constexpr Dtype given = get_dtype_from_type<T>::type; given != current) {
             throw std::runtime_error(
@@ -146,8 +149,8 @@ namespace cobraml::core {
     }
 
     template<typename T>
-    Array from_vector(std::vector<T> vec, Device const device, Dtype const dtype) {
-        Array ret(vec.size(), device, dtype);
+    Barray from_vector(std::vector<T> vec, Device const device, Dtype const dtype) {
+        Barray ret(vec.size(), device, dtype);
         ret.copy_vector(vec);
         return ret;
     }

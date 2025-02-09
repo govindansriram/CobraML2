@@ -5,57 +5,57 @@
 #include "barray.h"
 
 TEST(ArrayTestFunctionals, test_dtype) {
-    cobraml::core::Array arr(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INT8);
+    cobraml::core::Barray arr(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INT8);
     ASSERT_EQ(arr.get_dtype(), cobraml::core::Dtype::INT8);
 
-    arr = cobraml::core::Array(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INT16);
+    arr = cobraml::core::Barray(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INT16);
     ASSERT_EQ(arr.get_dtype(), cobraml::core::Dtype::INT16);
 
-    arr = cobraml::core::Array(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32);
+    arr = cobraml::core::Barray(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32);
     ASSERT_EQ(arr.get_dtype(), cobraml::core::Dtype::INT32);
 
-    arr = cobraml::core::Array(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INT64);
+    arr = cobraml::core::Barray(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INT64);
     ASSERT_EQ(arr.get_dtype(), cobraml::core::Dtype::INT64);
 
-    arr = cobraml::core::Array(10, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32);
+    arr = cobraml::core::Barray(10, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32);
     ASSERT_EQ(arr.get_dtype(), cobraml::core::Dtype::FLOAT32);
 
-    arr = cobraml::core::Array(10, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT64);
+    arr = cobraml::core::Barray(10, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT64);
     ASSERT_EQ(arr.get_dtype(), cobraml::core::Dtype::FLOAT64);
 
     ASSERT_THROW(
-        cobraml::core::Array(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INVALID),
+        cobraml::core::Barray(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INVALID),
         std::runtime_error);
 
     ASSERT_THROW(
-        cobraml::core::Array(0, cobraml::core::Device::CPU, cobraml::core::Dtype::INVALID),
+        cobraml::core::Barray(0, cobraml::core::Device::CPU, cobraml::core::Dtype::INVALID),
         std::runtime_error);
 }
 
 TEST(ArrayTestFunctionals, test_device) {
-    cobraml::core::Array arr(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INT8);
+    cobraml::core::Barray arr(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INT8);
     ASSERT_EQ(arr.get_device(), cobraml::core::Device::CPU);
 
-    arr = cobraml::core::Array(10, cobraml::core::Device::CPU_X, cobraml::core::Dtype::INT16);
+    arr = cobraml::core::Barray(10, cobraml::core::Device::CPU_X, cobraml::core::Dtype::INT16);
     ASSERT_EQ(arr.get_device(), cobraml::core::Device::CPU_X);
 
-    arr = cobraml::core::Array(10, cobraml::core::Device::GPU, cobraml::core::Dtype::INT32);
+    arr = cobraml::core::Barray(10, cobraml::core::Device::GPU, cobraml::core::Dtype::INT32);
     ASSERT_EQ(arr.get_device(), cobraml::core::Device::GPU);
 }
 
 TEST(ArrayTestFunctionals, test_len) {
-    cobraml::core::Array arr(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INT8);
+    cobraml::core::Barray arr(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INT8);
     ASSERT_EQ(arr.len(), 10);
 
-    arr = cobraml::core::Array(100, cobraml::core::Device::CPU_X, cobraml::core::Dtype::INT16);
+    arr = cobraml::core::Barray(100, cobraml::core::Device::CPU_X, cobraml::core::Dtype::INT16);
     ASSERT_EQ(arr.len(), 100);
 
-    arr = cobraml::core::Array(24, cobraml::core::Device::GPU, cobraml::core::Dtype::INT32);
+    arr = cobraml::core::Barray(24, cobraml::core::Device::GPU, cobraml::core::Dtype::INT32);
     ASSERT_EQ(arr.len(), 24);
 }
 
 TEST(ArrayTestFunctionals, test_default_constructor) {
-    cobraml::core::Array const arr;
+    cobraml::core::Barray const arr;
     ASSERT_EQ(arr.get_device(), cobraml::core::Device::CPU);
     ASSERT_EQ(arr.get_dtype(), cobraml::core::Dtype::INVALID);
     ASSERT_EQ(arr.len(), 0);
@@ -70,7 +70,7 @@ TEST(ArrayTestFunctionals, test_default_constructor) {
 }
 
 TEST(ArrayTestFunctionals, test_invalid_buffer) {
-    cobraml::core::Array const arr;
+    cobraml::core::Barray const arr;
     ASSERT_THROW(cobraml::core::get_buffer<int8_t>(arr), std::runtime_error);
 }
 
@@ -79,8 +79,8 @@ TEST(ArrayTestFunctionals, from_vector) {
     std::vector const vec2{1.5f, 2.22f, 3.33f, 4.26f, 5.12f, 6.0f};
     std::vector<int8_t> vec3{};
 
-    const cobraml::core::Array i_arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32)};
-    const cobraml::core::Array f_arr{from_vector(vec2, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32)};
+    const cobraml::core::Barray i_arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32)};
+    const cobraml::core::Barray f_arr{from_vector(vec2, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32)};
 
     ASSERT_EQ(i_arr.len(), vec.size());
     ASSERT_EQ(i_arr.get_device(), cobraml::core::CPU);
@@ -106,7 +106,7 @@ TEST(ArrayTestFunctionals, from_vector) {
 
 TEST(ArrayTestFunctionals, test_indexing) {
     std::vector const vec{0, 1, 2, 3, 4, 5};
-    const cobraml::core::Array arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32)};
+    const cobraml::core::Barray arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32)};
 
     ASSERT_THROW(arr[10], std::out_of_range);
 
@@ -121,8 +121,8 @@ TEST(ArrayTestFunctionals, test_indexing) {
 
 TEST(ArrayTestFunctionals, set_item) {
     std::vector const vec{0, 1, 2};
-    const cobraml::core::Array arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32)};
-    cobraml::core::Array arr2 = arr;
+    const cobraml::core::Barray arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32)};
+    cobraml::core::Barray arr2 = arr;
 
     arr2[2].set_item(10);
 
@@ -131,8 +131,8 @@ TEST(ArrayTestFunctionals, set_item) {
 
 TEST(ArrayTestFunctionals, test_copy_constructor) {
     std::vector const vec{0, 1, 2, 3, 4, 5};
-    const cobraml::core::Array arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32)};
-    cobraml::core::Array arr2 = arr;
+    const cobraml::core::Barray arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32)};
+    cobraml::core::Barray arr2 = arr;
 
     arr[0].set_item(7);
 
@@ -147,8 +147,8 @@ TEST(ArrayTestFunctionals, test_copy_constructor) {
 TEST(ArrayTestFunctionals, test_copy_assigment) {
     std::vector const vec{0, 1, 2, 3, 4, 5};
     std::vector const vec2{1.5f, 2.22f, 3.33f, 4.26f, 5.12f, 6.0f, 7.0f};
-    cobraml::core::Array arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32)};
-    const cobraml::core::Array arr_2{from_vector(vec2, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32)};
+    cobraml::core::Barray arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32)};
+    const cobraml::core::Barray arr_2{from_vector(vec2, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32)};
 
     arr = arr_2;
 
@@ -167,9 +167,9 @@ TEST(ArrayTestFunctionals, test_copy_assigment) {
 
 TEST(ArrayTestFunctionals, test_deep_copy) {
     std::vector const vec{1.5f, 2.22f, 3.33f, 4.26f, 5.12f, 6.0f, 7.0f};
-    const cobraml::core::Array arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32)};
+    const cobraml::core::Barray arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32)};
 
-    const cobraml::core::Array arr_2{arr.deep_copy()};
+    const cobraml::core::Barray arr_2{arr.deep_copy()};
     arr[6].set_item(8.8f);
 
     for (size_t i = 0; i < arr.len() - 1; ++i) {
@@ -178,7 +178,7 @@ TEST(ArrayTestFunctionals, test_deep_copy) {
 
     ASSERT_NE(arr[vec.size() - 1].item<float>(), arr_2[vec.size() - 1].item<float>());
 
-    const cobraml::core::Array arr_3;
+    const cobraml::core::Barray arr_3;
 
     ASSERT_THROW(auto const arr_4 = arr_3.deep_copy(), std::runtime_error);
 
@@ -190,11 +190,14 @@ TEST(ArrayTestFunctionals, test_deep_copy) {
 
 TEST(ArrayTestFunctionals, test_print) {
     std::vector const vec{1.52345f, 2.2289761f, 0.0000333f, 4.26f, 1231235.1222f, 6.0000001f, 0.0f};
-    const cobraml::core::Array arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32)};
+    const cobraml::core::Barray arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32)};
     arr.print(true);
 
     arr[5].print(true);
 
-    const cobraml::core::Array arr_2;
+    const cobraml::core::Barray arr_2;
     ASSERT_THROW(arr_2.print(true), std::runtime_error);
+
+    cobraml::core::Barray const b(40, cobraml::core::CPU, cobraml::core::INT8);
+    b.print(true);
 }

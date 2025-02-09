@@ -10,22 +10,14 @@
 #include "iostream"
 #include "barray.h"
 
-/**
- * TODO:
- * Test Shape
- * Test Indexing
- * Test GEMV with invalid alpha and beta
- * Test and Update To Tensor
- * Create Tensor class
- */
 namespace cobraml::core {
 
-    class Matrix final : public Array{
+    class Matrix final : public Barray{
         size_t rows;
         size_t columns;
 
         // private constructor for stuff such as tensor to Matrix
-        Matrix(Array const &other);
+        explicit Matrix(Barray const &other);
 
         friend class Tensor;
     public:

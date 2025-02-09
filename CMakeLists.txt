@@ -21,6 +21,8 @@ set(SOURCES
         src/math_dis.cpp
         src/barray.cpp
         include/barray.h
+        include/tensor.h
+        src/tensor.cpp
 )
 
 #list(APPEND CMAKE_PREFIX_PATH "/opt/intel/oneapi/tbb/latest/lib/cmake") # path to intel onetbb
@@ -98,13 +100,17 @@ if(ENABLE_TESTING)
 
     add_executable(test_matrix tests/test_matrix.cpp)
     add_executable(test_array tests/test_barray.cpp)
+    add_executable(test_tensor tests/test_tensor.cpp)
     add_executable(test_enums tests/test_enums.cpp)
 
     include(GoogleTest)
-    gtest_discover_tests(test_matrix test_enums)
+    gtest_discover_tests(test_matrix test_enums test_array test_tensor)
 
     target_compile_options(test_matrix PRIVATE ${COMMON_COMPILE_OPTIONS})
     target_compile_options(test_enums PRIVATE ${COMMON_COMPILE_OPTIONS})
+    target_compile_options(test_tensor PRIVATE ${COMMON_COMPILE_OPTIONS})
+    target_compile_options(test_array PRIVATE ${COMMON_COMPILE_OPTIONS})
+
 
     target_link_libraries(
             test_matrix
@@ -121,6 +127,12 @@ if(ENABLE_TESTING)
 
     target_link_libraries(
             test_enums
+            GTest::gtest_main
+            CmlContentBasedFiltering
+    )
+
+    target_link_libraries(
+            test_tensor
             GTest::gtest_main
             CmlContentBasedFiltering
     )

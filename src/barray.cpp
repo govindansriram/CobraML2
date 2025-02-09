@@ -10,7 +10,7 @@
 #include "allocator.h"
 
 namespace cobraml::core {
-    struct Array::ArrayImpl {
+    struct Barray::ArrayImpl {
         size_t offset = 0;
         size_t len = 0;
         Device device = CPU;
@@ -39,20 +39,20 @@ namespace cobraml::core {
         ArrayImpl &operator=(const ArrayImpl &) = default;
     };
 
-    Array::Array(size_t total_items, Device device, Dtype dtype): impl(
+    Barray::Barray(size_t total_items, Device device, Dtype dtype): impl(
         std::make_unique<ArrayImpl>(device, dtype, total_items)) {
         is_invalid(dtype);
     }
 
-    Dtype Array::get_dtype() const {
+    Dtype Barray::get_dtype() const {
         return this->impl->dtype;
     }
 
-    Device Array::get_device() const {
+    Device Barray::get_device() const {
         return this->impl->device;
     }
 
-    void *Array::get_raw_buffer() const {
+    void *Barray::get_raw_buffer() const {
         if (impl->buffer == nullptr) {
             throw std::runtime_error("data buffer is null");
         }
@@ -60,12 +60,12 @@ namespace cobraml::core {
         return static_cast<char *>(impl->buffer->get_p_buffer()) + impl->offset;
     }
 
-    Array::~Array() = default;
+    Barray::~Barray() = default;
 
-    Array::Array(): impl(std::make_unique<ArrayImpl>()) {
+    Barray::Barray(): impl(std::make_unique<ArrayImpl>()) {
     }
 
-    Array::Array(const Array &other) : impl(std::make_unique<ArrayImpl>()) {
+    Barray::Barray(const Barray &other) : impl(std::make_unique<ArrayImpl>()) {
         impl->dtype = other.impl->dtype;
         impl->offset = other.impl->offset;
         impl->device = other.impl->device;
@@ -74,7 +74,7 @@ namespace cobraml::core {
         impl->m_dispatcher = other.impl->m_dispatcher;
     }
 
-    Array &Array::operator=(const Array &other) {
+    Barray &Barray::operator=(const Barray &other) {
         if (this == &other)
             return *this;
 
@@ -88,7 +88,7 @@ namespace cobraml::core {
         return *this;
     }
 
-    void Array::set_length(unsigned long const len) {
+    void Barray::set_length(unsigned long const len) {
         if (len > impl->len) {
             throw std::runtime_error("cannot make length negative");
         }
@@ -96,7 +96,7 @@ namespace cobraml::core {
         impl->len = len;
     }
 
-    void Array::increment_offset(unsigned long const inc) {
+    void Barray::increment_offset(unsigned long const inc) {
         if (inc > impl->len - 1) {
             throw std::runtime_error("cannot make offset larger then avalailble data");
         }
@@ -105,13 +105,13 @@ namespace cobraml::core {
         impl->offset += inc * dtype_to_bytes(impl->dtype);
     }
 
-    size_t Array::len() const {
+    size_t Barray::len() const {
         return impl->len;
     }
 
-    void Array::gemv(
-        const Array &matrix,
-        const Array &vector,
+    void Barray::gemv(
+        const Barray &matrix,
+        const Barray &vector,
         size_t const rows,
         size_t const columns,
         const void *alpha,
@@ -127,12 +127,12 @@ namespace cobraml::core {
             this->get_dtype());
     }
 
-    void Array::replace_segment(const void *source, size_t items) const {
+    void Barray::replace_segment(const void *source, size_t items) const {
         impl->buffer->overwrite(source, items * dtype_to_bytes(get_dtype()), this->impl->offset);
     }
 
-    Array Array::deep_copy() const{
-        Array ret(this->impl->len, this->impl->device, this->impl->dtype);
+    Barray Barray::deep_copy() const{
+        Barray ret(this->impl->len, this->impl->device, this->impl->dtype);
 
         ret.impl->buffer->overwrite(
             this->get_raw_buffer(),
@@ -142,8 +142,8 @@ namespace cobraml::core {
         return ret;
     }
 
-    Array Array::operator[](size_t const index) const {
-        Array ret = *this;
+    Barray Barray::operator[](size_t const index) const {
+        Barray ret = *this;
 
         if (index >= ret.len()) {
             throw std::out_of_range("index out of bounds");
@@ -155,8 +155,6 @@ namespace cobraml::core {
         return ret;
     }
 
-#define PRINT_LIMIT 30
-
 #define PRINT_BARRAY(p_arr, length, precision){\
     std::cout << "[";\
     size_t stop = length / 2;\
@@ -165,6 +163,7 @@ namespace cobraml::core {
     if(length > PRINT_LIMIT){\
         middle_dots=true;\
         start2 = length - 3;\
+        stop = 3;\
     }\
     for (size_t i = 0; i < stop; ++i) {\
         std::cout << std::fixed << std::setprecision(precision) << p_arr[i] << ", ";\
@@ -178,7 +177,7 @@ namespace cobraml::core {
     std::cout << std::fixed << std::setprecision(precision) << p_arr[start2] << "]\n";\
 }
 
-    void print_description(Array const *arr) {
+    void print_description(Barray const *arr) {
         std::cout << "############## Details ##############\n";
         std::cout << "Length: " << arr->len() << "\n";
         std::cout << "Device: " << device_to_string(arr->get_device()) << "\n";
@@ -186,7 +185,7 @@ namespace cobraml::core {
         std::cout << "#####################################\n";
     }
 
-    void Array::print(bool const show_description) const{
+    void Barray::print(bool const show_description) const{
 
         if (this->get_dtype() == INVALID) {
             throw std::runtime_error("cannot print barray with invalid dtype");
@@ -198,7 +197,11 @@ namespace cobraml::core {
         switch (this->impl->dtype) {
             case INT8: {
                 auto const p{static_cast<int8_t *>(this->get_raw_buffer())};
-                PRINT_BARRAY(p, len(), 0);
+                const auto copy = new int16_t[this->len()];
+                for (size_t i = 0; i < len(); ++i)
+                    copy[i] = p[i];
+                PRINT_BARRAY(copy, len(), 0);
+                delete[] copy;
                 break;
             }
             case INT16: {

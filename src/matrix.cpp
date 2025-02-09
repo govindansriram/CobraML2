@@ -8,6 +8,9 @@
 #include <iostream>
 #include "enums.h"
 
+/**
+ * TODO: double check all matrix functions, then add print, then start tensor functions.
+ */
 namespace cobraml::core {
 
     Matrix::Matrix(size_t const rows, size_t const columns, Device const device, Dtype const dtype):
@@ -112,10 +115,6 @@ namespace cobraml::core {
             return *this;
         }
 
-        // if (!(this->get_shape() == other.get_shape())) {
-        //     throw std::runtime_error("matrices are not the same shape");
-        // }
-
         Array::operator=(other);
         this->rows = other.rows;
         this->columns = other.columns;
@@ -123,79 +122,26 @@ namespace cobraml::core {
         return *this;
     }
 
-    void print_details(Device const device, Dtype const dtype, size_t const rows, size_t const columns) {
+    void print_description(Matrix const * mat) {
+        auto [rows, columns]{mat->get_shape()};
         std::cout << "############## Details ##############\n";
         std::cout << "Shape: " << "(" << rows << ", " << columns << ")" << '\n';
-        std::cout << "Device: " << device_to_string(device) << '\n';
-        std::cout << "Dtype: " << dtype_to_string(dtype) << '\n';
+        std::cout << "Device: " << device_to_string(mat->get_device()) << '\n';
+        std::cout << "Dtype: " << dtype_to_string(mat->get_dtype()) << '\n';
         std::cout << "#####################################\n";
     }
 
-    // void Matrix::print(bool const hide_middle) const {
-    //     print_details(impl->device, impl->dtype, rows, columns);
-    //     unsigned char const shift = dtype_to_bytes(impl->dtype);
-    //     auto dec3 = [this](size_t const x, size_t &start) {
-    //         if (x == 1)
-    //             start = rows - 3;
-    //     };
-    //
-    //     std::cout << "[\n";
-    //     for (size_t x = 0; x < 2; ++x) {
-    //         size_t start = 0;
-    //         size_t end = rows;
-    //
-    //         if (rows > 20 && hide_middle) {
-    //             dec3(x, start);
-    //             end = start + 3;
-    //         }
-    //
-    //         for (; start < end; ++start) {
-    //             std::cout << "   [";
-    //
-    //             for (size_t y = 0; y < 2; ++y) {
-    //                 size_t start_inner = 0;
-    //                 size_t end_inner = columns;
-    //
-    //                 bool inner_hiding{false};
-    //
-    //                 if (columns > 20 && hide_middle) {
-    //                     dec3(y, start_inner);
-    //                     end_inner = start_inner + 3;
-    //                     inner_hiding = true;
-    //                 }
-    //
-    //                 for (; start_inner < end_inner; ++start_inner) {
-    //                     std::cout << std::fixed << std::setprecision(5);
-    //
-    //                     auto buff = static_cast<char *>(impl->get_raw_buffer());
-    //                     buff += (start * columns + start_inner) * shift;
-    //                     print_num(buff, impl->dtype);
-    //
-    //                     if (start_inner != end_inner - 1 || (y == 0 && inner_hiding)) {
-    //                         std::cout << ", ";
-    //                     }
-    //                 }
-    //
-    //                 if (columns <= 20 || !hide_middle)
-    //                     break;
-    //
-    //                 if (y == 0) {
-    //                     std::cout << "..., ";
-    //                 }
-    //             }
-    //
-    //             std::cout << "]";
-    //             std::cout << "\n";
-    //         }
-    //
-    //         if (rows <= 20 || !hide_middle)
-    //             break;
-    //
-    //         if (x == 0) {
-    //             std::cout << "   ..." << "\n";
-    //         }
-    //     }
-    //
-    //     std::cout << "]\n\n";
-    // }
+    void Matrix::print(bool const show_description) const {
+        if (this->get_dtype() == INVALID) {
+            throw std::runtime_error("cannot print matrix with invalid dtype");
+        }
+
+        if (show_description)
+            print_description(this);
+
+        for (size_t i = 0; i < this->get_shape().rows; ++i) {
+            Array vec{(*this)[i]};
+            vec.print(false);
+        }
+    }
 }

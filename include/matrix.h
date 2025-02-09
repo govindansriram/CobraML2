@@ -24,6 +24,7 @@ namespace cobraml::core {
         size_t rows;
         size_t columns;
 
+        // private constructor for stuff such as tensor to Matrix
         Matrix(Array const &other);
 
         friend class Tensor;
@@ -35,7 +36,7 @@ namespace cobraml::core {
         };
 
         /**
-         * constructor that creates a zero matrix of shape (rows, columns)
+         * constructor that creates a zerod matrix of shape (rows, columns)
          * @param rows the # of rows in the matrix
          * @param columns the # of columns in the matrix
          * @param device the device of the matrix being constructed
@@ -65,9 +66,9 @@ namespace cobraml::core {
 
         /**
          * prints the contents of the matrix in tabular format
-         * @param hide_middle hide the center elements of an array
+         * @param show_description
          */
-        // void print(bool hide_middle = true) const;
+        void print(bool show_description) const override;
 
         ~Matrix() override;
 
@@ -88,9 +89,6 @@ namespace cobraml::core {
 
         template<typename T>
         friend Matrix from_vector(const std::vector<std::vector<T>> &mat, Device device);
-
-        template<typename T>
-        friend T to_scalar(const Matrix &matrix);
     };
 
     template<typename T>
@@ -99,8 +97,12 @@ namespace cobraml::core {
         is_invalid(dtype);
 
         const size_t rows{mat.size()};
-        const size_t columns{mat[0].size()};
 
+        if (!rows) {
+            throw std::runtime_error("vector is empty");
+        }
+
+        const size_t columns{mat[0].size()};
         Matrix ret(rows, columns, device, dtype);
 
         if (rows == 1) {
@@ -120,23 +122,6 @@ namespace cobraml::core {
         }
 
         return ret;
-    }
-
-    template<typename T>
-    T to_scalar(const Matrix &matrix) {
-
-        if (!matrix.is_scalar()) {
-            throw std::runtime_error(
-                "matrix is not of shape (1, 1), cannot extract scalar");
-        }
-
-        const Dtype current{matrix.get_dtype()};
-        if (constexpr Dtype given = get_dtype_from_type<T>::type; given != current) {
-            throw std::runtime_error(
-                "provided buffer type does not match matrix type: " + dtype_to_string(current));
-        }
-
-        return static_cast<T *>(matrix.get_raw_buffer())[0];
     }
 
     template<typename T>

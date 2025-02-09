@@ -3,9 +3,11 @@
 //
 
 #include "barray.h"
+
+#include <iostream>
+#include <iomanip>
 #include "math_dis.h"
 #include "allocator.h"
-
 
 namespace cobraml::core {
     struct Array::ArrayImpl {
@@ -21,6 +23,9 @@ namespace cobraml::core {
             dtype(dtype),
             buffer(std::make_shared<Buffer>(total_items * dtype_to_bytes(dtype), device)),
             m_dispatcher(get_math_kernels(device)) {
+            if (total_items == 0) {
+                throw std::runtime_error("cannot initialize a barray with size 0 items");
+            }
         }
 
         [[nodiscard]] void *get_raw_buffer() const {
@@ -48,6 +53,10 @@ namespace cobraml::core {
     }
 
     void *Array::get_raw_buffer() const {
+        if (impl->buffer == nullptr) {
+            throw std::runtime_error("data buffer is null");
+        }
+
         return static_cast<char *>(impl->buffer->get_p_buffer()) + impl->offset;
     }
 
@@ -122,21 +131,15 @@ namespace cobraml::core {
         impl->buffer->overwrite(source, items * dtype_to_bytes(get_dtype()), this->impl->offset);
     }
 
-    void Array::deep_copy(Array & other) {
+    Array Array::deep_copy() const{
+        Array ret(this->impl->len, this->impl->device, this->impl->dtype);
 
-        if (this->impl->dtype != other.impl->dtype)
-            throw std::runtime_error("cannot deep copy arrays of different data types");
+        ret.impl->buffer->overwrite(
+            this->get_raw_buffer(),
+            this->impl->len * dtype_to_bytes(get_dtype()),
+            0);
 
-        if (this->impl->device != other.impl->device)
-            throw std::runtime_error("cannot deep copy arrays on different devices");
-
-        if (this->impl->len != other.impl->len)
-            throw std::runtime_error("cannot deep copy arrays of different sizes");
-
-        this->impl->buffer->overwrite(
-                other.get_raw_buffer(),
-                impl->len * dtype_to_bytes(get_dtype()),
-                this->impl->offset);
+        return ret;
     }
 
     Array Array::operator[](size_t const index) const {
@@ -152,5 +155,80 @@ namespace cobraml::core {
         return ret;
     }
 
+#define PRINT_LIMIT 30
 
+#define PRINT_BARRAY(p_arr, length, precision){\
+    std::cout << "[";\
+    size_t stop = length / 2;\
+    size_t start2 = stop;\
+    bool middle_dots{};\
+    if(length > PRINT_LIMIT){\
+        middle_dots=true;\
+        start2 = length - 3;\
+    }\
+    for (size_t i = 0; i < stop; ++i) {\
+        std::cout << std::fixed << std::setprecision(precision) << p_arr[i] << ", ";\
+    }\
+    if(middle_dots){\
+        std::cout << "... ";\
+    }\
+    for (; start2 < length - 1; ++start2) {\
+        std::cout << std::fixed << std::setprecision(precision) << p_arr[start2] << ", ";\
+    }\
+    std::cout << std::fixed << std::setprecision(precision) << p_arr[start2] << "]\n";\
+}
+
+    void print_description(Array const *arr) {
+        std::cout << "############## Details ##############\n";
+        std::cout << "Length: " << arr->len() << "\n";
+        std::cout << "Device: " << device_to_string(arr->get_device()) << "\n";
+        std::cout << "Dytpe: " << dtype_to_string(arr->get_dtype()) << "\n";
+        std::cout << "#####################################\n";
+    }
+
+    void Array::print(bool const show_description) const{
+
+        if (this->get_dtype() == INVALID) {
+            throw std::runtime_error("cannot print barray with invalid dtype");
+        }
+
+        if (show_description)
+            print_description(this);
+
+        switch (this->impl->dtype) {
+            case INT8: {
+                auto const p{static_cast<int8_t *>(this->get_raw_buffer())};
+                PRINT_BARRAY(p, len(), 0);
+                break;
+            }
+            case INT16: {
+                auto const p{static_cast<int16_t *>(this->get_raw_buffer())};
+                PRINT_BARRAY(p, len(), 0);
+                break;
+            }
+            case INT32: {
+                auto const p{static_cast<int32_t *>(this->get_raw_buffer())};
+                PRINT_BARRAY(p, len(), 0);
+                break;
+            }
+            case INT64: {
+                auto const p{static_cast<int64_t *>(this->get_raw_buffer())};
+                PRINT_BARRAY(p, len(), 0);
+                break;
+            }
+            case FLOAT32: {
+                auto const p{static_cast<float *>(this->get_raw_buffer())};
+                PRINT_BARRAY(p, len(), 3);
+                break;
+            }
+            case FLOAT64: {
+                auto const p{static_cast<double *>(this->get_raw_buffer())};
+                PRINT_BARRAY(p, len(), 5);
+                break;
+            }
+            case INVALID:
+                return;
+        }
+
+    }
 }

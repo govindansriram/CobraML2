@@ -76,7 +76,8 @@ namespace cobraml::core {
         Array(const Array &other);
         Array& operator=(const Array& other);
         [[nodiscard]] size_t len() const;
-        virtual void deep_copy(Array &other);
+        [[nodiscard]] virtual Array deep_copy() const;
+        virtual void print(bool show_description) const;
 
         /**
          * @return the dtype of the matrix

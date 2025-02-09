@@ -26,6 +26,10 @@ TEST(ArrayTestFunctionals, test_dtype) {
     ASSERT_THROW(
         cobraml::core::Array(10, cobraml::core::Device::CPU, cobraml::core::Dtype::INVALID),
         std::runtime_error);
+
+    ASSERT_THROW(
+        cobraml::core::Array(0, cobraml::core::Device::CPU, cobraml::core::Dtype::INVALID),
+        std::runtime_error);
 }
 
 TEST(ArrayTestFunctionals, test_device) {
@@ -57,17 +61,23 @@ TEST(ArrayTestFunctionals, test_default_constructor) {
     ASSERT_EQ(arr.len(), 0);
 }
 
-#define CHECK_EQUAL(pointer_1, pointer_2, length, ref) \
+#define CHECK_EQUAL(pointer_1, pointer_2, length, ref) {\
     for(size_t i = 0; i < length; ++i){\
         if(pointer_1[i] != pointer_2[i]){\
             ref = false;\
         }\
     }\
-    ref = true;\
+}
+
+TEST(ArrayTestFunctionals, test_invalid_buffer) {
+    cobraml::core::Array const arr;
+    ASSERT_THROW(cobraml::core::get_buffer<int8_t>(arr), std::runtime_error);
+}
 
 TEST(ArrayTestFunctionals, from_vector) {
     std::vector const vec{1, 2, 3, 4, 5, 6};
     std::vector const vec2{1.5f, 2.22f, 3.33f, 4.26f, 5.12f, 6.0f};
+    std::vector<int8_t> vec3{};
 
     const cobraml::core::Array i_arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::INT32)};
     const cobraml::core::Array f_arr{from_vector(vec2, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32)};
@@ -83,13 +93,15 @@ TEST(ArrayTestFunctionals, from_vector) {
 
     const auto i_buff = cobraml::core::get_buffer<int>(i_arr);
     const auto f_buff = cobraml::core::get_buffer<float>(f_arr);
-    bool flag;
+    bool flag{true};
 
     CHECK_EQUAL(vec.data(), i_buff, vec.size(), flag);
     ASSERT_EQ(flag, true);
 
     CHECK_EQUAL(vec2.data(), f_buff, vec2.size(), flag);
     ASSERT_EQ(flag, true);
+
+    ASSERT_THROW(from_vector(vec3, cobraml::core::Device::CPU, cobraml::core::Dtype::INT8), std::runtime_error);
 }
 
 TEST(ArrayTestFunctionals, test_indexing) {
@@ -126,7 +138,7 @@ TEST(ArrayTestFunctionals, test_copy_constructor) {
 
     const auto buff_1 = cobraml::core::get_buffer<int>(arr);
     const auto buff_2 = cobraml::core::get_buffer<int>(arr2);
-    bool flag;
+    bool flag{true};
 
     CHECK_EQUAL(buff_1, buff_2, vec.size(), flag);
     ASSERT_EQ(flag, true);
@@ -144,7 +156,7 @@ TEST(ArrayTestFunctionals, test_copy_assigment) {
 
     const auto buff_1 = cobraml::core::get_buffer<float>(arr);
     const auto buff_2 = cobraml::core::get_buffer<float>(arr_2);
-    bool flag;
+    bool flag{true};
 
     CHECK_EQUAL(buff_1, buff_2, vec.size(), flag);
     ASSERT_EQ(arr.len(), arr_2.len());
@@ -153,4 +165,36 @@ TEST(ArrayTestFunctionals, test_copy_assigment) {
     ASSERT_EQ(flag, true);
 }
 
+TEST(ArrayTestFunctionals, test_deep_copy) {
+    std::vector const vec{1.5f, 2.22f, 3.33f, 4.26f, 5.12f, 6.0f, 7.0f};
+    const cobraml::core::Array arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32)};
 
+    const cobraml::core::Array arr_2{arr.deep_copy()};
+    arr[6].set_item(8.8f);
+
+    for (size_t i = 0; i < arr.len() - 1; ++i) {
+        ASSERT_EQ(arr[i].item<float>(), arr_2[i].item<float>());
+    }
+
+    ASSERT_NE(arr[vec.size() - 1].item<float>(), arr_2[vec.size() - 1].item<float>());
+
+    const cobraml::core::Array arr_3;
+
+    ASSERT_THROW(auto const arr_4 = arr_3.deep_copy(), std::runtime_error);
+
+    auto const arr_5 = arr[3];
+
+    ASSERT_EQ(arr_5.item<float>(), arr[3].item<float>());
+}
+
+
+TEST(ArrayTestFunctionals, test_print) {
+    std::vector const vec{1.52345f, 2.2289761f, 0.0000333f, 4.26f, 1231235.1222f, 6.0000001f, 0.0f};
+    const cobraml::core::Array arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32)};
+    arr.print(true);
+
+    arr[5].print(true);
+
+    const cobraml::core::Array arr_2;
+    ASSERT_THROW(arr_2.print(true), std::runtime_error);
+}

@@ -8,10 +8,13 @@
 #include <iostream>
 #include "enums.h"
 
+/**
+ * TODO: double check all matrix functions, then add print, then start tensor functions.
+ */
 namespace cobraml::core {
 
     Matrix::Matrix(size_t const rows, size_t const columns, Device const device, Dtype const dtype):
-        Array(rows * columns, device, dtype),
+        Barray(rows * columns, device, dtype),
         rows(rows),
         columns(columns){
         is_invalid(dtype);
@@ -24,8 +27,8 @@ namespace cobraml::core {
         return sh;
     }
 
-    Matrix::Matrix(Array const &other): Array(other), rows(0), columns(0) {}
-    Matrix::Matrix(Matrix const &other): Array(other), rows(other.rows), columns(other.columns) {}
+    Matrix::Matrix(Barray const &other): Barray(other), rows(0), columns(0) {}
+    Matrix::Matrix(Matrix const &other): Barray(other), rows(other.rows), columns(other.columns) {}
 
 
     Matrix::~Matrix() = default;
@@ -74,128 +77,74 @@ namespace cobraml::core {
 
     Matrix::Matrix(): rows(0), columns(0) {}
 
-    void print_num(void *buffer, Dtype const dtype) {
-        switch (dtype) {
-            case INT8: {
-                const auto num = *static_cast<char *>(buffer);
-                std::cout << static_cast<int>(num);
-                return;
-            }
-            case INT16: {
-                std::cout << *static_cast<int16_t *>(buffer);
-                return;
-            }
-            case INT32: {
-                std::cout << *static_cast<int32_t *>(buffer);
-                return;
-            }
-            case INT64: {
-                std::cout << *static_cast<int64_t *>(buffer);
-                return;
-            }
-            case FLOAT32: {
-                std::cout << *static_cast<float *>(buffer);
-                return;
-            }
-            case FLOAT64: {
-                std::cout << *static_cast<double *>(buffer);
-                return;
-            }
-            case INVALID: {
-                is_invalid(dtype);
-            }
-        }
-    }
-
     Matrix& Matrix::operator=(const Matrix &other) {
         if (this == &other) {
             return *this;
         }
 
-        // if (!(this->get_shape() == other.get_shape())) {
-        //     throw std::runtime_error("matrices are not the same shape");
-        // }
-
-        Array::operator=(other);
+        Barray::operator=(other);
         this->rows = other.rows;
         this->columns = other.columns;
 
         return *this;
     }
 
-    void print_details(Device const device, Dtype const dtype, size_t const rows, size_t const columns) {
-        std::cout << "############## Details ##############\n";
-        std::cout << "Shape: " << "(" << rows << ", " << columns << ")" << '\n';
-        std::cout << "Device: " << device_to_string(device) << '\n';
-        std::cout << "Dtype: " << dtype_to_string(dtype) << '\n';
-        std::cout << "#####################################\n";
+     std::string Matrix::generate_description() const {
+        std::stringstream ss;
+        auto [rows, columns]{this->get_shape()};
+        ss << "############## Details ##############\n";
+        ss << "Shape: " << "(" << rows << ", " << columns << ")" << '\n';
+        ss << "Device: " << device_to_string(this->get_device()) << '\n';
+        ss << "Dtype: " << dtype_to_string(this->get_dtype()) << '\n';
+        ss << "#####################################\n";
+
+        return ss.str();
     }
 
-    // void Matrix::print(bool const hide_middle) const {
-    //     print_details(impl->device, impl->dtype, rows, columns);
-    //     unsigned char const shift = dtype_to_bytes(impl->dtype);
-    //     auto dec3 = [this](size_t const x, size_t &start) {
-    //         if (x == 1)
-    //             start = rows - 3;
-    //     };
-    //
-    //     std::cout << "[\n";
-    //     for (size_t x = 0; x < 2; ++x) {
-    //         size_t start = 0;
-    //         size_t end = rows;
-    //
-    //         if (rows > 20 && hide_middle) {
-    //             dec3(x, start);
-    //             end = start + 3;
-    //         }
-    //
-    //         for (; start < end; ++start) {
-    //             std::cout << "   [";
-    //
-    //             for (size_t y = 0; y < 2; ++y) {
-    //                 size_t start_inner = 0;
-    //                 size_t end_inner = columns;
-    //
-    //                 bool inner_hiding{false};
-    //
-    //                 if (columns > 20 && hide_middle) {
-    //                     dec3(y, start_inner);
-    //                     end_inner = start_inner + 3;
-    //                     inner_hiding = true;
-    //                 }
-    //
-    //                 for (; start_inner < end_inner; ++start_inner) {
-    //                     std::cout << std::fixed << std::setprecision(5);
-    //
-    //                     auto buff = static_cast<char *>(impl->get_raw_buffer());
-    //                     buff += (start * columns + start_inner) * shift;
-    //                     print_num(buff, impl->dtype);
-    //
-    //                     if (start_inner != end_inner - 1 || (y == 0 && inner_hiding)) {
-    //                         std::cout << ", ";
-    //                     }
-    //                 }
-    //
-    //                 if (columns <= 20 || !hide_middle)
-    //                     break;
-    //
-    //                 if (y == 0) {
-    //                     std::cout << "..., ";
-    //                 }
-    //             }
-    //
-    //             std::cout << "]";
-    //             std::cout << "\n";
-    //         }
-    //
-    //         if (rows <= 20 || !hide_middle)
-    //             break;
-    //
-    //         if (x == 0) {
-    //             std::cout << "   ..." << "\n";
-    //         }
-    //     }
-    //
-    //     std::cout << "]\n\n";
-    // }
+    std::string Matrix::to_string(int8_t const gap) const {
+        std::stringstream spaces;
+
+        for (int8_t i{0}; i < gap; ++i) {
+            spaces << " ";
+        }
+
+        auto const sp1_str = spaces.str();
+
+        std::stringstream obj_str;
+        obj_str << sp1_str << "[\n";
+
+        if (rows == 1) {
+            Barray vec{(*this)};
+            obj_str << vec.to_string(static_cast<int8_t>(gap + 4));
+            obj_str << sp1_str << "]\n";
+            return obj_str.str();
+        }
+
+        size_t stop{this->rows / 2};
+        size_t start_1{stop};
+        bool print_dots{};
+
+        if (this->get_shape().rows > PRINT_LIMIT) {
+            print_dots = true;
+            stop = 3;
+            start_1 = this->rows - 3;
+        }
+
+        for (size_t i = 0; i < stop; ++i) {
+            Barray vec{(*this)[i]};
+            obj_str << vec.to_string(static_cast<int8_t>(gap + 4));
+        }
+
+        if (print_dots)
+            obj_str << sp1_str << "    " << "..." << std::endl;
+
+        for (; start_1 < this->rows; ++start_1) {
+            Barray vec{(*this)[start_1]};
+            obj_str << vec.to_string(static_cast<int8_t>(gap + 4));
+        }
+
+        obj_str << sp1_str << "]\n";
+
+        return obj_str.str();
+    }
 }

@@ -23,7 +23,7 @@ namespace cobraml::core {
         return "";
     }
 
-    std::string device_to_string(Device device) {
+    std::string device_to_string(const Device device) {
         switch (device) {
             case CPU: return "CPU";
             case GPU: return "GPU";

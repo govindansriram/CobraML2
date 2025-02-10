@@ -102,7 +102,7 @@ for exe in $pattern; do
             truncate -s 0 "$CONFIG_PTH"
             echo "$ADDITIONAL_COMPILE_OPTIONS" >> "$CONFIG_PTH"
             echo "$THREAD_COUNT" >> "$CONFIG_PTH"
-            ./"$exe" --benchmark_counters_tabular=true --benchmark_format=console --benchmark_out="$REPORT_PTH"
+            ./"$exe" --benchmark_counters_tabular=true --benchmark_format=console --benchmark_out="$REPORT_PTH" --benchmark_filter="BatchedDotProductAll"
         else
             ./"$exe"
         fi

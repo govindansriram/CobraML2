@@ -21,9 +21,11 @@ set(SOURCES
         src/math_dis.cpp
         src/barray.cpp
         include/barray.h
+        include/tensor.h
+        src/tensor.cpp
 )
 
-list(APPEND CMAKE_PREFIX_PATH "/opt/intel/oneapi/tbb/latest/lib/cmake") # path to intel onetbb
+#list(APPEND CMAKE_PREFIX_PATH "/opt/intel/oneapi/tbb/latest/lib/cmake") # path to intel onetbb
 
 add_library(CmlContentBasedFiltering SHARED ${SOURCES})
 
@@ -53,6 +55,7 @@ endif()
 
 option(ENABLE_TESTING "Enable testing-specific compile options" ON)
 option(IS_THREAD "Test for thread related issues" OFF)
+option(VTUNE "Test for thread related issues" OFF)
 
 if(DEFINED THREAD_COUNT)
     add_definitions(-DNUM_THREADS=${THREAD_COUNT})
@@ -71,6 +74,7 @@ if(ENABLE_TESTING)
             -Wsign-conversion
             -Werror
             -fopenmp
+            -mavx2
     )
 
     target_compile_options(CmlContentBasedFiltering PRIVATE ${COMMON_COMPILE_OPTIONS})
@@ -96,13 +100,17 @@ if(ENABLE_TESTING)
 
     add_executable(test_matrix tests/test_matrix.cpp)
     add_executable(test_array tests/test_barray.cpp)
+    add_executable(test_tensor tests/test_tensor.cpp)
     add_executable(test_enums tests/test_enums.cpp)
 
     include(GoogleTest)
-    gtest_discover_tests(test_matrix test_enums)
+    gtest_discover_tests(test_matrix test_enums test_array test_tensor)
 
     target_compile_options(test_matrix PRIVATE ${COMMON_COMPILE_OPTIONS})
     target_compile_options(test_enums PRIVATE ${COMMON_COMPILE_OPTIONS})
+    target_compile_options(test_tensor PRIVATE ${COMMON_COMPILE_OPTIONS})
+    target_compile_options(test_array PRIVATE ${COMMON_COMPILE_OPTIONS})
+
 
     target_link_libraries(
             test_matrix
@@ -123,15 +131,32 @@ if(ENABLE_TESTING)
             CmlContentBasedFiltering
     )
 
+    target_link_libraries(
+            test_tensor
+            GTest::gtest_main
+            CmlContentBasedFiltering
+    )
+
 else ()
 
     find_package(benchmark REQUIRED)
 
-    set(COMMON_COMPILE_OPTIONS
+    if(VTUNE)
+        set(COMMON_COMPILE_OPTIONS
+            -g
             -O2
+            -mavx2
             -flto
             -fopenmp
-    )
+        )
+    else ()
+        set(COMMON_COMPILE_OPTIONS
+                -O2
+                -flto
+                -mavx2
+                -fopenmp
+        )
+    endif ()
 
     # Append additional flags if provided via the command line
     if(DEFINED ADDITIONAL_COMPILE_OPTIONS)

@@ -11,6 +11,7 @@ namespace cobraml::core {
 
     class Tensor final : public Barray{
         std::vector<size_t> shape;
+        std::string generate_description() const override;
 
     public:
 
@@ -26,6 +27,7 @@ namespace cobraml::core {
         Tensor(Tensor const &other);
         Tensor& operator=(const Tensor& other);
         Tensor operator[] (size_t index) const;
+        std::string to_string(int8_t gap) const override;
 
         /**
          * @return True if tensor qualifies as a matrix

@@ -89,31 +89,35 @@ namespace cobraml::core {
         return *this;
     }
 
-    void print_description(Matrix const * mat) {
-        auto [rows, columns]{mat->get_shape()};
-        std::cout << "############## Details ##############\n";
-        std::cout << "Shape: " << "(" << rows << ", " << columns << ")" << '\n';
-        std::cout << "Device: " << device_to_string(mat->get_device()) << '\n';
-        std::cout << "Dtype: " << dtype_to_string(mat->get_dtype()) << '\n';
-        std::cout << "#####################################\n";
+     std::string Matrix::generate_description() const {
+        std::stringstream ss;
+        auto [rows, columns]{this->get_shape()};
+        ss << "############## Details ##############\n";
+        ss << "Shape: " << "(" << rows << ", " << columns << ")" << '\n';
+        ss << "Device: " << device_to_string(this->get_device()) << '\n';
+        ss << "Dtype: " << dtype_to_string(this->get_dtype()) << '\n';
+        ss << "#####################################\n";
+
+        return ss.str();
     }
 
-    void Matrix::print(bool const show_description) const {
-        if (this->get_dtype() == INVALID) {
-            throw std::runtime_error("cannot print matrix with invalid dtype");
+    std::string Matrix::to_string(int8_t const gap) const {
+        std::stringstream spaces;
+
+        for (int8_t i{0}; i < gap; ++i) {
+            spaces << " ";
         }
 
-        if (show_description)
-            print_description(this);
+        auto const sp1_str = spaces.str();
 
-        std::cout << "[\n";
+        std::stringstream obj_str;
+        obj_str << sp1_str << "[\n";
 
         if (rows == 1) {
-            std::cout << "    ";
             Barray vec{(*this)};
-            vec.print(false);
-            std::cout << "]";
-            return;
+            obj_str << vec.to_string(static_cast<int8_t>(gap + 4));
+            obj_str << sp1_str << "]\n";
+            return obj_str.str();
         }
 
         size_t stop{this->rows / 2};
@@ -128,19 +132,19 @@ namespace cobraml::core {
 
         for (size_t i = 0; i < stop; ++i) {
             Barray vec{(*this)[i]};
-            std::cout << "    ";
-            vec.print(false);
+            obj_str << vec.to_string(static_cast<int8_t>(gap + 4));
         }
 
         if (print_dots)
-            std::cout << "    ..." << std::endl;
+            obj_str << sp1_str << "    " << "..." << std::endl;
 
         for (; start_1 < this->rows; ++start_1) {
-            std::cout << "    ";
             Barray vec{(*this)[start_1]};
-            vec.print(false);
+            obj_str << vec.to_string(static_cast<int8_t>(gap + 4));
         }
 
-        std::cout << "]";
+        obj_str << sp1_str << "]\n";
+
+        return obj_str.str();
     }
 }

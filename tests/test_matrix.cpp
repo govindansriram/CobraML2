@@ -174,15 +174,15 @@ TEST(MatrixTestFunc, test_print) {
     std::vector<std::vector<float> > const vec{{0.0f, 1.0f, 2.0f}, {3.0f, 4.0f, 5.0f}, {6.0f, 7.0f, 8.0f}};
     const auto mat{from_vector(vec, cobraml::core::CPU)};
 
-    mat.print(true);
+    std::cout << mat;
     std::cout << "\n";
 
     const cobraml::core::Matrix mat2(40, 40, cobraml::core::CPU, cobraml::core::INT8);
-    mat2.print(true);
+    std::cout << mat2;
     std::cout << "\n";
 
     const cobraml::core::Matrix mat3(1, 10, cobraml::core::CPU, cobraml::core::INT8);
-    mat3.print(true);
+    std::cout << mat3;
     std::cout << "\n";
 
 }

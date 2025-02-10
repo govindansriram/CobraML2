@@ -155,8 +155,8 @@ namespace cobraml::core {
         return ret;
     }
 
-#define PRINT_BARRAY(p_arr, length, precision){\
-    std::cout << "[";\
+#define PRINT_BARRAY(p_arr, length, precision, stream){\
+    stream << "[";\
     size_t stop = length / 2;\
     size_t start2 = stop;\
     bool middle_dots{};\
@@ -166,33 +166,38 @@ namespace cobraml::core {
         stop = 3;\
     }\
     for (size_t i = 0; i < stop; ++i) {\
-        std::cout << std::fixed << std::setprecision(precision) << p_arr[i] << ", ";\
+        stream << std::fixed << std::setprecision(precision) << p_arr[i] << ", ";\
     }\
     if(middle_dots){\
-        std::cout << "... ";\
+        stream << "... ";\
     }\
     for (; start2 < length - 1; ++start2) {\
-        std::cout << std::fixed << std::setprecision(precision) << p_arr[start2] << ", ";\
+        stream << std::fixed << std::setprecision(precision) << p_arr[start2] << ", ";\
     }\
-    std::cout << std::fixed << std::setprecision(precision) << p_arr[start2] << "]\n";\
+    stream << std::fixed << std::setprecision(precision) << p_arr[start2] << "]\n";\
 }
 
-    void print_description(Barray const *arr) {
-        std::cout << "############## Details ##############\n";
-        std::cout << "Length: " << arr->len() << "\n";
-        std::cout << "Device: " << device_to_string(arr->get_device()) << "\n";
-        std::cout << "Dytpe: " << dtype_to_string(arr->get_dtype()) << "\n";
-        std::cout << "#####################################\n";
+    std::string Barray::generate_description() const{
+        std::stringstream ss;
+        ss << "############## Details ##############\n";
+        ss << "Length: " << this->len() << "\n";
+        ss << "Device: " << device_to_string(this->get_device()) << "\n";
+        ss << "Dytpe: " << dtype_to_string(this->get_dtype()) << "\n";
+        ss << "#####################################\n";
+
+        return ss.str();
     }
 
-    void Barray::print(bool const show_description) const{
-
+    std::string Barray::to_string(int8_t gap) const{
         if (this->get_dtype() == INVALID) {
-            throw std::runtime_error("cannot print barray with invalid dtype");
+            throw std::runtime_error("cannot convert barray with invalid dtype to a string");
         }
 
-        if (show_description)
-            print_description(this);
+        std::stringstream ss;
+
+        for (int8_t i{0}; i < gap; ++i) {
+            ss << " ";
+        }
 
         switch (this->impl->dtype) {
             case INT8: {
@@ -200,38 +205,46 @@ namespace cobraml::core {
                 const auto copy = new int16_t[this->len()];
                 for (size_t i = 0; i < len(); ++i)
                     copy[i] = p[i];
-                PRINT_BARRAY(copy, len(), 0);
+                PRINT_BARRAY(copy, len(), 0, ss);
                 delete[] copy;
                 break;
             }
             case INT16: {
                 auto const p{static_cast<int16_t *>(this->get_raw_buffer())};
-                PRINT_BARRAY(p, len(), 0);
+                PRINT_BARRAY(p, len(), 0, ss);
                 break;
             }
             case INT32: {
                 auto const p{static_cast<int32_t *>(this->get_raw_buffer())};
-                PRINT_BARRAY(p, len(), 0);
+                PRINT_BARRAY(p, len(), 0, ss);
                 break;
             }
             case INT64: {
                 auto const p{static_cast<int64_t *>(this->get_raw_buffer())};
-                PRINT_BARRAY(p, len(), 0);
+                PRINT_BARRAY(p, len(), 0, ss);
                 break;
             }
             case FLOAT32: {
                 auto const p{static_cast<float *>(this->get_raw_buffer())};
-                PRINT_BARRAY(p, len(), 3);
+                PRINT_BARRAY(p, len(), 3, ss);
                 break;
             }
             case FLOAT64: {
                 auto const p{static_cast<double *>(this->get_raw_buffer())};
-                PRINT_BARRAY(p, len(), 5);
+                PRINT_BARRAY(p, len(), 5, ss);
                 break;
             }
             case INVALID:
-                return;
+                throw std::runtime_error("cannot convert barray with invalid dtype to a string");;
         }
 
+        return ss.str();
+    }
+
+    std::ostream &operator<<(std::ostream &outs, const Barray &b){
+        const std::string str = b.to_string(0);
+        outs << b.generate_description();
+        outs << str;
+        return outs;
     }
 }

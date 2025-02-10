@@ -191,13 +191,13 @@ TEST(ArrayTestFunctionals, test_deep_copy) {
 TEST(ArrayTestFunctionals, test_print) {
     std::vector const vec{1.52345f, 2.2289761f, 0.0000333f, 4.26f, 1231235.1222f, 6.0000001f, 0.0f};
     const cobraml::core::Barray arr{from_vector(vec, cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT32)};
-    arr.print(true);
+    std::cout << arr;
 
-    arr[5].print(true);
+    std::cout << arr[5];
 
     const cobraml::core::Barray arr_2;
-    ASSERT_THROW(arr_2.print(true), std::runtime_error);
+    ASSERT_THROW(std::cout << arr_2, std::runtime_error);
 
     cobraml::core::Barray const b(40, cobraml::core::CPU, cobraml::core::INT8);
-    b.print(true);
+    std::cout << b;
 }

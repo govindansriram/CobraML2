@@ -18,7 +18,7 @@ namespace cobraml::core {
 
         // private constructor for stuff such as tensor to Matrix
         explicit Matrix(Barray const &other);
-
+        [[nodiscard]] std::string generate_description() const override;
         friend class Tensor;
     public:
         struct Shape {
@@ -40,6 +40,7 @@ namespace cobraml::core {
         Matrix(Matrix const &other);
         Matrix& operator=(const Matrix& other);
         Matrix operator[] (size_t index) const;
+        [[nodiscard]] std::string to_string(int8_t gap) const override;
 
         /**
          * @return True if matrix qualifies as a vector
@@ -55,12 +56,6 @@ namespace cobraml::core {
         * @return the shape of the matrix
         */
         [[nodiscard]] Shape get_shape() const;
-
-        /**
-         * prints the contents of the matrix in tabular format
-         * @param show_description
-         */
-        void print(bool show_description) const override;
 
         ~Matrix() override;
 

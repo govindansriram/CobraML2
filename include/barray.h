@@ -72,6 +72,8 @@ namespace cobraml::core {
             const void * alpha,
             const void * beta);
 
+        [[nodiscard]] virtual std::string generate_description() const;
+
     public:
         Barray(size_t total_items, Device device, Dtype dtype);
         virtual ~Barray();
@@ -80,7 +82,7 @@ namespace cobraml::core {
         Barray& operator=(const Barray& other);
         [[nodiscard]] size_t len() const;
         [[nodiscard]] virtual Barray deep_copy() const;
-        virtual void print(bool show_description) const;
+        [[nodiscard]] virtual std::string to_string(int8_t gap) const;
 
         /**
          * @return the dtype of the matrix
@@ -102,6 +104,8 @@ namespace cobraml::core {
 
         template<typename T>
         friend Barray from_vector(std::vector<T> vec, Device device, Dtype dtype);
+
+        friend std::ostream& operator<<(std::ostream& outs, const Barray& b);
 
         Barray operator[](size_t index) const;
 

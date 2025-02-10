@@ -83,6 +83,8 @@ TEST(TensorTestFunc, index_operator) {
     cobraml::core::Tensor const tens{from_vector(f, {2, 2, 2}, cobraml::core::CPU)};
     ASSERT_FALSE(tens.is_matrix());
 
+    // std::cout << tens;
+
     for (size_t i = 0; i < 2; ++i) {
         cobraml::core::Tensor const m = tens[i];
         ASSERT_TRUE(m.is_matrix());
@@ -101,6 +103,14 @@ TEST(TensorTestFunc, index_operator) {
         }
     }
 
+    ASSERT_THROW(tens[1][1][3], std::out_of_range);
+    ASSERT_THROW(tens[2][0][1], std::out_of_range);
+    ASSERT_THROW(tens[0][2][1], std::out_of_range);
+
+    cobraml::core::Tensor empty;
+    ASSERT_THROW(empty[0], std::runtime_error);
+
+
     cobraml::core::Tensor const t1 = tens[0];
     ASSERT_EQ(t1.len(), 4);
 
@@ -108,4 +118,18 @@ TEST(TensorTestFunc, index_operator) {
     auto [rows, columns] = mat.get_shape();
     ASSERT_EQ(2, rows);
     ASSERT_EQ(2, columns);
+}
+
+TEST(TensorTestFunc, print_tensor) {
+    std::vector const f{1.5f, 2.2f, 3.18f, 2.789f, 1.378f, -2.567f, 9.000f, 1.f};
+    cobraml::core::Tensor const tens{from_vector(f, {2, 2, 2}, cobraml::core::CPU)};
+    ASSERT_FALSE(tens.is_matrix());
+    std::cout << tens;
+
+    cobraml::core::Tensor const tens2({32, 3, 64, 64}, cobraml::core::CPU, cobraml::core::INT64);
+    std::cout << tens2;
+
+    cobraml::core::Tensor const tens3({64, 64}, cobraml::core::CPU, cobraml::core::INT64);
+    ASSERT_TRUE(tens3.is_matrix());
+    std::cout << tens3;
 }

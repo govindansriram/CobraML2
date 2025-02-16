@@ -7,6 +7,8 @@
 #include "enums.h"
 
 TEST(DTYPE, validity) {
+    const auto a = new int[10];
+    std::cout << a;
     ASSERT_THROW(cobraml::core::INVALID < cobraml::core::INT8, std::runtime_error);
 }
 

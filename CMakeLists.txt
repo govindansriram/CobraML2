@@ -108,7 +108,6 @@ endif ()
 ################################################################
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    message(STATUS "Compile options for here: ${TEST_COMPILE_OPTIONS}")
     target_compile_options(cobraml PRIVATE ${TEST_COMPILE_OPTIONS})
 elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(cobraml PRIVATE ${BENCH_COMPILE_OPTIONS})

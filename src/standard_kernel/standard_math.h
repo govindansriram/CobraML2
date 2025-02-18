@@ -98,6 +98,8 @@ namespace cobraml::core {
         gemv_parallel_simd(matrix, vector, dest, alpha, beta, rows, columns);
     }
 
+#ifdef AVX2
+
     template<>
     void gemv_manual<float>(
         const float *matrix,
@@ -117,6 +119,8 @@ namespace cobraml::core {
         double beta,
         size_t rows,
         size_t columns);
+
+#endif
 
 #ifdef BENCHMARK
 

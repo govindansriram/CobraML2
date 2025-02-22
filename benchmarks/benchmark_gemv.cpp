@@ -55,9 +55,10 @@ namespace {
     }
 
     BENCHMARK_REGISTER_F(CPUFixture, BatchedDotProductAll)
-    ->Args({5000, 5000, 0})
-    ->Args({5000, 5000, 1})
+    // ->Args({5000, 5000, 0})
+    // ->Args({5000, 5000, 1})
     ->Args({5000, 5000, 2})
+    ->Args({5000, 5000, 3})
     ->Args({5000, 5000, 3})
     ->Threads(1);
 }

@@ -98,6 +98,18 @@ namespace cobraml::core {
         gemv_parallel_simd(matrix, vector, dest, alpha, beta, rows, columns);
     }
 
+    template<typename NumType>
+    void gemv_manual2(
+        const NumType *matrix,
+        const NumType *vector,
+        NumType *dest,
+        const NumType alpha,
+        const NumType beta,
+        const size_t rows,
+        const size_t columns) {
+        gemv_parallel_simd(matrix, vector, dest, alpha, beta, rows, columns);
+    }
+
 #ifdef AVX2
 
     template<>
@@ -112,6 +124,16 @@ namespace cobraml::core {
 
     template<>
     void gemv_manual<double>(
+        const double *matrix,
+        const double *vector,
+        double *dest,
+        double alpha,
+        double beta,
+        size_t rows,
+        size_t columns);
+
+    template<>
+    void gemv_manual2<double>(
         const double *matrix,
         const double *vector,
         double *dest,
@@ -150,6 +172,10 @@ namespace cobraml::core {
                 gemv_manual(mat, vec, dest, alpha, beta, rows, columns);
                 return;
             }
+            case 4: {
+                gemv_manual2(mat, vec, dest, alpha, beta, rows, columns);
+                return;
+            }
             default: {
                 throw std::runtime_error("invalid gemv type provided");
             }
@@ -166,7 +192,7 @@ namespace cobraml::core {
         const NumType beta,
         size_t const rows,
         size_t const columns) {
-        gemv_manual(mat, vec, dest, alpha, beta, rows, columns);
+        gemv_manual2(mat, vec, dest, alpha, beta, rows, columns);
     }
 #endif
 

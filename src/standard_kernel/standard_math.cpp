@@ -7,7 +7,11 @@
 #include "enums.h"
 #include <cstring>
 #include <iostream>
+
+#ifdef AVX2
 #include <immintrin.h>
+#endif
+
 #include <cassert>
 #include <cmath>
 
@@ -114,43 +118,99 @@ namespace cobraml::core {
         float const beta,
         size_t const rows,
         size_t const columns) {
+
         size_t start;
-        size_t const row_count = get_row_count(rows, SKIP);
-        constexpr size_t skip = get_block_len<float>();
+        size_t const row_count{get_row_count(rows, SKIP)}; // get rows w/o remainders
+        constexpr size_t skip{get_block_len<float>()}; // SIMD vector length for float dtype
+        constexpr size_t jump{UNROLLS * skip}; // when unrolled multiple SIMD operations are conducted this number covers
+        // the amount
+        const size_t column_count{columns / jump}; // the amount of columns interacted with
 
+#ifndef BENCHMARK
+        assert(reinterpret_cast<uintptr_t>(matrix) % 32 == 0);
+        assert(reinterpret_cast<uintptr_t>(vector) % 32 == 0);
+        assert(reinterpret_cast<uintptr_t>(dest) % 32 == 0);
 
-#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
+        // std::cout << "col count " << column_count << std::endl;;
+        // std::cout << "columns " << columns << std::endl;
+        // std::cout << "row count " << row_count << std::endl;;
+        // std::cout << "rows " << rows << std::endl;
+#endif
+
+#pragma omp parallel for default(none) shared(std::cout, column_count, alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
         for (start = 0; start < row_count / SKIP; ++start) {
-            float partial_1 = 0;
-            float partial_2 = 0;
+            float partial_1{0};
+            float partial_2{0};
 
-            const size_t row_start = start * SKIP;
+            const size_t row_start{start * SKIP};
 
-            for (size_t i = 0; i < columns; i += skip) {
-                __m256 const vector_block = _mm256_load_ps(&vector[i]);
-                __m256 const mat_block_1 = _mm256_load_ps(&matrix[start * columns + i]);
-                __m256 const mat_block_2 = _mm256_load_ps(&matrix[(start + 1) * columns + i]);
+            for (size_t i = 0; i < column_count; i += 1) {
+                alignas(32) float temp1[skip];
+                alignas(32) float temp2[skip];
 
-                __m256 const result1 = _mm256_mul_ps(vector_block, mat_block_1);
-                __m256 const result2 = _mm256_mul_ps(vector_block, mat_block_2);
+                __m256 const vector_block1{_mm256_load_ps(&vector[i * jump])};
+                __m256 const vector_block2{_mm256_load_ps(&vector[i * jump + skip])};
 
-                alignas(256) float temp1[skip];
-                alignas(256) float temp2[skip];
+                __m256 const mat_block_1_1{_mm256_loadu_ps(&matrix[row_start * columns + (i * jump)])};
+                __m256 const mat_block_1_2{_mm256_loadu_ps(&matrix[row_start * columns + (i * jump) + skip])};
+                __m256 const mat_block_2_1{_mm256_loadu_ps(&matrix[(row_start + 1) * columns + (i * jump)])};
+                __m256 const mat_block_2_2{_mm256_loadu_ps(&matrix[(row_start + 1) * columns + (i * jump) + skip])};
+
+                __m256 result1_1{_mm256_mul_ps(vector_block1, mat_block_1_1)};
+                __m256 result2_1{_mm256_mul_ps(vector_block1, mat_block_2_1)};
+                __m256 const result1_2{_mm256_mul_ps(vector_block2, mat_block_1_2)};
+                __m256 const result2_2{_mm256_mul_ps(vector_block2, mat_block_2_2)};
+
+                result1_1 = _mm256_add_ps(result1_1, result1_2);
+                result2_1 = _mm256_add_ps(result2_1, result2_2);
+
+                _mm256_store_ps(temp1, result1_1);
+                _mm256_store_ps(temp2, result2_1);
+
+                partial_1 += temp1[0] + temp1[1] + temp1[2] + temp1[3] + temp1[4] + temp1[5] + temp1[6] + temp1[7];
+                partial_2 += temp2[0] + temp2[1] + temp2[2] + temp2[3] + temp2[4] + temp2[5] + temp2[6] + temp2[7];
+            }
+
+            // cleanup remainders
+            for (size_t i = column_count * jump; i < columns; i += skip) {
+                __m256 mat_block_1;
+                __m256 mat_block_2;
+                __m256 const vector_block{_mm256_load_ps(&vector[i])};
+
+                if (i + skip > columns) {
+                    size_t const amt = columns - i;
+                    alignas(32) float block_1[skip]{};
+                    alignas(32) float block_2[skip]{};
+
+                    std::memcpy(block_1, &matrix[row_start * columns + i], amt * 4);
+                    std::memcpy(block_2, &matrix[(row_start + 1) * columns + i], amt * 4);
+
+                    mat_block_1 = _mm256_load_ps(block_1);
+                    mat_block_2 = _mm256_load_ps(block_2);
+                } else {
+                    mat_block_1 = _mm256_loadu_ps(&matrix[row_start * columns + i]);
+                    mat_block_2 = _mm256_loadu_ps(&matrix[(row_start + 1) * columns + i]);
+                }
+
+                __m256 const result1{_mm256_mul_ps(vector_block, mat_block_1)};
+                __m256 const result2{_mm256_mul_ps(vector_block, mat_block_2)};
+
+                alignas(32) float temp1[skip];
+                alignas(32) float temp2[skip];
 
                 _mm256_store_ps(temp1, result1);
                 _mm256_store_ps(temp2, result2);
 
                 partial_1 += temp1[0] + temp1[1] + temp1[2] + temp1[3] + temp1[4] + temp1[5] + temp1[6] + temp1[7];
-                // test with haddps
                 partial_2 += temp2[0] + temp2[1] + temp2[2] + temp2[3] + temp2[4] + temp2[5] + temp2[6] + temp2[7];
-                // test with haddps
             }
 
             dest[row_start] = dest[row_start] * beta + partial_1 * alpha;
             dest[row_start + 1] = dest[row_start + 1] * beta + partial_2 * alpha;
         }
 
-#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, rows, row_count, columns) private(start) schedule(dynamic)
+
+#pragma omp parallel for default(none) shared(std::cout, alpha, beta, matrix, vector, dest, rows, row_count, columns) private(start) schedule(dynamic)
         for (start = row_count; start < rows; ++start) {
             float partial = 0;
 

@@ -325,10 +325,10 @@ TEST(MatrixTestFunc, gemv_float64_kernel) {
     FILL(choice, vec1, 1, 5);
 
     std::vector vec2(
-        1, std::vector(512, 0.0)
+        1, std::vector(3987, 0.0)
     );
 
-    FILL(choice, vec2, 1, 512);
+    FILL(choice, vec2, 1, 3987);
 
 
     std::vector mat1(
@@ -338,10 +338,10 @@ TEST(MatrixTestFunc, gemv_float64_kernel) {
     FILL(choice, mat1, 5, 5);
 
     std::vector mat2(
-        512, std::vector(512, 0.0)
+        1234, std::vector(3987, 0.0)
     );
 
-    FILL(choice, mat2, 512, 512);
+    FILL(choice, mat2, 1234, 3987);
 
     constexpr double alpha = 2.234;
     constexpr double beta = 0.0023;
@@ -353,7 +353,7 @@ TEST(MatrixTestFunc, gemv_float64_kernel) {
     auto res_1_copy = res1;
 
     std::vector res2(
-        1, std::vector(512, 2.892)
+        1, std::vector(1234, 2.892)
     );
 
     auto res_2_copy = res2;

@@ -192,7 +192,7 @@ namespace cobraml::core {
         const NumType beta,
         size_t const rows,
         size_t const columns) {
-        gemv_manual2(mat, vec, dest, alpha, beta, rows, columns);
+        gemv_manual(mat, vec, dest, alpha, beta, rows, columns);
     }
 #endif
 

@@ -173,11 +173,13 @@ namespace cobraml::core {
         double const beta,
         size_t const rows,
         size_t const columns) {
+
         size_t start;
-        size_t const row_count{get_row_count(rows, SKIP)};
-        constexpr size_t skip{get_block_len<double>()};
-        constexpr size_t jump{UNROLLS * skip};
-        const size_t column_count{columns / jump};
+        size_t const row_count{get_row_count(rows, SKIP)}; // get rows w/o remainders
+        constexpr size_t skip{get_block_len<double>()}; // SIMD vector length for double dtype
+        constexpr size_t jump{UNROLLS * skip}; // when unrolled multiple SIMD operations are conducted this number covers
+        // the amount
+        const size_t column_count{columns / jump}; // the amount of columns interacted with
 
 #ifndef BENCHMARK
         assert(reinterpret_cast<uintptr_t>(matrix) % 32 == 0);
@@ -322,6 +324,7 @@ namespace cobraml::core {
             // std::cout << "row end " << block_end << std::endl;
 
             for (; column_block < column_blocks * BLOCK_SIZE; column_block += BLOCK_SIZE) {
+                _mm_prefetch(&matrix[row_block + 1 * BLOCK_SIZE], _MM_HINT_T0);
                 // std::cout << column_block << " " << column_blocks * BLOCK_SIZE << std::endl;
                 size_t i = 0;
 
@@ -334,14 +337,43 @@ namespace cobraml::core {
                     __m256d reductions[reduction_count]{};
                     size_t current_reduction = 0;
 
-                    for (size_t j = column_block; j < column_block + BLOCK_SIZE; j += vector_length) {
+                    for (size_t j = column_block; j < column_block + BLOCK_SIZE; j += (vector_length * 8)) {
+
                         __m256d const vector_block = _mm256_load_pd(&vector[j]);
                         __m256d const mat_block = _mm256_loadu_pd(&matrix[i * columns + j]);
 
-                        reductions[current_reduction] = _mm256_mul_pd(vector_block, mat_block);
+                        __m256d const vector_block2 = _mm256_load_pd(&vector[j + vector_length]);
+                        __m256d const mat_block2 = _mm256_loadu_pd(&matrix[i * columns + (j + vector_length)]);
 
-                        ++current_reduction;
-                        // std::cout << (current_reduction > reduction_count) << std::endl;
+                        __m256d const vector_block3 = _mm256_load_pd(&vector[j + (vector_length * 2)]);
+                        __m256d const mat_block3 = _mm256_loadu_pd(&matrix[i * columns + j + (vector_length * 2)]);
+
+                        __m256d const vector_block4 = _mm256_load_pd(&vector[j + (vector_length * 3)]);
+                        __m256d const mat_block4 = _mm256_loadu_pd(&matrix[i * columns + j + (vector_length * 3)]);
+
+                        __m256d const vector_block5 = _mm256_load_pd(&vector[j + (vector_length * 4)]);
+                        __m256d const mat_block5 = _mm256_loadu_pd(&matrix[i * columns + j + (vector_length * 4)]);
+
+                        __m256d const vector_block6 = _mm256_load_pd(&vector[j + (vector_length * 5)]);
+                        __m256d const mat_block6 = _mm256_loadu_pd(&matrix[i * columns + j + (vector_length * 5)]);
+
+                        __m256d const vector_block7 = _mm256_load_pd(&vector[j + (vector_length * 6)]);
+                        __m256d const mat_block7 = _mm256_loadu_pd(&matrix[i * columns + j + (vector_length * 6)]);
+
+                        __m256d const vector_block8 = _mm256_load_pd(&vector[j + (vector_length * 7)]);
+                        __m256d const mat_block8 = _mm256_loadu_pd(&matrix[i * columns + j + (vector_length * 7)]);
+
+
+                        reductions[current_reduction] = _mm256_mul_pd(vector_block, mat_block);
+                        reductions[current_reduction + 1] = _mm256_mul_pd(vector_block2, mat_block2);
+                        reductions[current_reduction + 2] = _mm256_mul_pd(vector_block3, mat_block3);
+                        reductions[current_reduction + 3] = _mm256_mul_pd(vector_block4, mat_block4);
+                        reductions[current_reduction + 4] = _mm256_mul_pd(vector_block5, mat_block5);
+                        reductions[current_reduction + 5] = _mm256_mul_pd(vector_block6, mat_block6);
+                        reductions[current_reduction + 6] = _mm256_mul_pd(vector_block7, mat_block7);
+                        reductions[current_reduction + 7] = _mm256_mul_pd(vector_block8, mat_block8);
+
+                        current_reduction += 8;
                     }
 
                     size_t reduction_count2 {reduction_count};
@@ -353,6 +385,7 @@ namespace cobraml::core {
 
                         reduction_count2 /= 2;
                     }
+
                     alignas(32) double temp[4];
                     _mm256_store_pd(temp, reductions[0]);
                     dest[i] += (temp[0] + temp[1] + temp[2] + temp[3]) * alpha;
@@ -366,14 +399,9 @@ namespace cobraml::core {
             // leftover columns
             // TODO: fix up by less than 4 edge case
 
-            // std::cout << j << "\n" << std::endl;
-
             if (column_block != columns) {
                 size_t col_end = columns - (columns % vector_length);
                 size_t row;
-
-                // std::cout << "rows: " << row_block * BLOCK_SIZE <<  " " << block_end <<  "\n" << std::endl;
-                // std::cout << "cols: " << j <<  " " << col_end <<  "\n" << std::endl;
 
 #pragma omp parallel for default(none) shared(row_block, reduction_count, col_end, j, column_block, block_end, std::cout, alpha, beta, matrix, vector, dest, rows, columns) private(row) schedule(dynamic)
                 for (row = row_block * BLOCK_SIZE; row < block_end; ++row) {
@@ -382,13 +410,6 @@ namespace cobraml::core {
                     auto reduction_count2 = static_cast<size_t>(std::pow(2, closest2));
                     __m256d reductions[reduction_count]{};
                     auto reduction_levels2 = static_cast<size_t>(closest2);
-
-                    // std::cout << std::endl;
-                    // std::cout << "closest2: " <<  std::ceil((double)(columns - j) / (double)vector_length) << std::endl;
-                    // std::cout << "closest2: " <<  closest2 << std::endl;
-                    // std::cout << "reduction_count: " <<  reduction_count2 << std::endl;
-                    // std::cout << "reduction level: " << reduction_levels2 << std::endl;
-
                     size_t current_reduction = 0;
 
                     alignas(32) double temp[4];
@@ -399,27 +420,14 @@ namespace cobraml::core {
                         __m256d const mat_block = _mm256_loadu_pd(&matrix[row * columns + pos]);
                         reductions[current_reduction] = _mm256_mul_pd(vector_block, mat_block);
                         ++current_reduction;
-
-                        // _mm256_store_pd(temp, vector_block);
-                        // std::cout << "vector: " << temp[0] << " " << temp[1] << " " << temp[2] << " " << temp[3] << std::endl;
-
-                        // _mm256_store_pd(temp, mat_block);
-                        // std::cout << "matrix: " << temp[0] << " " << temp[1] << " " << temp[2] << " " << temp[3] << std::endl;
                     }
 
-                    // std::cout << pos << std::endl;
-
                     _mm256_store_pd(temp, reductions[0]);
-                    // std::cout << "result " << temp[0] << " " << temp[1] << " " << temp[2] << " " << temp[3] << std::endl;
 
                     double partial = 0;
                     for (; pos < columns; ++pos) {
-                        // std::cout << "here " << std::endl;
                         partial += vector[pos] * matrix[row * columns + pos];
-                        // std::cout << vector[pos] << " " << matrix[row * columns + pos] << " " << vector[pos] * matrix[row * columns + pos]  << " " << partial <<  std::endl;
                     }
-
-                    // std::cout << "partial: " <<  partial << std::endl;
 
 
                     dest[row] += partial * alpha;
@@ -431,10 +439,6 @@ namespace cobraml::core {
                         reduction_count2 /= 2;
                     }
 
-                    // _mm256_store_pd(temp, reductions[0]);
-                    // std::cout << temp[0] << " " << temp[1] << " " << temp[2] << " " << temp[3] << std::endl;
-
-                    // alignas(32) double temp[4];
                     _mm256_store_pd(temp, reductions[0]);
                     dest[row] += (temp[0] + temp[1] + temp[2] + temp[3]) * alpha;
                 }

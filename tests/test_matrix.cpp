@@ -18,9 +18,10 @@
         sum *= alpha;\
         sum += start[0][i];\
         if (std::abs(result[i] - sum) > epsilon) {\
-            std::cout << "here------------------" << std::endl;\
-            std::cout << sum << std::endl;\
-            std::cout << result[i] << std::endl;\
+            std::cout << "here------------------ " << i << std::endl;\
+            std::cout << "expected: " << sum << std::endl;\
+            std::cout << "received: " << result[i] << std::endl;\
+            std::cout << ">: " << (result[i] > sum) << std::endl;\
             std::cout << (result[i] - sum) << std::endl;\
             state = false;\
             break;\

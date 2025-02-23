@@ -95,6 +95,7 @@ endif ()
 if (AVX2)
     list(APPEND TEST_COMPILE_OPTIONS -march=native -mavx2 -mfma)  # Add AI-related file to the source list
     list(APPEND BENCH_COMPILE_OPTIONS -march=native -mavx2 -mfma)  # Add AI-related file to the source list
+    add_definitions(-DAVX2)
 endif ()
 
 if (PROFILER)

@@ -6,17 +6,20 @@
 #include <omp.h>
 #include "enums.h"
 #include <cstring>
-
+#include <iostream>
+#include <immintrin.h>
+#include <cassert>
+#include <cmath>
 
 namespace cobraml::core {
-    void set_num_threads() {
+    static void set_num_threads() {
         static bool set = false;
 
         if (!set) {
 #ifdef NUM_THREADS
             omp_set_num_threads(NUM_THREADS);
 #else
-            omp_set_num_threads(9);
+            omp_set_num_threads(omp_get_max_threads());
 #endif
         }
     }
@@ -30,6 +33,7 @@ namespace cobraml::core {
         size_t const rows,
         size_t const columns,
         Dtype const dtype) {
+        set_num_threads();
         switch (dtype) {
             case FLOAT64: {
                 const auto casted_dest = static_cast<double *>(dest);
@@ -92,31 +96,35 @@ namespace cobraml::core {
                 return;
             }
             case INVALID: {
-                throw std::runtime_error("cannot calculate gemmv on invalid type");
+                throw std::runtime_error("cannot calculate gemv on invalid type");
             }
         }
     }
 
-    void float32_gemv_kernel(
+#ifdef AVX2
+#define SKIP 2
+#define UNROLLS 2
+
+    template<>
+    void gemv_manual<float>(
         const float *matrix,
         const float *vector,
         float *dest,
-        float const &alpha,
-        float const &beta,
-        size_t const &rows,
-        size_t const &columns,
-        size_t const &row_count) {
+        float const alpha,
+        float const beta,
+        size_t const rows,
+        size_t const columns) {
         size_t start;
-
+        size_t const row_count = get_row_count(rows, SKIP);
         constexpr size_t skip = get_block_len<float>();
 
 
 #pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
-        for (start = 0; start < row_count / ROW_COUNT2; ++start) {
+        for (start = 0; start < row_count / SKIP; ++start) {
             float partial_1 = 0;
             float partial_2 = 0;
 
-            const size_t row_start = start * ROW_COUNT2;
+            const size_t row_start = start * SKIP;
 
             for (size_t i = 0; i < columns; i += skip) {
                 __m256 const vector_block = _mm256_load_ps(&vector[i]);
@@ -156,31 +164,77 @@ namespace cobraml::core {
         }
     }
 
-    void float64_gemv_kernel(
+    template<>
+    void gemv_manual<double>(
         const double *matrix,
         const double *vector,
         double *dest,
-        double const &alpha,
-        double const &beta,
-        size_t const &rows,
-        size_t const &columns,
-        size_t const &row_count) {
+        double const alpha,
+        double const beta,
+        size_t const rows,
+        size_t const columns) {
+
         size_t start;
+        size_t const row_count{get_row_count(rows, SKIP)}; // get rows w/o remainders
+        constexpr size_t skip{get_block_len<double>()}; // SIMD vector length for double dtype
+        constexpr size_t jump{UNROLLS * skip}; // when unrolled multiple SIMD operations are conducted this number covers
+        // the amount
+        const size_t column_count{columns / jump}; // the amount of columns interacted with
 
-        constexpr size_t skip = get_block_len<double>();
+#ifndef BENCHMARK
+        assert(reinterpret_cast<uintptr_t>(matrix) % 32 == 0);
+        assert(reinterpret_cast<uintptr_t>(vector) % 32 == 0);
+        assert(reinterpret_cast<uintptr_t>(dest) % 32 == 0);
 
-#pragma omp parallel for default(none) shared(std::cout, alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
-        for (start = 0; start < row_count / ROW_COUNT2; ++start) {
+        std::cout << "col count " << column_count << std::endl;;
+        std::cout << "columns " << columns << std::endl;
+        std::cout << "row count " << row_count << std::endl;;
+        std::cout << "rows " << rows << std::endl;
+#endif
+
+#pragma omp parallel for default(none) shared(std::cout, column_count, alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
+        for (start = 0; start < row_count / SKIP; ++start) {
             double partial_1 = 0;
             double partial_2 = 0;
 
-            const size_t row_start = start * ROW_COUNT2;
+            const size_t row_start = start * SKIP;
 
-            for (size_t i = 0; i < columns; i += skip) {
+            for (size_t i = 0; i < column_count; i += 1) {
+                __m256d const vector_block1 = _mm256_load_pd(&vector[i * jump]);
+                __m256d const vector_block2 = _mm256_load_pd(&vector[i * jump + skip]);
 
+                __m256d const mat_block_1_1 = _mm256_loadu_pd(&matrix[row_start * columns + (i * jump)]);
+                __m256d const mat_block_1_2 = _mm256_loadu_pd(&matrix[row_start * columns + (i * jump) + skip]);
+                __m256d const mat_block_2_1 = _mm256_loadu_pd(&matrix[(row_start + 1) * columns + (i * jump)]);
+                __m256d const mat_block_2_2 = _mm256_loadu_pd(&matrix[(row_start + 1) * columns + (i * jump) + skip]);
+
+                __m256d result1_1 = _mm256_mul_pd(vector_block1, mat_block_1_1);
+                __m256d result2_1 = _mm256_mul_pd(vector_block1, mat_block_2_1);
+                __m256d const result1_2 = _mm256_mul_pd(vector_block2, mat_block_1_2);
+                __m256d const result2_2 = _mm256_mul_pd(vector_block2, mat_block_2_2);
+
+                result1_1 = _mm256_add_pd(result1_1, result1_2);
+                result2_1 = _mm256_add_pd(result2_1, result2_2);
+
+                alignas(32) double temp1[skip];
+                alignas(32) double temp2[skip];
+
+                _mm256_store_pd(temp1, result1_1);
+                _mm256_store_pd(temp2, result2_1);
+
+                partial_1 += temp1[0] + temp1[1] + temp1[2] + temp1[3];
+                partial_2 += temp2[0] + temp2[1] + temp2[2] + temp2[3];
+
+                // std::cout << "here: " << i << std::endl;
+            }
+
+            // cleanup remainders
+            for (size_t i = column_count * jump; i < columns; i += skip) {
                 __m256d mat_block_1;
                 __m256d mat_block_2;
                 __m256d const vector_block = _mm256_load_pd(&vector[i]);
+
+                // std::cout << i << "\n";
 
                 if (i + skip > columns) {
                     size_t const amt = columns - i;
@@ -192,7 +246,7 @@ namespace cobraml::core {
 
                     mat_block_1 = _mm256_load_pd(block_1);
                     mat_block_2 = _mm256_load_pd(block_2);
-                }else {
+                } else {
                     mat_block_1 = _mm256_loadu_pd(&matrix[row_start * columns + i]);
                     mat_block_2 = _mm256_loadu_pd(&matrix[(row_start + 1) * columns + i]);
                 }
@@ -228,4 +282,5 @@ namespace cobraml::core {
             dest[start] = dest[start] * beta + partial * alpha;
         }
     }
+#endif
 }

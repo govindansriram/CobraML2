@@ -14,3 +14,11 @@
 - test on vtune 
 - add more loop unrolling if it helps
 - look at double implemtation in egyptian paper
+
+## FEB 22:
+undo changes
+transition code to use padding
+create versions for all other datatypes
+take break
+
+make same code for neon but possibly use inline asm

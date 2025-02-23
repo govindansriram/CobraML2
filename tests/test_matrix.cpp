@@ -20,6 +20,7 @@
         if (std::abs(result[i] - sum) > epsilon) {\
             std::cout << "here------------------ " << i << std::endl;\
             std::cout << "expected: " << sum << std::endl;\
+            std::cout << "row: " << i << std::endl;\
             std::cout << "received: " << result[i] << std::endl;\
             std::cout << ">: " << (result[i] > sum) << std::endl;\
             std::cout << (result[i] - sum) << std::endl;\
@@ -378,6 +379,75 @@ TEST(MatrixTestFunc, gemv_float64_kernel) {
 
     gemv(c_mat2, c_vec2, c_res2, alpha, beta);
     const auto *res2_buff = cobraml::core::get_buffer<double>(c_res2);
+    CHECK_DP(mat2, vec2, res_2_copy, res2_buff, alpha, beta, state, sum, EPSILON);
+    ASSERT_EQ(state, true);
+}
+
+TEST(MatrixTestFunc, gemv_float32_kernel) {
+    constexpr float choice[10]{
+        1.113f, -1.27948f, 2.12323f, 1.f, -2.108f, -1.3452f, 1.91782f, -1.23232f, -1.58f, .00001f
+    };
+
+    std::vector vec1(
+        1, std::vector(5, 0.0f)
+    );
+
+    FILL(choice, vec1, 1, 5);
+
+    std::vector vec2(
+        1, std::vector(3343, 0.0f)
+    );
+
+    FILL(choice, vec2, 1, 3343);
+
+
+    std::vector mat1(
+        5, std::vector(5, 0.0f)
+    );
+
+    FILL(choice, mat1, 5, 5);
+
+    std::vector mat2(
+        3343, std::vector(3343, 0.0f)
+    );
+
+    FILL(choice, mat2, 3343, 3343);
+
+    constexpr float alpha = 2.234f;
+    constexpr float beta = 0.0023f;
+
+    std::vector res1(
+        1, std::vector(5, -0.2341f)
+    );
+
+    auto res_1_copy = res1;
+
+    std::vector res2(
+        1, std::vector(3343, 2.892f)
+    );
+
+    auto res_2_copy = res2;
+
+    cobraml::core::Matrix const c_vec1 = cobraml::core::from_vector<float>(vec1, cobraml::core::CPU);
+    cobraml::core::Matrix const c_vec2 = cobraml::core::from_vector<float>(vec2, cobraml::core::CPU);
+    cobraml::core::Matrix const c_mat1 = cobraml::core::from_vector<float>(mat1, cobraml::core::CPU);
+    cobraml::core::Matrix const c_mat2 = cobraml::core::from_vector<float>(mat2, cobraml::core::CPU);
+    cobraml::core::Matrix c_res1 = cobraml::core::from_vector<float>(res1, cobraml::core::CPU);
+    cobraml::core::Matrix c_res2 = cobraml::core::from_vector<float>(res2, cobraml::core::CPU);
+
+    gemv(c_mat1, c_vec1, c_res1, alpha, beta);
+    const auto *res1_buff = cobraml::core::get_buffer<float>(c_res1);
+
+    bool state{true};
+    float sum;
+
+    constexpr float EPSILON = 1e-2f;
+
+    CHECK_DP(mat1, vec1, res_1_copy, res1_buff, alpha, beta, state, sum, EPSILON);
+    ASSERT_EQ(state, true);
+
+    gemv(c_mat2, c_vec2, c_res2, alpha, beta);
+    const auto *res2_buff = cobraml::core::get_buffer<float>(c_res2);
     CHECK_DP(mat2, vec2, res_2_copy, res2_buff, alpha, beta, state, sum, EPSILON);
     ASSERT_EQ(state, true);
 }

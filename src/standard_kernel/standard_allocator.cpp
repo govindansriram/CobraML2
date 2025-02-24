@@ -6,31 +6,36 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <cmath>
 
 
 namespace cobraml::core {
 
-#define ALIGNMENT 32
-#define MIN_LENGTH 256 // 64  * 4 (ensures there is a 4 element padding for 64 bit systems)
+#define ALIGNMENT 64
 
-    static size_t compute_aligned_size(size_t const bytes) {
+#ifdef AVX2
+    #define ALIGNMENT 32
+#endif
 
-        size_t const bits = bytes * 8;
 
-        size_t const remainder = bits % MIN_LENGTH;
-        size_t quotient = bits / MIN_LENGTH;
+    static size_t compute_aligned_size(size_t const total_rows, size_t const total_columns, size_t const dtype_size) {
+        if (!(ALIGNMENT % dtype_size)) {
+            // TODO: Add the alignment value into the error
+            throw std::runtime_error("dtype is not a factor of the required alignment");
+        }
 
-        quotient += remainder > 0 ? 1 : 0;
+        const auto requested{total_columns * dtype_size};
 
-        // if (remainder == bytes)
-        //     return MIN_LENGTH;
-        //
-        // if (remainder == 0)
-        //     return bytes;
+        if (requested < ALIGNMENT)
+            return ALIGNMENT * total_rows;
 
-        // std::cout << bits << " " << quotient * (MIN_LENGTH / 8) << std::endl;
+        if (!(requested % ALIGNMENT)) {
+            return requested * total_rows;
+        }
 
-        return quotient * (MIN_LENGTH / 8);
+        // round to the closest multiple
+        size_t const multiplier{static_cast<size_t>(std::ceil(requested / ALIGNMENT))};
+        return multiplier * requested * total_rows;
     }
 
     void * StandardAllocator::malloc(std::size_t const bytes) {

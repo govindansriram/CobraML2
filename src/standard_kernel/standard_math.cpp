@@ -12,7 +12,10 @@
 #include <immintrin.h>
 #endif
 
+#ifndef BENCHMARK
 #include <cassert>
+#endif
+
 #include <cmath>
 
 namespace cobraml::core {
@@ -139,36 +142,26 @@ namespace cobraml::core {
 
 #pragma omp parallel for default(none) shared(std::cout, column_count, alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
         for (start = 0; start < row_count / SKIP; ++start) {
-            float partial_1{0};
-            float partial_2{0};
+            __m256 partial_1 = _mm256_setzero_ps();
+            __m256 partial_2 = _mm256_setzero_ps();
 
             const size_t row_start{start * SKIP};
 
             for (size_t i = 0; i < column_count; i += 1) {
-                alignas(32) float temp1[skip];
-                alignas(32) float temp2[skip];
-
                 __m256 const vector_block1{_mm256_load_ps(&vector[i * jump])};
                 __m256 const vector_block2{_mm256_load_ps(&vector[i * jump + skip])};
 
                 __m256 const mat_block_1_1{_mm256_loadu_ps(&matrix[row_start * columns + (i * jump)])};
                 __m256 const mat_block_1_2{_mm256_loadu_ps(&matrix[row_start * columns + (i * jump) + skip])};
+
                 __m256 const mat_block_2_1{_mm256_loadu_ps(&matrix[(row_start + 1) * columns + (i * jump)])};
                 __m256 const mat_block_2_2{_mm256_loadu_ps(&matrix[(row_start + 1) * columns + (i * jump) + skip])};
 
-                __m256 result1_1{_mm256_mul_ps(vector_block1, mat_block_1_1)};
-                __m256 result2_1{_mm256_mul_ps(vector_block1, mat_block_2_1)};
-                __m256 const result1_2{_mm256_mul_ps(vector_block2, mat_block_1_2)};
-                __m256 const result2_2{_mm256_mul_ps(vector_block2, mat_block_2_2)};
+                partial_1 = _mm256_fmadd_ps(vector_block1, mat_block_1_1, partial_1);
+                partial_1 = _mm256_fmadd_ps(vector_block2, mat_block_1_2, partial_1);
 
-                result1_1 = _mm256_add_ps(result1_1, result1_2);
-                result2_1 = _mm256_add_ps(result2_1, result2_2);
-
-                _mm256_store_ps(temp1, result1_1);
-                _mm256_store_ps(temp2, result2_1);
-
-                partial_1 += temp1[0] + temp1[1] + temp1[2] + temp1[3] + temp1[4] + temp1[5] + temp1[6] + temp1[7];
-                partial_2 += temp2[0] + temp2[1] + temp2[2] + temp2[3] + temp2[4] + temp2[5] + temp2[6] + temp2[7];
+                partial_2 = _mm256_fmadd_ps(vector_block1, mat_block_2_1, partial_2);
+                partial_2 = _mm256_fmadd_ps(vector_block2, mat_block_2_2, partial_2);
             }
 
             // cleanup remainders
@@ -192,21 +185,18 @@ namespace cobraml::core {
                     mat_block_2 = _mm256_loadu_ps(&matrix[(row_start + 1) * columns + i]);
                 }
 
-                __m256 const result1{_mm256_mul_ps(vector_block, mat_block_1)};
-                __m256 const result2{_mm256_mul_ps(vector_block, mat_block_2)};
-
-                alignas(32) float temp1[skip];
-                alignas(32) float temp2[skip];
-
-                _mm256_store_ps(temp1, result1);
-                _mm256_store_ps(temp2, result2);
-
-                partial_1 += temp1[0] + temp1[1] + temp1[2] + temp1[3] + temp1[4] + temp1[5] + temp1[6] + temp1[7];
-                partial_2 += temp2[0] + temp2[1] + temp2[2] + temp2[3] + temp2[4] + temp2[5] + temp2[6] + temp2[7];
+                partial_1 = _mm256_fmadd_ps(vector_block, mat_block_1, partial_1);
+                partial_2 = _mm256_fmadd_ps(vector_block, mat_block_2, partial_2);
             }
 
-            dest[row_start] = dest[row_start] * beta + partial_1 * alpha;
-            dest[row_start + 1] = dest[row_start + 1] * beta + partial_2 * alpha;
+            alignas(32) float temp1[skip];
+            alignas(32) float temp2[skip];
+
+            _mm256_store_ps(temp1, partial_1);
+            _mm256_store_ps(temp2, partial_2);
+
+            dest[row_start] = dest[row_start] * beta + (temp1[0] + temp1[1] + temp1[2] + temp1[3] + temp1[4] + temp1[5] + temp1[6] + temp1[7]) * alpha;
+            dest[row_start + 1] = dest[row_start + 1] * beta + (temp2[0] + temp2[1] + temp2[2] + temp2[3] + temp2[4] + temp2[5] + temp2[6] + temp2[7]) * alpha;
         }
 
 

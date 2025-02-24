@@ -24,7 +24,7 @@ take break
 make same code for neon but possibly use inline asm
 
 ## FEB 23:
-- Update double to use fmad
+- <strike> Update double to use fmad </strike>
 - add padding alligment
 - take break (do either threading lib or GC)
 - add versions for other datatypes

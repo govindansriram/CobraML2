@@ -112,6 +112,9 @@ namespace cobraml::core {
 #define SKIP 2
 #define UNROLLS 2
 
+#define SKIPf32 2
+#define UNROLLf32 2
+
     template<>
     void gemv_manual<float>(
         const float *matrix,
@@ -123,9 +126,9 @@ namespace cobraml::core {
         size_t const columns) {
 
         size_t start;
-        size_t const row_count{get_row_count(rows, SKIP)}; // get rows w/o remainders
+        size_t const row_count{get_row_count(rows, SKIPf32)}; // get rows w/o remainders
         constexpr size_t skip{get_block_len<float>()}; // SIMD vector length for float dtype
-        constexpr size_t jump{UNROLLS * skip}; // when unrolled multiple SIMD operations are conducted this number covers
+        constexpr size_t jump{UNROLLf32 * skip}; // when unrolled multiple SIMD operations are conducted this number covers
         // the amount
         const size_t column_count{columns / jump}; // the amount of columns interacted with
 
@@ -141,11 +144,11 @@ namespace cobraml::core {
 #endif
 
 #pragma omp parallel for default(none) shared(std::cout, column_count, alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
-        for (start = 0; start < row_count / SKIP; ++start) {
-            __m256 partial_1 = _mm256_setzero_ps();
-            __m256 partial_2 = _mm256_setzero_ps();
+        for (start = 0; start < row_count / SKIPf32; ++start) {
+            __m256 partial_1{_mm256_setzero_ps()};
+            __m256 partial_2{_mm256_setzero_ps()};
 
-            const size_t row_start{start * SKIP};
+            const size_t row_start{start * SKIPf32};
 
             for (size_t i = 0; i < column_count; i += 1) {
                 __m256 const vector_block1{_mm256_load_ps(&vector[i * jump])};
@@ -244,38 +247,26 @@ namespace cobraml::core {
 
 #pragma omp parallel for default(none) shared(std::cout, column_count, alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
         for (start = 0; start < row_count / SKIP; ++start) {
-            double partial_1 = 0;
-            double partial_2 = 0;
+            __m256d partial_1{_mm256_setzero_pd()};
+            __m256d partial_2{_mm256_setzero_pd()};
 
-            const size_t row_start = start * SKIP;
+            const size_t row_start{start * SKIP};
 
             for (size_t i = 0; i < column_count; i += 1) {
-                __m256d const vector_block1 = _mm256_load_pd(&vector[i * jump]);
-                __m256d const vector_block2 = _mm256_load_pd(&vector[i * jump + skip]);
+                __m256d const vector_block1{_mm256_load_pd(&vector[i * jump])};
+                __m256d const vector_block2{_mm256_load_pd(&vector[i * jump + skip])};
 
-                __m256d const mat_block_1_1 = _mm256_loadu_pd(&matrix[row_start * columns + (i * jump)]);
-                __m256d const mat_block_1_2 = _mm256_loadu_pd(&matrix[row_start * columns + (i * jump) + skip]);
-                __m256d const mat_block_2_1 = _mm256_loadu_pd(&matrix[(row_start + 1) * columns + (i * jump)]);
-                __m256d const mat_block_2_2 = _mm256_loadu_pd(&matrix[(row_start + 1) * columns + (i * jump) + skip]);
+                __m256d const mat_block_1_1{_mm256_loadu_pd(&matrix[row_start * columns + (i * jump)])};
+                __m256d const mat_block_1_2{_mm256_loadu_pd(&matrix[row_start * columns + (i * jump) + skip])};
 
-                __m256d result1_1 = _mm256_mul_pd(vector_block1, mat_block_1_1);
-                __m256d result2_1 = _mm256_mul_pd(vector_block1, mat_block_2_1);
-                __m256d const result1_2 = _mm256_mul_pd(vector_block2, mat_block_1_2);
-                __m256d const result2_2 = _mm256_mul_pd(vector_block2, mat_block_2_2);
+                __m256d const mat_block_2_1{_mm256_loadu_pd(&matrix[(row_start + 1) * columns + (i * jump)])};
+                __m256d const mat_block_2_2{_mm256_loadu_pd(&matrix[(row_start + 1) * columns + (i * jump) + skip])};
 
-                result1_1 = _mm256_add_pd(result1_1, result1_2);
-                result2_1 = _mm256_add_pd(result2_1, result2_2);
+                partial_1 = _mm256_fmadd_pd(vector_block1, mat_block_1_1, partial_1);
+                partial_1 = _mm256_fmadd_pd(vector_block2, mat_block_1_2, partial_1);
 
-                alignas(32) double temp1[skip];
-                alignas(32) double temp2[skip];
-
-                _mm256_store_pd(temp1, result1_1);
-                _mm256_store_pd(temp2, result2_1);
-
-                partial_1 += temp1[0] + temp1[1] + temp1[2] + temp1[3];
-                partial_2 += temp2[0] + temp2[1] + temp2[2] + temp2[3];
-
-                // std::cout << "here: " << i << std::endl;
+                partial_2 = _mm256_fmadd_pd(vector_block1, mat_block_2_1, partial_2);
+                partial_2 = _mm256_fmadd_pd(vector_block2, mat_block_2_2, partial_2);
             }
 
             // cleanup remainders
@@ -301,21 +292,18 @@ namespace cobraml::core {
                     mat_block_2 = _mm256_loadu_pd(&matrix[(row_start + 1) * columns + i]);
                 }
 
-                __m256d const result1 = _mm256_mul_pd(vector_block, mat_block_1);
-                __m256d const result2 = _mm256_mul_pd(vector_block, mat_block_2);
-
-                alignas(32) double temp1[skip];
-                alignas(32) double temp2[skip];
-
-                _mm256_store_pd(temp1, result1);
-                _mm256_store_pd(temp2, result2);
-
-                partial_1 += temp1[0] + temp1[1] + temp1[2] + temp1[3];
-                partial_2 += temp2[0] + temp2[1] + temp2[2] + temp2[3];
+                partial_1 = _mm256_fmadd_pd(vector_block, mat_block_1, partial_1);
+                partial_2 = _mm256_fmadd_pd(vector_block, mat_block_2, partial_2);
             }
 
-            dest[row_start] = dest[row_start] * beta + partial_1 * alpha;
-            dest[row_start + 1] = dest[row_start + 1] * beta + partial_2 * alpha;
+            alignas(32) double temp1[skip];
+            alignas(32) double temp2[skip];
+
+            _mm256_store_pd(temp1, partial_1);
+            _mm256_store_pd(temp2, partial_2);
+
+            dest[row_start] = dest[row_start] * beta + (temp1[0] + temp1[1] + temp1[2] + temp1[3]) * alpha;
+            dest[row_start + 1] = dest[row_start + 1] * beta + (temp2[0] + temp2[1] + temp2[2] + temp2[3]) * alpha;
         }
 
 

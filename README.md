@@ -22,3 +22,12 @@ create versions for all other datatypes
 take break
 
 make same code for neon but possibly use inline asm
+
+## FEB 23:
+- Update double to use fmad
+- add padding alligment
+- take break (do either threading lib or GC)
+- add versions for other datatypes
+- add mat mul and other mathemetical operators
+- add gradient descent
+- add gpu support

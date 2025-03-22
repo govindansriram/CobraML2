@@ -11,10 +11,10 @@
 
 namespace cobraml::core {
 
-#define ALIGNMENT 64
-
 #ifdef AVX2
     #define ALIGNMENT 32
+#else
+    #define ALIGNMENT 64
 #endif
 
 
@@ -29,7 +29,7 @@ namespace cobraml::core {
         if (requested < ALIGNMENT)
             return ALIGNMENT * total_rows;
 
-        if (!(requested % ALIGNMENT)) {
+        if (!(requested % ALIGNMENT)) { // requested is a direct multiple of ALIGNMENT
             return requested * total_rows;
         }
 
@@ -38,19 +38,19 @@ namespace cobraml::core {
         return multiplier * requested * total_rows;
     }
 
-    void * StandardAllocator::malloc(std::size_t const bytes) {
-        // std::cout << bytes << " bytes" << std::endl;
-        // std::cout << compute_aligned_size(bytes) << " bytes" << std::endl;
-        return std::aligned_alloc(ALIGNMENT, compute_aligned_size(bytes));
+    size_t StandardAllocator::malloc(void ** dest, size_t const total_rows, size_t const total_columns, size_t const dtype_size) {
+        size_t const size = compute_aligned_size(total_rows, total_columns, dtype_size);
+        *dest = std::aligned_alloc(ALIGNMENT, compute_aligned_size(total_rows, total_columns, dtype_size));
+        return size / total_rows;
     }
 
 
     // A malloc() followed by a memset() will likely be about as fast as calloc()
     // https://stackoverflow.com/questions/2605476/calloc-v-s-malloc-and-time-efficiency
-    void * StandardAllocator::calloc(const std::size_t bytes) {
-        void * ptr = malloc(bytes);
-        std::memset(ptr, 0, compute_aligned_size(bytes));
-        return ptr;
+    size_t StandardAllocator::calloc(void ** dest, size_t const total_rows, size_t const total_columns, size_t const dtype_size) {
+        size_t const column_length = malloc(dest, total_rows, total_columns, dtype_size);
+        std::memset(*dest, 0, column_length * total_rows);
+        return column_length;
     }
 
     void StandardAllocator::mem_copy(void *dest, const void *source, std::size_t const bytes) {

@@ -19,7 +19,6 @@ FetchContent_MakeAvailable(googletest)
 ####################################################
 
 set(SOURCES
-        include/matrix.h
         src/allocator.h
         src/math_dis.h
         src/standard_kernel/standard_allocator.h
@@ -27,14 +26,11 @@ set(SOURCES
         src/allocator.cpp
         src/standard_kernel/standard_math.h
         src/standard_kernel/standard_math.cpp
-        src/matrix.cpp
         src/enums.cpp
         include/enums.h
         src/math_dis.cpp
-        src/barray.cpp
-        include/barray.h
-        include/tensor.h
-        src/tensor.cpp
+        src/brarray.cpp
+        include/brarray.h
 )
 
 add_library(cobraml SHARED ${SOURCES})
@@ -115,9 +111,9 @@ elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
 endif ()
 
 ####################### test settings #######################
-add_executable(test_matrix tests/test_matrix.cpp)
-add_executable(test_array tests/test_barray.cpp)
-add_executable(test_tensor tests/test_tensor.cpp)
+#add_executable(test_matrix tests/test_matrix.cpp)
+add_executable(test_array tests/test_brarray.cpp)
+#add_executable(test_tensor tests/test_tensor.cpp)
 add_executable(test_enums tests/test_enums.cpp)
 
 if (TEST_THREAD)
@@ -130,19 +126,19 @@ if (TEST_ADDR)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address -fno-omit-frame-pointer -g")
 endif ()
 
-target_compile_options(test_matrix PRIVATE ${TEST_COMPILE_OPTIONS})
+#target_compile_options(test_matrix PRIVATE ${TEST_COMPILE_OPTIONS})
 target_compile_options(test_enums PRIVATE ${TEST_COMPILE_OPTIONS})
-target_compile_options(test_tensor PRIVATE ${TEST_COMPILE_OPTIONS})
+#target_compile_options(test_tensor PRIVATE ${TEST_COMPILE_OPTIONS})
 target_compile_options(test_array PRIVATE ${TEST_COMPILE_OPTIONS})
 
-target_link_libraries(test_matrix gtest GTest::gtest_main cobraml)
+#target_link_libraries(test_matrix gtest GTest::gtest_main cobraml)
 target_link_libraries(test_array gtest GTest::gtest_main cobraml)
 target_link_libraries(test_enums gtest GTest::gtest_main cobraml)
-target_link_libraries(test_tensor gtest GTest::gtest_main cobraml)
+#target_link_libraries(test_tensor gtest GTest::gtest_main cobraml)
 
 enable_testing()
 include(GoogleTest)
-gtest_discover_tests(test_matrix test_enums test_array test_tensor)
+gtest_discover_tests(test_enums test_array)
 
 #########################################################
 

@@ -63,6 +63,15 @@ namespace cobraml::core {
 
         [[nodiscard]] virtual std::string generate_description() const;
 
+        Brarray(Device device, Dtype dtype, std::vector<size_t> const &shape, const void *ptr);
+
+        static const void *validated_get_data(
+            Dtype dtype_vec,
+            Dtype provided,
+            size_t shape,
+            std::vector<size_t> const &provided_shape,
+            const void * data);
+
     public:
         Brarray(Device device, Dtype dtype, std::vector<size_t> const &shape);
 
@@ -103,10 +112,24 @@ namespace cobraml::core {
          * @return the raw ptr buffer
          */
         template<typename T>
-        friend const T *get_buffer(const Brarray &arr);
+        const T *get_buffer() const{
+            const Dtype current{this->get_dtype()};
+            if (constexpr Dtype given = get_dtype_from_type<T>::type; given != current) {
+                throw std::runtime_error(
+                    "provided buffer type does not match array type: " + dtype_to_string(current));
+            }
 
-        template<typename T>
-        friend Brarray from_vector(const std::vector<T> &vec, Device device, const std::vector<size_t> &shape);
+            return static_cast<T *>(this->get_raw_buffer());
+        }
+
+        template<typename T, std::enable_if<std::is_arithmetic_v<T> >* = nullptr>
+        Brarray(const Device device, const Dtype dtype, std::vector<size_t> const &shape,
+                const std::vector<T> &data): Brarray(device, dtype, shape, validated_get_data(
+                                                         get_dtype_from_type<T>::type,
+                                                         dtype,
+                                                         data.size(),
+                                                         shape,
+                                                         data.data())) {}
 
         template<typename T>
         friend void gemv(
@@ -136,15 +159,15 @@ namespace cobraml::core {
          */
         Brarray operator[](size_t index) const;
 
-        template<typename T>
-        T item() const {
+        template<typename T, std::enable_if_t<std::is_arithmetic<T>::value>* = nullptr>
+        T item() const{
             const Dtype current{this->get_dtype()};
             if (constexpr Dtype given = get_dtype_from_type<T>::type; given != current) {
                 throw std::runtime_error(
                     "provided type does not match array type: " + dtype_to_string(current));
             }
 
-            if (this->get_shape().size() != 1) {
+            if (!this->is_scalar_equivalent()) {
                 throw std::out_of_range("array can only return item if it contains a single element");
             }
 
@@ -166,53 +189,6 @@ namespace cobraml::core {
             reassign_vector(&value);
         }
     };
-
-    template<typename T>
-    const T *get_buffer(const Brarray &arr) {
-        const Dtype current{arr.get_dtype()};
-        if (constexpr Dtype given = get_dtype_from_type<T>::type; given != current) {
-            throw std::runtime_error(
-                "provided buffer type does not match array type: " + dtype_to_string(current));
-        }
-
-        return static_cast<T *>(arr.get_raw_buffer());
-    }
-
-    template<typename T>
-    Brarray from_vector(const std::vector<T> &vec, Device const device, const std::vector<size_t> &shape) {
-        if (shape.empty()) throw std::runtime_error("shape cannot be empty");
-
-        constexpr Dtype dtype = get_dtype_from_type<T>::type;
-        Brarray ret(device, dtype, shape);
-
-        size_t vector_count{1};
-        for (size_t i{0}; i < shape.size() - 1; ++i) {
-            vector_count *= shape[i];
-        }
-
-        std::vector<Brarray> preallocated_vec;
-        preallocated_vec.reserve(vector_count);
-        std::queue temps(preallocated_vec);
-        temps.push(ret);
-
-        size_t offset{0};
-        size_t const vec_len{shape[shape.size() - 1]};
-
-        while (!temps.empty()) {
-            Brarray curr{temps.front()};
-            temps.pop();
-
-            if (curr.is_vector()) {
-                curr.reassign_vector(vec.data() + offset);
-                offset += vec_len;
-                continue;
-            }
-
-            for (size_t i = 0; i < curr.get_shape()[0]; ++i) temps.push(curr[i]);
-        }
-
-        return ret;
-    }
 
     template<typename T, std::enable_if_t<!std::is_same_v<int8_t, T> && std::is_arithmetic_v<T>>* = nullptr>
     void print_vector(void *data_ptr, const size_t length, std::stringstream &ss) {

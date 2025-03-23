@@ -14,12 +14,12 @@ namespace cobraml::core {
 #ifdef AVX2
     #define ALIGNMENT 32
 #else
-    #define ALIGNMENT 64
+    #define ALIGNMENT 8
 #endif
 
 
     static size_t compute_aligned_size(size_t const total_rows, size_t const total_columns, size_t const dtype_size) {
-        if (!(ALIGNMENT % dtype_size)) {
+        if (ALIGNMENT % dtype_size) {
             // TODO: Add the alignment value into the error
             throw std::runtime_error("dtype is not a factor of the required alignment");
         }
@@ -34,13 +34,13 @@ namespace cobraml::core {
         }
 
         // round to the closest multiple
-        size_t const multiplier{static_cast<size_t>(std::ceil(requested / ALIGNMENT))};
-        return multiplier * requested * total_rows;
+        size_t const multiplier{static_cast<size_t>(std::ceil(static_cast<float>(requested) / ALIGNMENT))};
+        return multiplier * ALIGNMENT * total_rows;
     }
 
     size_t StandardAllocator::malloc(void ** dest, size_t const total_rows, size_t const total_columns, size_t const dtype_size) {
         size_t const size = compute_aligned_size(total_rows, total_columns, dtype_size);
-        *dest = std::aligned_alloc(ALIGNMENT, compute_aligned_size(total_rows, total_columns, dtype_size));
+        *dest = std::aligned_alloc(ALIGNMENT, size);
         return size / total_rows;
     }
 

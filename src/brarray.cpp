@@ -6,7 +6,6 @@
 #include <iostream>
 #include <iomanip>
 #include <stack>
-
 #include "math_dis.h"
 #include "allocator.h"
 
@@ -20,11 +19,11 @@ namespace cobraml::core {
         if (shape.size() == 1)
             return;
 
-        size_t sum = column_count;
+        size_t sum{column_count};
 
-        for (long i = static_cast<long>(shape.size() - 2); i >= 0; --i) {
-            stride[i] = sum;
-            sum *= shape[i];
+        for (long i{static_cast<long>(shape.size()) - 2}; i >= 0; --i) {
+            stride[static_cast<size_t>(i)] = sum;
+            sum *= shape[static_cast<size_t>(i)];
         }
     }
 
@@ -37,7 +36,7 @@ namespace cobraml::core {
 
         BufferContainer() = default;
         BufferContainer(size_t const rows, size_t const columns, Allocator * p_alloc, size_t const dtype_size): allocator(p_alloc), rows(rows), dtype_size(dtype_size){
-            this->columns = allocator->calloc(&buffer, rows, columns, dtype_size);
+            this->columns = allocator->calloc(&buffer, rows, columns, dtype_size) / dtype_size;
         }
 
         ~BufferContainer() {
@@ -53,8 +52,7 @@ namespace cobraml::core {
         BufferContainer &operator=(const BufferContainer & other) {
 
             if (this == &other) return *this;
-
-            if (other.rows != rows && other.columns != columns) {
+            if (other.rows * other.columns * other.dtype_size != rows * columns * dtype_size) {
                 allocator->free(buffer);
                 other.allocator->calloc(&buffer, other.rows, other.columns, other.dtype_size);
             }
@@ -90,10 +88,13 @@ namespace cobraml::core {
             if (shape.empty()) throw std::runtime_error("cannot initialize Brarray with an empty shape");
 
             size_t rows{1};
+            if (shape[0] == 0) throw std::runtime_error("dimensions in shape cannot be zero");
             size_t columns = shape[shape.size() - 1];
 
             if (shape.size() > 1) {
                 for (size_t i{0}; i < shape.size() - 1; ++i) {
+                    if (shape[i] == 0) throw std::runtime_error("dimensions in shape cannot be zero");
+
                     rows *= shape[i];
                 }
             }
@@ -117,6 +118,25 @@ namespace cobraml::core {
     Brarray::Brarray(Device const device, Dtype const dtype, std::vector<size_t> const &shape): impl(
         std::make_unique<ArrayImpl>(device, dtype, shape)) {
         is_invalid(dtype);
+    }
+
+    Brarray::Brarray(const Device device, const Dtype dtype, std::vector<size_t> const &shape, const void *ptr):
+        impl(std::make_unique<ArrayImpl>(device, dtype, shape)) {
+
+        const size_t & total_cols{impl->buffer_container->columns}; // includes padding
+        const size_t & total_rows{impl->buffer_container->rows};
+        const size_t & requested_cols{shape[shape.size() - 1]};
+        const size_t & dtype_size{impl->buffer_container->dtype_size};
+
+        auto * buff{static_cast<char *>(get_raw_buffer())};
+        auto * char_ptr{static_cast<const char *>(ptr)};
+
+        for (size_t i{0}; i < total_rows; ++i) {
+            impl->buffer_container->allocator->mem_copy(
+                &buff[i * total_cols * dtype_size],
+                &char_ptr[i * requested_cols * dtype_size],
+                dtype_size * requested_cols);
+        }
     }
 
     Dtype Brarray::get_dtype() const {
@@ -185,6 +205,31 @@ namespace cobraml::core {
         return false;
     }
 
+    const void *Brarray::validated_get_data(
+        Dtype const dtype_vec,
+        Dtype const provided,
+        size_t const shape,
+        std::vector<size_t> const &provided_shape,
+        const void * data) {
+
+        is_invalid(provided);
+        if (dtype_vec != provided)
+            throw std::runtime_error(
+                "Template dtype T does not match brarray dtypes");
+
+        if (provided_shape.empty()) throw std::runtime_error("an empty shape was provided");
+
+        size_t prod{1};
+        for (const auto &dim: provided_shape) prod *= dim;
+
+        if (shape == 0) throw std::runtime_error("provided data is empty");
+
+        if (prod != shape) throw std::runtime_error("given shape cannot compensate provided data");
+
+        return data;
+    }
+
+
     void Brarray::gemv(
         const Brarray &matrix,
         const Brarray &vector,
@@ -232,29 +277,31 @@ namespace cobraml::core {
 
     Brarray Brarray::operator[](size_t const index) const {
 
+        is_invalid(this->get_dtype());
         std::vector<size_t> const &current_shape = this->get_shape();
+        if (current_shape.empty()) throw std::out_of_range("index out of bounds");
         if (index >= current_shape[0]) throw std::out_of_range("index out of bounds");
 
         Brarray ret;
-        ret.impl = std::move(
-            std::make_unique<ArrayImpl>(this->get_device(), this->get_dtype(), std::vector<size_t>{1}));
+        size_t jump;
 
-        ret.impl->stride = impl->stride;
-        ret.impl->buffer_container = impl->buffer_container;
-        ret.impl->m_dispatcher = impl->m_dispatcher;
-        ret.impl->shape = impl->shape;
-        ret.impl->offset = impl->offset;
-
-        ret.impl->offset += ret.impl->stride[0] * index * dtype_to_bytes(this->impl->dtype);
-
-        if (current_shape.size() == 1) { // only really occurs when indexing a scalar with 0
+        if (current_shape.size() == 1) {
             ret.impl->stride = {1};
             ret.impl->shape = {1};
-            return ret;
+            jump = 1;
+        }else {
+            ret.impl->stride = impl->stride;
+            ret.impl->shape = impl->shape;
+            jump = ret.impl->stride[0];
+            ret.impl->stride.erase(ret.impl->stride.begin());
+            ret.impl->shape.erase(ret.impl->shape.begin());
         }
 
-        ret.impl->stride.erase(ret.impl->stride.begin());
-        ret.impl->shape.erase(ret.impl->shape.begin());
+        ret.impl->dtype = impl->dtype;
+        ret.impl->buffer_container = impl->buffer_container;
+        ret.impl->m_dispatcher = impl->m_dispatcher;
+        ret.impl->offset = impl->offset;
+        ret.impl->offset += jump * index * dtype_to_bytes(this->impl->dtype);
 
         return ret;
     }
@@ -295,17 +342,10 @@ namespace cobraml::core {
             vector_count *= get_shape()[i];
         }
 
-        std::vector<Brarray> preallocated_vec;
-        std::vector<std::string> preallocated_str_vec;
-
-        preallocated_vec.reserve(vector_count);
-        preallocated_str_vec.reserve(vector_count);
-
-        std::queue temps(preallocated_vec);
+        std::queue<Brarray> temps;
         temps.push(*this);
 
-        std::stack brackets(preallocated_str_vec);
-
+        std::stack<std::string> brackets;
         std::string gap;
 
         while (!temps.empty()) {

@@ -233,14 +233,12 @@ namespace cobraml::core {
     void Brarray::gemv(
         const Brarray &matrix,
         const Brarray &vector,
-        size_t const rows,
-        size_t const columns,
         const void *alpha,
         const void *beta) {
 
         if (!vector.is_vector()) throw std::runtime_error("supplied 'vector' is not a vector");
-        if (this->is_vector()) throw std::runtime_error("the current brarray is not a vector");
-        if (matrix.is_matrix()) throw std::runtime_error("supplied 'matrix' is not a matrix");
+        if (!this->is_vector()) throw std::runtime_error("the current brarray is not a vector");
+        if (!matrix.is_matrix()) throw std::runtime_error("supplied 'matrix' is not a matrix");
         if (matrix.get_shape()[1] != vector.get_shape()[0]) throw std::runtime_error("vector and matrix have different columns lengths");
         if (matrix.get_shape()[0] != this->get_shape()[0]) throw std::runtime_error("the current brarray must be of shape (matrix.get_shape()[0])");
 
@@ -259,8 +257,9 @@ namespace cobraml::core {
             this->get_raw_buffer(),
             alpha,
             beta,
-            rows,
-            columns,
+            matrix.get_shape()[0],
+            matrix.get_shape()[1],
+            matrix.get_stride()[0],
             this->get_dtype());
     }
 
@@ -306,23 +305,23 @@ namespace cobraml::core {
         return ret;
     }
 
-    std::string shape_to_str(std::vector<size_t> const &shp, std::stringstream &ss) {
+    void shape_to_str(std::vector<size_t> const &shp, std::stringstream &ss) {
         ss << "[";
 
         for (size_t i{0}; i < shp.size() - 1; ++i) {
-            ss << std::to_string(i) << ", ";
+            ss << std::to_string(shp[i]) << ", ";
         }
 
         if (!shp.empty()) ss << std::to_string(shp[shp.size() - 1]);
         ss << "]";
-
-        return ss.str();
     }
 
     std::string Brarray::generate_description() const {
         std::stringstream ss;
         ss << "############## Details ##############\n";
-        ss << "Shape: " << shape_to_str(this->get_shape(), ss) << "\n";
+        ss << "Shape: ";
+        shape_to_str(this->get_shape(), ss);
+        ss << "\n";
         ss << "Device: " << device_to_string(this->get_device()) << "\n";
         ss << "Dtype: " << dtype_to_string(this->get_dtype()) << "\n";
         ss << "#####################################\n";
@@ -330,75 +329,51 @@ namespace cobraml::core {
         return ss.str();
     }
 
-    std::string Brarray::to_string() const {
-        if (this->get_dtype() == INVALID) {
-            throw std::runtime_error("cannot convert Brarray with invalid dtype to a string");
-        }
-
-        std::stringstream ss;
-
-        size_t vector_count{1};
-        for (size_t i{0}; i < get_shape().size() - 1; ++i) {
-            vector_count *= get_shape()[i];
-        }
-
-        std::queue<Brarray> temps;
-        temps.push(*this);
-
-        std::stack<std::string> brackets;
-        std::string gap;
-
-        while (!temps.empty()) {
+    void Brarray::to_string_helper(std::stringstream & ss, const Brarray & br, const std::string & gap) const{
+        if (br.is_vector()) {
             ss << gap;
-            Brarray& current = temps.front();
-
-            if (current.is_vector()) {
-                switch (this->impl->dtype) {
-                    case INT8: {
-                        print_vector<int8_t>(current.get_raw_buffer(), current.get_shape()[1], ss);
-                        break;
-                    }
-                    case INT16: {
-                        print_vector<int16_t>(current.get_raw_buffer(), current.get_shape()[1], ss);
-                        break;
-                    }
-                    case INT32: {
-                        print_vector<int32_t>(current.get_raw_buffer(), current.get_shape()[1], ss);
-                        break;
-                    }
-                    case INT64: {
-                        print_vector<int64_t>(current.get_raw_buffer(), current.get_shape()[1], ss);
-                        break;
-                    }
-                    case FLOAT32: {
-                        print_vector<float>(current.get_raw_buffer(), current.get_shape()[1], ss);
-                        break;
-                    }
-                    case FLOAT64: {
-                        print_vector<double>(current.get_raw_buffer(), current.get_shape()[1], ss);
-                        break;
-                    }
-                    case INVALID:
-                        throw std::runtime_error("cannot convert Brarray with invalid dtype to a string");;
+            switch (br.get_dtype()) {
+                case INT8: {
+                    print_vector<int8_t>(br.get_raw_buffer(), br.get_shape()[0], ss);
+                    break;
                 }
-                ss << "\n";
-                temps.pop();
-                continue;
+                case INT16: {
+                    print_vector<int16_t>(br.get_raw_buffer(), br.get_shape()[0], ss);
+                    break;
+                }
+                case INT32: {
+                    print_vector<int32_t>(br.get_raw_buffer(), br.get_shape()[0], ss);
+                    break;
+                }
+                case INT64: {
+                    print_vector<int64_t>(br.get_raw_buffer(), br.get_shape()[0], ss);
+                    break;
+                }
+                case FLOAT32: {
+                    print_vector<float>(br.get_raw_buffer(), br.get_shape()[0], ss);
+                    break;
+                }
+                case FLOAT64: {
+                    print_vector<double>(br.get_raw_buffer(), br.get_shape()[0], ss);
+                    break;
+                }
+                case INVALID:
+                    throw std::runtime_error("cannot convert Brarray with invalid dtype to a string");;
             }
-
-            ss << "[\n";
-            brackets.emplace(gap + "]\n");
-            gap += " ";
-
-            for (size_t i{0}; i < current.get_shape()[0]; ++i) temps.push(current[i]);
-            temps.pop();
+            ss << "\n";
+            return;
         }
 
-        while (!brackets.empty()) {
-            ss << brackets.top();
-            brackets.pop();
-        }
+        ss << gap;
+        ss << "[\n";
+        for (size_t i{0}; i < br.get_shape()[0]; ++i) to_string_helper(ss, br[i], gap + "   ");
+        ss << gap;
+        ss << "]\n";
+    }
 
+    std::string Brarray::to_string() const {
+        std::stringstream ss;
+        to_string_helper(ss, *this, "");
         return ss.str();
     }
 

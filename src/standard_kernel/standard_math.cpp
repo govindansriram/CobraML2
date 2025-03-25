@@ -39,6 +39,7 @@ namespace cobraml::core {
         const void *beta,
         size_t const rows,
         size_t const columns,
+        size_t const row_stride,
         Dtype const dtype) {
         set_num_threads();
         switch (dtype) {
@@ -49,7 +50,7 @@ namespace cobraml::core {
                 const auto casted_alpha = static_cast<const double *>(alpha);
                 const auto casted_beta = static_cast<const double *>(beta);
                 benchmarked_gemv<double>(
-                    casted_mat, casted_vec, casted_dest, *casted_alpha, *casted_beta, rows, columns);
+                    casted_mat, casted_vec, casted_dest, *casted_alpha, *casted_beta, rows, columns, row_stride);
                 return;
             }
             case FLOAT32: {
@@ -59,7 +60,7 @@ namespace cobraml::core {
                 const auto casted_alpha = static_cast<const float *>(alpha);
                 const auto casted_beta = static_cast<const float *>(beta);
                 benchmarked_gemv<float>(
-                    casted_mat, casted_vec, casted_dest, *casted_alpha, *casted_beta, rows, columns);
+                    casted_mat, casted_vec, casted_dest, *casted_alpha, *casted_beta, rows, columns, row_stride);
                 return;
             }
             case INT8: {
@@ -69,7 +70,7 @@ namespace cobraml::core {
                 const auto casted_alpha = static_cast<const int8_t *>(alpha);
                 const auto casted_beta = static_cast<const int8_t *>(beta);
                 benchmarked_gemv<int8_t>(
-                    casted_mat, casted_vec, casted_dest, *casted_alpha, *casted_beta, rows, columns);
+                    casted_mat, casted_vec, casted_dest, *casted_alpha, *casted_beta, rows, columns, row_stride);
                 return;
             }
             case INT16: {
@@ -79,7 +80,7 @@ namespace cobraml::core {
                 const auto casted_alpha = static_cast<const int16_t *>(alpha);
                 const auto casted_beta = static_cast<const int16_t *>(beta);
                 benchmarked_gemv<int16_t>(
-                    casted_mat, casted_vec, casted_dest, *casted_alpha, *casted_beta, rows, columns);
+                    casted_mat, casted_vec, casted_dest, *casted_alpha, *casted_beta, rows, columns, row_stride);
                 return;
             }
             case INT32: {
@@ -89,7 +90,7 @@ namespace cobraml::core {
                 const auto casted_alpha = static_cast<const int32_t *>(alpha);
                 const auto casted_beta = static_cast<const int32_t *>(beta);
                 benchmarked_gemv<int32_t>(
-                    casted_mat, casted_vec, casted_dest, *casted_alpha, *casted_beta, rows, columns);
+                    casted_mat, casted_vec, casted_dest, *casted_alpha, *casted_beta, rows, columns, row_stride);
                 return;
             }
             case INT64: {
@@ -99,7 +100,7 @@ namespace cobraml::core {
                 const auto casted_alpha = static_cast<const int64_t *>(alpha);
                 const auto casted_beta = static_cast<const int64_t *>(beta);
                 benchmarked_gemv<int64_t>(
-                    casted_mat, casted_vec, casted_dest, *casted_alpha, *casted_beta, rows, columns);
+                    casted_mat, casted_vec, casted_dest, *casted_alpha, *casted_beta, rows, columns, row_stride);
                 return;
             }
             case INVALID: {
@@ -123,7 +124,8 @@ namespace cobraml::core {
         float const alpha,
         float const beta,
         size_t const rows,
-        size_t const columns) {
+        size_t const columns,
+        size_t const row_stride) {
         size_t start;
         size_t const row_count{get_row_count(rows, SKIPf32)}; // get rows w/o remainders
         constexpr size_t skip{get_block_len<float>()}; // SIMD vector length for float dtype
@@ -131,6 +133,7 @@ namespace cobraml::core {
         // when unrolled multiple SIMD operations are conducted this number covers
         // the amount
         const size_t column_count{columns / jump}; // the amount of columns interacted with
+        std::cout << row_stride;
 
 #ifndef BENCHMARK
         assert(reinterpret_cast<uintptr_t>(matrix) % 32 == 0);
@@ -229,7 +232,8 @@ namespace cobraml::core {
         double const alpha,
         double const beta,
         size_t const rows,
-        size_t const columns) {
+        size_t const columns,
+        size_t const row_stride) {
         size_t start;
         size_t const row_count{get_row_count(rows, SKIP)}; // get rows w/o remainders
         constexpr size_t skip{get_block_len<double>()}; // SIMD vector length for double dtype
@@ -237,19 +241,15 @@ namespace cobraml::core {
         // when unrolled multiple SIMD operations are conducted this number covers
         // the amount
         const size_t column_count{columns / jump}; // the amount of columns interacted with
+        // std::cout << row_stride;
 
 #ifndef BENCHMARK
         assert(reinterpret_cast<uintptr_t>(matrix) % 32 == 0);
         assert(reinterpret_cast<uintptr_t>(vector) % 32 == 0);
         assert(reinterpret_cast<uintptr_t>(dest) % 32 == 0);
-
-        std::cout << "col count " << column_count << std::endl;;
-        std::cout << "columns " << columns << std::endl;
-        std::cout << "row count " << row_count << std::endl;;
-        std::cout << "rows " << rows << std::endl;
 #endif
 
-#pragma omp parallel for default(none) shared(std::cout, column_count, alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
+#pragma omp parallel for default(none) shared(row_stride, std::cout, column_count, alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
         for (start = 0; start < row_count / SKIP; ++start) {
             double partial_1 = 0;
             double partial_2 = 0;
@@ -260,10 +260,10 @@ namespace cobraml::core {
                 __m256d const vector_block1 = _mm256_load_pd(&vector[i * jump]);
                 __m256d const vector_block2 = _mm256_load_pd(&vector[i * jump + skip]);
 
-                __m256d const mat_block_1_1 = _mm256_loadu_pd(&matrix[row_start * columns + (i * jump)]);
-                __m256d const mat_block_1_2 = _mm256_loadu_pd(&matrix[row_start * columns + (i * jump) + skip]);
-                __m256d const mat_block_2_1 = _mm256_loadu_pd(&matrix[(row_start + 1) * columns + (i * jump)]);
-                __m256d const mat_block_2_2 = _mm256_loadu_pd(&matrix[(row_start + 1) * columns + (i * jump) + skip]);
+                __m256d const mat_block_1_1 = _mm256_load_pd(&matrix[row_start * row_stride + (i * jump)]);
+                __m256d const mat_block_1_2 = _mm256_load_pd(&matrix[row_start * row_stride + (i * jump) + skip]);
+                __m256d const mat_block_2_1 = _mm256_load_pd(&matrix[(row_start + 1) * row_stride + (i * jump)]);
+                __m256d const mat_block_2_2 = _mm256_load_pd(&matrix[(row_start + 1) * row_stride + (i * jump) + skip]);
 
                 __m256d result1_1 = _mm256_mul_pd(vector_block1, mat_block_1_1);
                 __m256d result2_1 = _mm256_mul_pd(vector_block1, mat_block_2_1);
@@ -291,22 +291,8 @@ namespace cobraml::core {
                 __m256d mat_block_2;
                 __m256d const vector_block = _mm256_load_pd(&vector[i]);
 
-                // std::cout << i << "\n";
-
-                if (i + skip > columns) {
-                    size_t const amt = columns - i;
-                    alignas(32) double block_1[skip]{};
-                    alignas(32) double block_2[skip]{};
-
-                    std::memcpy(block_1, &matrix[row_start * columns + i], amt * 8);
-                    std::memcpy(block_2, &matrix[(row_start + 1) * columns + i], amt * 8);
-
-                    mat_block_1 = _mm256_load_pd(block_1);
-                    mat_block_2 = _mm256_load_pd(block_2);
-                } else {
-                    mat_block_1 = _mm256_loadu_pd(&matrix[row_start * columns + i]);
-                    mat_block_2 = _mm256_loadu_pd(&matrix[(row_start + 1) * columns + i]);
-                }
+                mat_block_1 = _mm256_load_pd(&matrix[row_start * row_stride + i]);
+                mat_block_2 = _mm256_load_pd(&matrix[(row_start + 1) * row_stride + i]);
 
                 __m256d const result1 = _mm256_mul_pd(vector_block, mat_block_1);
                 __m256d const result2 = _mm256_mul_pd(vector_block, mat_block_2);
@@ -326,14 +312,14 @@ namespace cobraml::core {
         }
 
 
-#pragma omp parallel for default(none) shared(std::cout, alpha, beta, matrix, vector, dest, rows, row_count, columns) private(start) schedule(dynamic)
+#pragma omp parallel for default(none) shared(row_stride, std::cout, alpha, beta, matrix, vector, dest, rows, row_count, columns) private(start) schedule(dynamic)
         for (start = row_count; start < rows; ++start) {
             double partial = 0;
 
 
 #pragma omp simd reduction(+:partial) aligned(vector: 32) aligned(matrix: 32)
             for (size_t i = 0; i < columns; ++i) {
-                partial += vector[i] * matrix[start * columns + i];
+                partial += vector[i] * matrix[start * row_stride + i];
             }
 
             dest[start] = dest[start] * beta + partial * alpha;

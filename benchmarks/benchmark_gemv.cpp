@@ -4,6 +4,8 @@
 
 #include <benchmark/benchmark.h>
 #include <random>
+
+#include "enums.h"
 #include "matrix.h"
 
 namespace {
@@ -23,7 +25,7 @@ namespace {
         0.6931471806, 1.7320508075, -6.2831853071
     };
 
-#define FILL(option, matrix, rows, columns) {\
+#define FILL_MATRIX(option, matrix, rows, columns) {\
     for(size_t i = 0; i < rows; ++i){\
         for(size_t j = 0; j < columns; ++j){\
             matrix[i][j] = option[one_to_10()];\
@@ -39,8 +41,8 @@ namespace {
         std::vector vector_vec(1, std::vector(col, 0.0));
         cobraml::core::Matrix res(1, rows, cobraml::core::CPU, cobraml::core::FLOAT64);
 
-        FILL(optionsf64, matrix_vec, rows, col);
-        FILL(optionsf64, vector_vec, 1, col);
+        FILL_MATRIX(optionsf64, matrix_vec, rows, col);
+        FILL_MATRIX(optionsf64, vector_vec, 1, col);
 
         constexpr double a{1.567};
         constexpr double b{2.3987};
@@ -66,8 +68,8 @@ namespace {
         std::vector vector_vec(1, std::vector(col, 0.0f));
         cobraml::core::Matrix res(1, rows, cobraml::core::CPU, cobraml::core::FLOAT32);
 
-        FILL(optionsf32, matrix_vec, rows, col);
-        FILL(optionsf32, vector_vec, 1, col);
+        FILL_MATRIX(optionsf32, matrix_vec, rows, col);
+        FILL_MATRIX(optionsf32, vector_vec, 1, col);
 
         constexpr float a{1.567};
         constexpr float b{2.3987};

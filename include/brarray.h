@@ -56,8 +56,6 @@ namespace cobraml::core {
         void gemv(
             const Brarray &matrix,
             const Brarray &vector,
-            size_t rows,
-            size_t columns,
             const void *alpha,
             const void *beta);
 
@@ -71,6 +69,8 @@ namespace cobraml::core {
             size_t shape,
             std::vector<size_t> const &provided_shape,
             const void * data);
+
+        void to_string_helper(std::stringstream & ss, const Brarray & br, const std::string & gap) const;
 
     public:
         Brarray(Device device, Dtype dtype, std::vector<size_t> const &shape);
@@ -136,8 +136,6 @@ namespace cobraml::core {
             Brarray &result,
             const Brarray &matrix,
             const Brarray &vector,
-            size_t rows,
-            size_t columns,
             T alpha,
             T beta);
 
@@ -145,8 +143,6 @@ namespace cobraml::core {
         friend Brarray gemv(
             const Brarray &matrix,
             const Brarray &vector,
-            size_t rows,
-            size_t columns,
             T alpha,
             T beta);
 
@@ -175,7 +171,7 @@ namespace cobraml::core {
         }
 
         template<typename T>
-        void set_item(T value) const {
+        void set_item(T value) {
             const Dtype current{this->get_dtype()};
             if (constexpr Dtype given = get_dtype_from_type<T>::type; given != current) {
                 throw std::runtime_error(
@@ -211,8 +207,6 @@ namespace cobraml::core {
         Brarray &result,
         const Brarray &matrix,
         const Brarray &vector,
-        size_t const rows,
-        size_t const columns,
         T alpha,
         T beta) {
         constexpr Dtype dtype{get_dtype_from_type<T>::type};
@@ -221,19 +215,17 @@ namespace cobraml::core {
         if (dtype != matrix.get_dtype() || dtype != result.get_dtype() || dtype != vector.get_dtype())
             throw std::runtime_error("Template dtype T does not match brarray dtypes");
 
-        result.gemv(matrix, vector, rows, columns, &alpha, &beta);
+        result.gemv(matrix, vector, &alpha, &beta);
     }
 
     template<typename T>
     Brarray gemv(
         const Brarray &matrix,
         const Brarray &vector,
-        size_t const rows,
-        size_t const columns,
         T alpha,
         T beta) {
         Brarray result(matrix.get_device(), matrix.get_dtype(), {matrix.get_shape()[0]});
-        gemv(result, matrix, vector, rows, columns, alpha, beta);
+        gemv(result, matrix, vector, alpha, beta);
         return result;
     }
 }

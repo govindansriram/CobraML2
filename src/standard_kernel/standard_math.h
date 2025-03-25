@@ -5,6 +5,8 @@
 #ifndef STANDARD_MATH_H
 #define STANDARD_MATH_H
 
+#include <iostream>
+
 #include "../math_dis.h"
 
 namespace cobraml::core {
@@ -16,11 +18,12 @@ namespace cobraml::core {
         const NumType alpha,
         const NumType beta,
         const size_t rows,
-        const size_t columns) {
+        const size_t columns,
+        size_t const row_stride) {
         for (size_t start{0}; start < rows; ++start) {
             NumType partial = 0;
             for (size_t i = 0; i < columns; ++i) {
-                partial = static_cast<NumType>(partial + vector[i] * matrix[start * columns + i]);
+                partial = static_cast<NumType>(partial + vector[i] * matrix[start * row_stride + i]);
             }
 
             dest[start] = static_cast<NumType>(dest[start] * beta + partial * alpha);
@@ -35,15 +38,16 @@ namespace cobraml::core {
         const NumType alpha,
         const NumType beta,
         const size_t rows,
-        const size_t columns) {
+        const size_t columns,
+        size_t const row_stride) {
         size_t start;
 
-#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, rows, columns) private(start) schedule(dynamic)
+#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, rows, columns, row_stride) private(start) schedule(dynamic)
         for (start = 0; start < rows; ++start) {
             NumType partial = 0;
 
             for (size_t i = 0; i < columns; ++i) {
-                partial += static_cast<NumType>(vector[i] * matrix[start * columns + i]);
+                partial += static_cast<NumType>(vector[i] * matrix[start * row_stride + i]);
             }
 
             dest[start] = static_cast<NumType>(dest[start] * beta + partial * alpha);
@@ -58,16 +62,18 @@ namespace cobraml::core {
         const NumType alpha,
         const NumType beta,
         const size_t rows,
-        const size_t columns) {
+        const size_t columns,
+        size_t const row_stride) {
         size_t start;
 
-#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, rows, columns) private(start) schedule(dynamic)
+#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, rows, columns, row_stride) private(start) schedule(dynamic)
         for (start = 0; start < rows; ++start) {
             NumType partial = 0;
 
+            size_t i;
 #pragma omp simd reduction(+:partial)
-            for (size_t i = 0; i < columns; ++i) {
-                partial += static_cast<NumType>(vector[i] * matrix[start * columns + i]);
+            for (i = 0; i < columns; ++i) {
+                partial += static_cast<NumType>(vector[i] * matrix[start * row_stride + i]);
             }
 
             dest[start] = static_cast<NumType>(dest[start] * beta + partial * alpha);
@@ -94,8 +100,9 @@ namespace cobraml::core {
         const NumType alpha,
         const NumType beta,
         const size_t rows,
-        const size_t columns) {
-        gemv_parallel_simd(matrix, vector, dest, alpha, beta, rows, columns);
+        const size_t columns,
+        size_t const row_stride) {
+        gemv_parallel_simd(matrix, vector, dest, alpha, beta, rows, columns, row_stride);
     }
 
 
@@ -109,7 +116,8 @@ namespace cobraml::core {
         float alpha,
         float beta,
         size_t rows,
-        size_t columns);
+        size_t columns,
+        size_t row_stride);
 
     template<>
     void gemv_manual<double>(
@@ -119,7 +127,8 @@ namespace cobraml::core {
         double alpha,
         double beta,
         size_t rows,
-        size_t columns);
+        size_t columns,
+        size_t row_stride);
 
 #endif
 
@@ -133,22 +142,23 @@ namespace cobraml::core {
         const NumType alpha,
         const NumType beta,
         size_t const rows,
-        size_t const columns) {
+        size_t const columns,
+        size_t const row_stride) {
         switch (func_pos) {
             case 0: {
-                gemv_naive(mat, vec, dest, alpha, beta, rows, columns);
+                gemv_naive(mat, vec, dest, alpha, beta, rows, columns, row_stride);
                 return;
             }
             case 1: {
-                gemv_parallel(mat, vec, dest, alpha, beta, rows, columns);
+                gemv_parallel(mat, vec, dest, alpha, beta, rows, columns, row_stride);
                 return;
             }
             case 2: {
-                gemv_parallel_simd(mat, vec, dest, alpha, beta, rows, columns);
+                gemv_parallel_simd(mat, vec, dest, alpha, beta, rows, columns, row_stride);
                 return;
             }
             case 3: {
-                gemv_manual(mat, vec, dest, alpha, beta, rows, columns);
+                gemv_manual(mat, vec, dest, alpha, beta, rows, columns, row_stride);
                 return;
             }
             default: {
@@ -166,8 +176,9 @@ namespace cobraml::core {
         const NumType alpha,
         const NumType beta,
         size_t const rows,
-        size_t const columns) {
-        gemv_manual(mat, vec, dest, alpha, beta, rows, columns);
+        size_t const columns,
+        size_t const row_stride) {
+        gemv_manual(mat, vec, dest, alpha, beta, rows, columns, row_stride);
     }
 #endif
 
@@ -180,6 +191,7 @@ namespace cobraml::core {
             const void *beta,
             size_t rows,
             size_t columns,
+            size_t row_stride,
             Dtype dtype) override;
     };
 }

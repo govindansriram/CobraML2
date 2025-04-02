@@ -6,46 +6,51 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <cmath>
 
 
 namespace cobraml::core {
 
-#define ALIGNMENT 32
-#define MIN_LENGTH 256 // 64  * 4 (ensures there is a 4 element padding for 64 bit systems)
+#ifdef AVX2
+    #define ALIGNMENT 32
+#else
+    #define ALIGNMENT 8
+#endif
 
-    static size_t compute_aligned_size(size_t const bytes) {
 
-        size_t const bits = bytes * 8;
+    static size_t compute_aligned_size(size_t const total_rows, size_t const total_columns, size_t const dtype_size) {
+        if (ALIGNMENT % dtype_size) {
+            // TODO: Add the alignment value into the error
+            throw std::runtime_error("dtype is not a factor of the required alignment");
+        }
 
-        size_t const remainder = bits % MIN_LENGTH;
-        size_t quotient = bits / MIN_LENGTH;
+        const auto requested{total_columns * dtype_size};
 
-        quotient += remainder > 0 ? 1 : 0;
+        if (requested < ALIGNMENT)
+            return ALIGNMENT * total_rows;
 
-        // if (remainder == bytes)
-        //     return MIN_LENGTH;
-        //
-        // if (remainder == 0)
-        //     return bytes;
+        if (!(requested % ALIGNMENT)) { // requested is a direct multiple of ALIGNMENT
+            return requested * total_rows;
+        }
 
-        // std::cout << bits << " " << quotient * (MIN_LENGTH / 8) << std::endl;
-
-        return quotient * (MIN_LENGTH / 8);
+        // round to the closest multiple
+        size_t const multiplier{static_cast<size_t>(std::ceil(static_cast<float>(requested) / ALIGNMENT))};
+        return multiplier * ALIGNMENT * total_rows;
     }
 
-    void * StandardAllocator::malloc(std::size_t const bytes) {
-        // std::cout << bytes << " bytes" << std::endl;
-        // std::cout << compute_aligned_size(bytes) << " bytes" << std::endl;
-        return std::aligned_alloc(ALIGNMENT, compute_aligned_size(bytes));
+    size_t StandardAllocator::malloc(void ** dest, size_t const total_rows, size_t const total_columns, size_t const dtype_size) {
+        size_t const size = compute_aligned_size(total_rows, total_columns, dtype_size);
+        *dest = std::aligned_alloc(ALIGNMENT, size);
+        return size / total_rows;
     }
 
 
     // A malloc() followed by a memset() will likely be about as fast as calloc()
     // https://stackoverflow.com/questions/2605476/calloc-v-s-malloc-and-time-efficiency
-    void * StandardAllocator::calloc(const std::size_t bytes) {
-        void * ptr = malloc(bytes);
-        std::memset(ptr, 0, compute_aligned_size(bytes));
-        return ptr;
+    size_t StandardAllocator::calloc(void ** dest, size_t const total_rows, size_t const total_columns, size_t const dtype_size) {
+        size_t const column_length = malloc(dest, total_rows, total_columns, dtype_size);
+        std::memset(*dest, 0, column_length * total_rows);
+        return column_length;
     }
 
     void StandardAllocator::mem_copy(void *dest, const void *source, std::size_t const bytes) {

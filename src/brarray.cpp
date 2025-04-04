@@ -11,9 +11,8 @@
 
 namespace cobraml::core {
     void init_stride(std::vector<size_t> const &shape,
-                    std::vector<size_t> &stride,
-                    size_t const column_count) {
-
+                     std::vector<size_t> &stride,
+                     size_t const column_count) {
         stride[stride.size() - 1] = 1;
 
         if (shape.size() == 1)
@@ -28,14 +27,16 @@ namespace cobraml::core {
     }
 
     struct BufferContainer {
-        void * buffer{nullptr};
-        Allocator * allocator{nullptr};
+        void *buffer{nullptr};
+        Allocator *allocator{nullptr};
         size_t columns{0};
         size_t rows{0};
         size_t dtype_size{0};
 
         BufferContainer() = default;
-        BufferContainer(size_t const rows, size_t const columns, Allocator * p_alloc, size_t const dtype_size): allocator(p_alloc), rows(rows), dtype_size(dtype_size){
+
+        BufferContainer(size_t const rows, size_t const columns, Allocator *p_alloc,
+                        size_t const dtype_size): allocator(p_alloc), rows(rows), dtype_size(dtype_size) {
             this->columns = allocator->calloc(&buffer, rows, columns, dtype_size) / dtype_size;
         }
 
@@ -43,14 +44,13 @@ namespace cobraml::core {
             allocator->free(buffer);
         }
 
-        BufferContainer(const BufferContainer & other):
-        allocator(other.allocator), columns(other.columns), rows(other.rows), dtype_size(other.dtype_size){
+        BufferContainer(const BufferContainer &other): allocator(other.allocator), columns(other.columns),
+                                                       rows(other.rows), dtype_size(other.dtype_size) {
             allocator->calloc(&buffer, rows, columns, dtype_size);
             allocator->mem_copy(buffer, other.buffer, rows * columns * dtype_size);
         }
 
-        BufferContainer &operator=(const BufferContainer & other) {
-
+        BufferContainer &operator=(const BufferContainer &other) {
             if (this == &other) return *this;
             if (other.rows * other.columns * other.dtype_size != rows * columns * dtype_size) {
                 allocator->free(buffer);
@@ -77,13 +77,11 @@ namespace cobraml::core {
         Math *m_dispatcher = nullptr;
         std::shared_ptr<BufferContainer> buffer_container = nullptr;
 
-        ArrayImpl(Device const device, Dtype const dtype, std::vector<size_t> const &shape):
-            shape(shape),
+        ArrayImpl(Device const device, Dtype const dtype, std::vector<size_t> const &shape): shape(shape),
             stride(shape.size(), 0),
             device(device),
             dtype(dtype),
             m_dispatcher(get_math_kernels(device)) {
-
             is_invalid(dtype);
             if (shape.empty()) throw std::runtime_error("cannot initialize Brarray with an empty shape");
 
@@ -106,12 +104,14 @@ namespace cobraml::core {
             init_stride(shape, stride, columns);
         }
 
-        [[nodiscard]] void * buffer() const {
+        [[nodiscard]] void *buffer() const {
             return buffer_container->buffer;
         }
 
         ArrayImpl() = default;
+
         ArrayImpl(const ArrayImpl &) = delete;
+
         ArrayImpl &operator=(const ArrayImpl &) = delete;
     };
 
@@ -120,16 +120,15 @@ namespace cobraml::core {
         is_invalid(dtype);
     }
 
-    Brarray::Brarray(const Device device, const Dtype dtype, std::vector<size_t> const &shape, const void *ptr):
-        impl(std::make_unique<ArrayImpl>(device, dtype, shape)) {
+    Brarray::Brarray(const Device device, const Dtype dtype, std::vector<size_t> const &shape, const void *ptr): impl(
+        std::make_unique<ArrayImpl>(device, dtype, shape)) {
+        const size_t &total_cols{impl->buffer_container->columns}; // includes padding
+        const size_t &total_rows{impl->buffer_container->rows};
+        const size_t &requested_cols{shape[shape.size() - 1]};
+        const size_t &dtype_size{impl->buffer_container->dtype_size};
 
-        const size_t & total_cols{impl->buffer_container->columns}; // includes padding
-        const size_t & total_rows{impl->buffer_container->rows};
-        const size_t & requested_cols{shape[shape.size() - 1]};
-        const size_t & dtype_size{impl->buffer_container->dtype_size};
-
-        auto * buff{static_cast<char *>(get_raw_buffer())};
-        auto * char_ptr{static_cast<const char *>(ptr)};
+        auto *buff{static_cast<char *>(get_raw_buffer())};
+        auto *char_ptr{static_cast<const char *>(ptr)};
 
         for (size_t i{0}; i < total_rows; ++i) {
             impl->buffer_container->allocator->mem_copy(
@@ -165,7 +164,8 @@ namespace cobraml::core {
 
     Brarray::~Brarray() = default;
 
-    Brarray::Brarray(): impl(std::make_unique<ArrayImpl>()) {}
+    Brarray::Brarray(): impl(std::make_unique<ArrayImpl>()) {
+    }
 
     Brarray::Brarray(const Brarray &other) : impl(std::make_unique<ArrayImpl>()) {
         impl->offset = other.impl->offset;
@@ -192,6 +192,172 @@ namespace cobraml::core {
         return *this;
     }
 
+    void check_dtype(const Brarray &b1, const Brarray &b2) {
+        is_invalid(b1.get_dtype());
+        // std::cout << "here" << std::endl;
+        if (b1.get_dtype() != b2.get_dtype()) throw std::runtime_error("dtypes do not match");
+    }
+
+    void check_shapes(const Brarray &b1, const Brarray &b2) {
+        if (b1.get_shape().empty()) throw std::runtime_error("brarray is empty");
+        if (b1.get_shape() != b2.get_shape()) throw std::runtime_error("dtypes do not match");
+    }
+
+    void check_devices(const Brarray &b1, const Brarray &b2) {
+        if (b1.get_device() != b2.get_device()) throw std::runtime_error("devices do not match");
+    }
+
+    Brarray Brarray::operator*(const Brarray &other) const {
+        const Brarray &current{*this};
+        check_shapes(current, other);
+        check_dtype(current, other);
+        check_devices(current, other);
+
+        Brarray result(this->get_device(), this->get_dtype(), this->get_shape());
+
+        this->impl->m_dispatcher->hadamard_product(
+            this->get_raw_buffer(),
+            other.get_raw_buffer(),
+            result.get_raw_buffer(),
+            this->impl->buffer_container->rows,
+            this->get_shape()[this->get_shape().size() - 1],
+            this->impl->buffer_container->columns,
+            this->get_dtype());
+
+        return result;
+    }
+
+    Brarray Brarray::operator+(const Brarray &other) const {
+        const Brarray &current{*this};
+        check_shapes(current, other);
+        check_dtype(current, other);
+        check_devices(current, other);
+
+        Brarray result(this->get_device(), this->get_dtype(), this->get_shape());
+
+        this->impl->m_dispatcher->element_wise_add(
+            this->get_raw_buffer(),
+            other.get_raw_buffer(),
+            result.get_raw_buffer(),
+            this->impl->buffer_container->rows,
+            this->get_shape()[this->get_shape().size() - 1],
+            this->impl->buffer_container->columns,
+            this->get_dtype());
+
+        return result;
+    }
+
+    Brarray Brarray::operator-(const Brarray &other) const {
+        const Brarray &current{*this};
+        check_shapes(current, other);
+        check_dtype(current, other);
+        check_devices(current, other);
+
+        Brarray result(this->get_device(), this->get_dtype(), this->get_shape());
+
+        this->impl->m_dispatcher->element_wise_sub(
+            this->get_raw_buffer(),
+            other.get_raw_buffer(),
+            result.get_raw_buffer(),
+            this->impl->buffer_container->rows,
+            this->get_shape()[this->get_shape().size() - 1],
+            this->impl->buffer_container->columns,
+            this->get_dtype());
+
+        return result;
+    }
+
+    Brarray multiply(const Brarray &multiplicand, const Brarray &multiplier, const bool track_gradients) {
+        if (!track_gradients) {
+        }
+
+        check_shapes(multiplicand, multiplier);
+        check_dtype(multiplicand, multiplier);
+        check_devices(multiplicand, multiplier);
+
+        Brarray dest(multiplicand.get_device(), multiplicand.get_dtype(), multiplicand.get_shape());
+
+        multiplicand.impl->m_dispatcher->hadamard_product(
+            multiplicand.get_raw_buffer(),
+            multiplier.get_raw_buffer(),
+            dest.get_raw_buffer(),
+            multiplicand.impl->buffer_container->rows,
+            multiplicand.get_shape()[multiplicand.get_shape().size() - 1],
+            multiplicand.impl->buffer_container->columns,
+            multiplicand.get_dtype());
+
+        return dest;
+    }
+
+    Brarray pow(const Brarray &brarray, const Brarray &exponent, const bool track_gradients) {
+        if (!track_gradients) {
+        }
+
+        check_shapes(brarray, exponent);
+        check_dtype(brarray, exponent);
+        check_devices(brarray, exponent);
+
+        Brarray dest(brarray.get_device(), brarray.get_dtype(), brarray.get_shape());
+
+        brarray.impl->m_dispatcher->element_wise_power(
+            brarray.get_raw_buffer(),
+            exponent.get_raw_buffer(),
+            dest.get_raw_buffer(),
+            brarray.impl->buffer_container->rows,
+            brarray.get_shape()[brarray.get_shape().size() - 1],
+            brarray.impl->buffer_container->columns,
+            brarray.get_dtype());
+
+        return dest;
+    }
+
+    Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, const bool track_gradients) {
+        if (!track_gradients) {
+        }
+
+        check_shapes(brarray_one, brarray_two);
+        check_dtype(brarray_one, brarray_two);
+        check_devices(brarray_one, brarray_two);
+
+        Brarray dest(brarray_one.get_device(), brarray_one.get_dtype(), brarray_one.get_shape());
+
+        brarray_one.impl->m_dispatcher->element_wise_sub(
+            brarray_one.get_raw_buffer(),
+            brarray_two.get_raw_buffer(),
+            dest.get_raw_buffer(),
+            brarray_one.impl->buffer_container->rows,
+            brarray_one.get_shape()[brarray_one.get_shape().size() - 1],
+            brarray_one.impl->buffer_container->columns,
+            brarray_one.get_dtype());
+
+        return dest;
+    }
+
+    Brarray add(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients) {
+        if (!track_gradients) {
+        }
+
+        check_shapes(brarray_one, brarray_two);
+        check_dtype(brarray_one, brarray_two);
+        check_devices(brarray_one, brarray_two);
+
+        Brarray dest(brarray_one.get_device(), brarray_one.get_dtype(), brarray_one.get_shape());
+
+        brarray_one.impl->m_dispatcher->element_wise_add(
+            brarray_one.get_raw_buffer(),
+            brarray_two.get_raw_buffer(),
+            dest.get_raw_buffer(),
+            brarray_one.impl->buffer_container->rows,
+            brarray_one.get_shape()[brarray_one.get_shape().size() - 1],
+            brarray_one.impl->buffer_container->columns,
+            brarray_one.get_dtype());
+
+        return dest;
+    }
+
+
+
+
     bool Brarray::is_matrix() const {
         return get_shape().size() == 2;
     }
@@ -210,8 +376,7 @@ namespace cobraml::core {
         Dtype const provided,
         size_t const shape,
         std::vector<size_t> const &provided_shape,
-        const void * data) {
-
+        const void *data) {
         is_invalid(provided);
         if (dtype_vec != provided)
             throw std::runtime_error(
@@ -235,12 +400,13 @@ namespace cobraml::core {
         const Brarray &vector,
         const void *alpha,
         const void *beta) {
-
         if (!vector.is_vector()) throw std::runtime_error("supplied 'vector' is not a vector");
         if (!this->is_vector()) throw std::runtime_error("the current brarray is not a vector");
         if (!matrix.is_matrix()) throw std::runtime_error("supplied 'matrix' is not a matrix");
-        if (matrix.get_shape()[1] != vector.get_shape()[0]) throw std::runtime_error("vector and matrix have different columns lengths");
-        if (matrix.get_shape()[0] != this->get_shape()[0]) throw std::runtime_error("the current brarray must be of shape (matrix.get_shape()[0])");
+        if (matrix.get_shape()[1] != vector.get_shape()[0]) throw std::runtime_error(
+            "vector and matrix have different columns lengths");
+        if (matrix.get_shape()[0] != this->get_shape()[0]) throw std::runtime_error(
+            "the current brarray must be of shape (matrix.get_shape()[0])");
 
 
         if (matrix.get_device() != vector.get_device() || this->get_device() != matrix.get_device()) {
@@ -275,7 +441,6 @@ namespace cobraml::core {
     }
 
     Brarray Brarray::operator[](size_t const index) const {
-
         is_invalid(this->get_dtype());
         std::vector<size_t> const &current_shape = this->get_shape();
         if (current_shape.empty()) throw std::out_of_range("index out of bounds");
@@ -288,7 +453,7 @@ namespace cobraml::core {
             ret.impl->stride = {1};
             ret.impl->shape = {1};
             jump = 1;
-        }else {
+        } else {
             ret.impl->stride = impl->stride;
             ret.impl->shape = impl->shape;
             jump = ret.impl->stride[0];
@@ -329,7 +494,7 @@ namespace cobraml::core {
         return ss.str();
     }
 
-    void Brarray::to_string_helper(std::stringstream & ss, const Brarray & br, const std::string & gap) const{
+    void Brarray::to_string_helper(std::stringstream &ss, const Brarray &br, const std::string &gap) const {
         if (br.is_vector()) {
             ss << gap;
             switch (br.get_dtype()) {

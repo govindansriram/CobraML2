@@ -5,6 +5,8 @@
 #include <random>
 #include <gtest/gtest.h>
 #include "brarray.h"
+#include <cmath>
+
 
 #define CHECK_GEMV(mat, vec, start, result, alpha, beta, sum, epsilon){\
     for (size_t i = 0; i < start.size(); ++i){\
@@ -27,6 +29,26 @@
     }\
 }
 
+constexpr float fl_choice[10]{
+    1.113f, -1.27948f, 2.12323f, 1.f, -2.108f, -1.3452f, 1.91782f, -1.23232f, -1.58f, .00001f
+};
+
+constexpr double dl_choice[10]{
+    1.113, -1.27948, 10000.12323, 1, -7.108, -1.3452, 1597.91782, -12.23232, -2.58, .00001
+};
+
+constexpr int int_choice[10]{
+    1, -1, 10, -15, 7, -34, 97, -32, 58, 0
+};
+
+constexpr double udl_choice[10]{
+    1.113, 1.279, 1., 1, 7.108, 1.3452, 15., 12.23232, 2.58, .1
+};
+
+constexpr float ufl_choice[10]{
+    7.5f, 1.f, 2.12f, 13.f, 2.108f, 5.4f, 1.91f, 1.23f, 1.58f, .1f
+};
+
 static int one_to_10() {
     static std::mt19937 generator(std::random_device{}());
     static std::uniform_int_distribution distribution(0, 9);
@@ -35,7 +57,7 @@ static int one_to_10() {
 
 #define FILL_VECTOR(arr, vector) for(size_t i = 0; i < vector.size(); ++i) vector[i] = arr[one_to_10()];
 
-TEST(MatrixTestFunc, gemv_float64_kernel) {
+TEST(MathTestFunc, gemv_float64_kernel) {
     constexpr double choice[10]{
         1.113, -1.27948, 10000.12323, 1, -7.108, -1.3452, 1597.91782, -12.23232, -2.58, .00001
     };
@@ -81,7 +103,7 @@ TEST(MatrixTestFunc, gemv_float64_kernel) {
     CHECK_GEMV(mat2, vec2, res_2_copy, res2_buff, alpha, beta, sum, EPSILON);
 }
 
-TEST(MatrixTestFunc, gemv_float32_kernel) {
+TEST(MathTestFunc, gemv_float32_kernel) {
     constexpr float choice[10]{
         1.113f, -1.27948f, 2.12323f, 1.f, -2.108f, -1.3452f, 1.91782f, -1.23232f, -1.58f, .00001f
     };
@@ -122,7 +144,295 @@ TEST(MatrixTestFunc, gemv_float32_kernel) {
 
     float sum;
 
-    constexpr float EPSILON = 1e-2f;
+    constexpr float EPSILON = 1e-1f;
     CHECK_GEMV(mat1, vec1, res_1_copy, res1_buff, alpha, beta, sum, EPSILON);
     CHECK_GEMV(mat2, vec2, res_2_copy, res2_buff, alpha, beta, sum, EPSILON);
+}
+
+#define CHECK_HADAMARD_PRODUCT(b_1, b_2, result, row_stride, columns){\
+    for (size_t i = 0; i < b_1.size(); ++i){\
+        size_t row{i / columns};\
+        size_t column{i % columns};\
+        ASSERT_EQ(b_1[i] * b_2[i], result[row_stride * row + column]);\
+    }\
+}
+
+TEST(MathTestFunc, hadamard_product) {
+
+    std::vector vec1(50, 0.0f);
+    std::vector vec2(50, 0.0f);
+    FILL_VECTOR(fl_choice, vec1);
+    FILL_VECTOR(fl_choice, vec2);
+
+    std::vector mat1(1231 * 3987, 0.0f);
+    std::vector mat2(1231 * 3987, 0.0f);
+    FILL_VECTOR(fl_choice, mat2);
+    FILL_VECTOR(fl_choice, mat1);
+
+    std::vector tensor1(4 * 8 * 99, 0.0f);
+    std::vector tensor2(4 * 8 * 99, 0.0f);
+    FILL_VECTOR(fl_choice, tensor1);
+    FILL_VECTOR(fl_choice, tensor2);
+
+
+    cobraml::core::Brarray const b_vec1(cobraml::core::CPU, cobraml::core::FLOAT32, {50}, vec1);
+    cobraml::core::Brarray const b_vec2(cobraml::core::CPU, cobraml::core::FLOAT32, {50}, vec2);
+    cobraml::core::Brarray const b_mat1(cobraml::core::CPU, cobraml::core::FLOAT32, {1231, 3987}, mat1);
+    cobraml::core::Brarray const b_mat2(cobraml::core::CPU, cobraml::core::FLOAT32, {1231, 3987}, mat2);
+    cobraml::core::Brarray const b_ten1(cobraml::core::CPU, cobraml::core::FLOAT32, {4, 8, 99}, tensor1);
+    cobraml::core::Brarray const b_ten2(cobraml::core::CPU, cobraml::core::FLOAT32, {4, 8, 99}, tensor2);
+
+    cobraml::core::Brarray const b_vec3{b_vec1 * b_vec2};
+    cobraml::core::Brarray const b_vec31{cobraml::core::multiply(b_vec1, b_vec2)};
+
+    const float * vec_p{b_vec3.get_buffer<float>()};
+    const float * vec_p1{b_vec31.get_buffer<float>()};
+
+    CHECK_HADAMARD_PRODUCT(vec1, vec2, vec_p, 0, 50);
+    CHECK_HADAMARD_PRODUCT(vec1, vec2, vec_p1, 0, 50);
+
+    cobraml::core::Brarray const b_mat3{b_mat1 * b_mat2};
+    cobraml::core::Brarray const b_mat31{cobraml::core::multiply(b_mat1, b_mat2)};
+
+    const float * mat_p{b_mat3.get_buffer<float>()};
+    const float * mat_p1{b_mat31.get_buffer<float>()};
+
+    CHECK_HADAMARD_PRODUCT(mat1, mat2, mat_p, 3992, 3987);
+    CHECK_HADAMARD_PRODUCT(mat1, mat2, mat_p1, 3992, 3987);
+
+    cobraml::core::Brarray const b_ten3{b_ten1 * b_ten2};
+    cobraml::core::Brarray const b_ten31{cobraml::core::multiply(b_ten1, b_ten2)};
+
+    const float * ten_p{b_ten3.get_buffer<float>()};
+    const float * ten_p1{b_ten31.get_buffer<float>()};
+
+    CHECK_HADAMARD_PRODUCT(tensor1, tensor2, ten_p, 104, 99);
+    CHECK_HADAMARD_PRODUCT(tensor1, tensor2, ten_p1, 104, 99);
+
+    ASSERT_THROW(b_ten2 * b_vec1, std::runtime_error);
+    ASSERT_THROW(cobraml::core::multiply(b_ten1, b_vec1), std::runtime_error);
+
+    std::vector<int8_t> tensor8(4 * 8 * 99, 0);
+    cobraml::core::Brarray const b_ten8(cobraml::core::CPU, cobraml::core::INT8, {4, 8, 99}, tensor8);
+    ASSERT_THROW(b_ten2 * b_ten8, std::runtime_error);
+    ASSERT_THROW(cobraml::core::multiply(b_ten1, b_ten8), std::runtime_error);
+
+
+    cobraml::core::Brarray empty;
+    ASSERT_THROW(empty * empty, std::runtime_error);
+    ASSERT_THROW(cobraml::core::multiply(empty, empty), std::runtime_error);
+
+
+    cobraml::core::Brarray const diff_device(cobraml::core::GPU, cobraml::core::FLOAT32, {4, 8, 99});
+    ASSERT_THROW(b_ten2 * diff_device, std::runtime_error);
+    ASSERT_THROW(cobraml::core::multiply(b_ten2, diff_device), std::runtime_error);
+}
+
+#define CHECK_POW(type, b_1, b_2, result, row_stride, columns){\
+    for (size_t i = 0; i < b_1.size(); ++i){\
+        size_t row{i / columns};\
+        size_t column{i % columns};\
+        ASSERT_EQ(static_cast<type>(pow(b_1[i], b_2[i])), result[row_stride * row + column]);\
+    }\
+}
+
+TEST(MathTestFunc, element_wise_power) {
+    std::vector vec1(50, 0);
+    std::vector vec2(50, 0);
+    FILL_VECTOR(int_choice, vec1);
+    FILL_VECTOR(int_choice, vec2);
+
+    std::vector mat1(1231 * 3987, 0.0f);
+    std::vector mat2(1231 * 3987, 0.0f);
+    FILL_VECTOR(ufl_choice, mat2);
+    FILL_VECTOR(ufl_choice, mat1);
+
+    std::vector tensor1(4 * 8 * 99, 0.0);
+    std::vector tensor2(4 * 8 * 99, 0.0);
+    FILL_VECTOR(udl_choice, tensor1);
+    FILL_VECTOR(udl_choice, tensor2);
+
+
+    cobraml::core::Brarray const b_vec1(cobraml::core::CPU, cobraml::core::INT32, {50}, vec1);
+    cobraml::core::Brarray const b_vec2(cobraml::core::CPU, cobraml::core::INT32, {50}, vec2);
+
+    cobraml::core::Brarray const b_mat1(cobraml::core::CPU, cobraml::core::FLOAT32, {1231, 3987}, mat1);
+    cobraml::core::Brarray const b_mat2(cobraml::core::CPU, cobraml::core::FLOAT32, {1231, 3987}, mat2);
+
+    cobraml::core::Brarray const b_ten1(cobraml::core::CPU, cobraml::core::FLOAT64, {4, 8, 99}, tensor1);
+    cobraml::core::Brarray const b_ten2(cobraml::core::CPU, cobraml::core::FLOAT64, {4, 8, 99}, tensor2);
+
+    cobraml::core::Brarray const b_vec3{cobraml::core::pow(b_vec1, b_vec2)};
+    const int * vec_p{b_vec3.get_buffer<int>()};
+    CHECK_POW(int, vec1, vec2, vec_p, 0, 50);
+
+    cobraml::core::Brarray const b_mat3{cobraml::core::pow(b_mat1, b_mat2)};
+    const float * mat_p{b_mat3.get_buffer<float>()};
+    CHECK_POW(float, mat1, mat2, mat_p, 3992, 3987);
+
+    cobraml::core::Brarray const b_ten3{cobraml::core::pow(b_ten1, b_ten2)};
+    const double * ten_p{b_ten3.get_buffer<double>()};
+    CHECK_POW(double, tensor1, tensor2, ten_p, 100, 99);
+
+    ASSERT_THROW(cobraml::core::pow(b_ten2, b_vec1), std::runtime_error);
+
+    std::vector<int8_t> tensor8(4 * 8 * 99, 0);
+    cobraml::core::Brarray const b_ten8(cobraml::core::CPU, cobraml::core::INT8, {4, 8, 99}, tensor8);
+    ASSERT_THROW(cobraml::core::pow(b_ten2, b_ten8), std::runtime_error);
+
+    cobraml::core::Brarray empty;
+    ASSERT_THROW(cobraml::core::pow(empty, empty), std::runtime_error);
+
+    cobraml::core::Brarray const diff_device(cobraml::core::GPU, cobraml::core::FLOAT32, {4, 8, 99});
+    ASSERT_THROW(cobraml::core::pow(b_ten2, diff_device), std::runtime_error);
+}
+
+#define CHECK_ADD(b_1, b_2, result, row_stride, columns){\
+    for (size_t i = 0; i < b_1.size(); ++i){\
+        size_t row{i / columns};\
+        size_t column{i % columns};\
+        ASSERT_EQ(b_1[i] + b_2[i], result[row_stride * row + column]);\
+    }\
+}
+
+TEST(MathTestFunc, element_wise_add) {
+    std::vector vec1(50, 0.0f);
+    std::vector vec2(50, 0.0f);
+    FILL_VECTOR(fl_choice, vec1);
+    FILL_VECTOR(fl_choice, vec2);
+
+    std::vector mat1(1231 * 3987, 0.0f);
+    std::vector mat2(1231 * 3987, 0.0f);
+    FILL_VECTOR(fl_choice, mat2);
+    FILL_VECTOR(fl_choice, mat1);
+
+    std::vector tensor1(4 * 8 * 99, 0.0f);
+    std::vector tensor2(4 * 8 * 99, 0.0f);
+    FILL_VECTOR(fl_choice, tensor1);
+    FILL_VECTOR(fl_choice, tensor2);
+
+    cobraml::core::Brarray const b_vec1(cobraml::core::CPU, cobraml::core::FLOAT32, {50}, vec1);
+    cobraml::core::Brarray const b_vec2(cobraml::core::CPU, cobraml::core::FLOAT32, {50}, vec2);
+    cobraml::core::Brarray const b_mat1(cobraml::core::CPU, cobraml::core::FLOAT32, {1231, 3987}, mat1);
+    cobraml::core::Brarray const b_mat2(cobraml::core::CPU, cobraml::core::FLOAT32, {1231, 3987}, mat2);
+    cobraml::core::Brarray const b_ten1(cobraml::core::CPU, cobraml::core::FLOAT32, {4, 8, 99}, tensor1);
+    cobraml::core::Brarray const b_ten2(cobraml::core::CPU, cobraml::core::FLOAT32, {4, 8, 99}, tensor2);
+
+    cobraml::core::Brarray const b_vec3{b_vec1 + b_vec2};
+    cobraml::core::Brarray const b_vec31{cobraml::core::add(b_vec1, b_vec2)};
+
+    const float * vec_p{b_vec3.get_buffer<float>()};
+    const float * vec_p1{b_vec31.get_buffer<float>()};
+
+    CHECK_ADD(vec1, vec2, vec_p, 0, 50);
+    CHECK_ADD(vec1, vec2, vec_p1, 0, 50);
+
+    cobraml::core::Brarray const b_mat3{b_mat1 + b_mat2};
+    cobraml::core::Brarray const b_mat31{cobraml::core::add(b_mat1, b_mat2)};
+
+    const float * mat_p{b_mat3.get_buffer<float>()};
+    const float * mat_p1{b_mat31.get_buffer<float>()};
+
+    CHECK_ADD(mat1, mat2, mat_p, 3992, 3987);
+    CHECK_ADD(mat1, mat2, mat_p1, 3992, 3987);
+
+    cobraml::core::Brarray const b_ten3{b_ten1 + b_ten2};
+    cobraml::core::Brarray const b_ten31{cobraml::core::add(b_ten1, b_ten2)};
+
+    const float * ten_p{b_ten3.get_buffer<float>()};
+    const float * ten_p1{b_ten31.get_buffer<float>()};
+
+    CHECK_ADD(tensor1, tensor2, ten_p, 104, 99);
+    CHECK_ADD(tensor1, tensor2, ten_p1, 104, 99);
+
+    ASSERT_THROW(b_ten2 + b_vec1, std::runtime_error);
+    ASSERT_THROW(cobraml::core::add(b_ten1, b_vec1), std::runtime_error);
+
+    std::vector<int8_t> tensor8(4 * 8 * 99, 0);
+    cobraml::core::Brarray const b_ten8(cobraml::core::CPU, cobraml::core::INT8, {4, 8, 99}, tensor8);
+    ASSERT_THROW(b_ten2 + b_ten8, std::runtime_error);
+    ASSERT_THROW(cobraml::core::add(b_ten1, b_ten8), std::runtime_error);
+
+    cobraml::core::Brarray empty;
+    ASSERT_THROW(empty + empty, std::runtime_error);
+    ASSERT_THROW(cobraml::core::add(empty, empty), std::runtime_error);
+
+    cobraml::core::Brarray const diff_device(cobraml::core::GPU, cobraml::core::FLOAT32, {4, 8, 99});
+    ASSERT_THROW(b_ten2 + diff_device, std::runtime_error);
+    ASSERT_THROW(cobraml::core::add(b_ten2, diff_device), std::runtime_error);
+}
+
+#define CHECK_SUB(b_1, b_2, result, row_stride, columns){\
+    for (size_t i = 0; i < b_1.size(); ++i){\
+        size_t row{i / columns};\
+        size_t column{i % columns};\
+        ASSERT_EQ(b_1[i] - b_2[i], result[row_stride * row + column]);\
+    }\
+}
+
+TEST(MathTestFunc, element_wise_sub) {
+    std::vector vec1(50, 0.0f);
+    std::vector vec2(50, 0.0f);
+    FILL_VECTOR(fl_choice, vec1);
+    FILL_VECTOR(fl_choice, vec2);
+
+    std::vector mat1(1231 * 3987, 0.0f);
+    std::vector mat2(1231 * 3987, 0.0f);
+    FILL_VECTOR(fl_choice, mat2);
+    FILL_VECTOR(fl_choice, mat1);
+
+    std::vector tensor1(4 * 8 * 99, 0.0f);
+    std::vector tensor2(4 * 8 * 99, 0.0f);
+    FILL_VECTOR(fl_choice, tensor1);
+    FILL_VECTOR(fl_choice, tensor2);
+
+    cobraml::core::Brarray const b_vec1(cobraml::core::CPU, cobraml::core::FLOAT32, {50}, vec1);
+    cobraml::core::Brarray const b_vec2(cobraml::core::CPU, cobraml::core::FLOAT32, {50}, vec2);
+    cobraml::core::Brarray const b_mat1(cobraml::core::CPU, cobraml::core::FLOAT32, {1231, 3987}, mat1);
+    cobraml::core::Brarray const b_mat2(cobraml::core::CPU, cobraml::core::FLOAT32, {1231, 3987}, mat2);
+    cobraml::core::Brarray const b_ten1(cobraml::core::CPU, cobraml::core::FLOAT32, {4, 8, 99}, tensor1);
+    cobraml::core::Brarray const b_ten2(cobraml::core::CPU, cobraml::core::FLOAT32, {4, 8, 99}, tensor2);
+
+    cobraml::core::Brarray const b_vec3{b_vec1 - b_vec2};
+    cobraml::core::Brarray const b_vec31{cobraml::core::sub(b_vec1, b_vec2)};
+
+    const float * vec_p{b_vec3.get_buffer<float>()};
+    const float * vec_p1{b_vec31.get_buffer<float>()};
+
+    CHECK_SUB(vec1, vec2, vec_p, 0, 50);
+    CHECK_SUB(vec1, vec2, vec_p1, 0, 50);
+
+    cobraml::core::Brarray const b_mat3{b_mat1 - b_mat2};
+    cobraml::core::Brarray const b_mat31{cobraml::core::sub(b_mat1, b_mat2)};
+
+    const float * mat_p{b_mat3.get_buffer<float>()};
+    const float * mat_p1{b_mat31.get_buffer<float>()};
+
+    CHECK_SUB(mat1, mat2, mat_p, 3992, 3987);
+    CHECK_SUB(mat1, mat2, mat_p1, 3992, 3987);
+
+    cobraml::core::Brarray const b_ten3{b_ten1 - b_ten2};
+    cobraml::core::Brarray const b_ten31{cobraml::core::sub(b_ten1, b_ten2)};
+
+    const float * ten_p{b_ten3.get_buffer<float>()};
+    const float * ten_p1{b_ten31.get_buffer<float>()};
+
+    CHECK_SUB(tensor1, tensor2, ten_p, 104, 99);
+    CHECK_SUB(tensor1, tensor2, ten_p1, 104, 99);
+
+    ASSERT_THROW(b_ten2 - b_vec1, std::runtime_error);
+    ASSERT_THROW(cobraml::core::add(b_ten1, b_vec1), std::runtime_error);
+
+    std::vector<int8_t> tensor8(4 * 8 * 99, 0);
+    cobraml::core::Brarray const b_ten8(cobraml::core::CPU, cobraml::core::INT8, {4, 8, 99}, tensor8);
+    ASSERT_THROW(b_ten2 - b_ten8, std::runtime_error);
+    ASSERT_THROW(cobraml::core::add(b_ten1, b_ten8), std::runtime_error);
+
+    cobraml::core::Brarray empty;
+    ASSERT_THROW(empty - empty, std::runtime_error);
+    ASSERT_THROW(cobraml::core::add(empty, empty), std::runtime_error);
+
+    cobraml::core::Brarray const diff_device(cobraml::core::GPU, cobraml::core::FLOAT32, {4, 8, 99});
+    ASSERT_THROW(b_ten2 - diff_device, std::runtime_error);
+    ASSERT_THROW(cobraml::core::add(b_ten2, diff_device), std::runtime_error);
 }

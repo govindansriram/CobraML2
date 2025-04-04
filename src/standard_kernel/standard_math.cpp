@@ -109,6 +109,170 @@ namespace cobraml::core {
         }
     }
 
+    void element_wise_dispatcher(
+        const uint8_t index,
+        const void *buffer_one,
+        const void *buffer_two,
+        void *buffer_dest,
+        const size_t rows,
+        const size_t columns,
+        const size_t row_stride,
+        const Dtype dtype) {
+        switch (dtype) {
+            case FLOAT64: {
+                const auto mat_one = static_cast<const double *>(buffer_one);
+                const auto mat_two = static_cast<const double *>(buffer_two);
+                const auto mat_dest = static_cast<double *>(buffer_dest);
+                element_wise_func_dispatcher<double>(index)(
+                    mat_one, mat_two, mat_dest, rows, columns, row_stride);
+                return;
+            }
+            case FLOAT32: {
+                const auto mat_one = static_cast<const float *>(buffer_one);
+                const auto mat_two = static_cast<const float *>(buffer_two);
+                const auto mat_dest = static_cast<float *>(buffer_dest);
+                element_wise_func_dispatcher<float>(index)(
+                    mat_one, mat_two, mat_dest, rows, columns, row_stride);
+                return;
+            }
+            case INT8: {
+                const auto mat_one = static_cast<const int8_t *>(buffer_one);
+                const auto mat_two = static_cast<const int8_t *>(buffer_two);
+                const auto mat_dest = static_cast<int8_t *>(buffer_dest);
+                element_wise_func_dispatcher<int8_t>(index)(
+                    mat_one, mat_two, mat_dest, rows, columns, row_stride);
+                return;
+            }
+            case INT16: {
+                const auto mat_one = static_cast<const int16_t *>(buffer_one);
+                const auto mat_two = static_cast<const int16_t *>(buffer_two);
+                const auto mat_dest = static_cast<int16_t *>(buffer_dest);
+                element_wise_func_dispatcher<int16_t>(index)(
+                    mat_one, mat_two, mat_dest, rows, columns, row_stride);
+                return;
+            }
+            case INT32: {
+                const auto mat_one = static_cast<const int32_t *>(buffer_one);
+                const auto mat_two = static_cast<const int32_t *>(buffer_two);
+                const auto mat_dest = static_cast<int32_t *>(buffer_dest);
+                element_wise_func_dispatcher<int32_t>(index)(
+                    mat_one, mat_two, mat_dest, rows, columns, row_stride);
+                return;
+            }
+            case INT64: {
+                const auto mat_one = static_cast<const int64_t *>(buffer_one);
+                const auto mat_two = static_cast<const int64_t *>(buffer_two);
+                const auto mat_dest = static_cast<int64_t *>(buffer_dest);
+                element_wise_func_dispatcher<int64_t>(index)(
+                    mat_one, mat_two, mat_dest, rows, columns, row_stride);
+                return;
+            }
+            case INVALID: {
+                throw std::runtime_error("cannot calculate gemv on invalid type");
+            }
+        }
+    }
+
+    void StandardMath::hadamard_product(
+        const void *tensor_one,
+        const void *tensor_two,
+        void *tensor_dest,
+        const size_t rows,
+        const size_t columns,
+        const size_t row_stride,
+        const Dtype dtype) {
+        set_num_threads();
+
+        element_wise_dispatcher(
+            0,
+            tensor_one,
+            tensor_two,
+            tensor_dest,
+            rows,
+            columns,
+            row_stride,
+            dtype);
+    }
+
+    template<>
+    void element_wise_power<double>(
+        const double *tensor_one,
+        const double *tensor_two,
+        double *tensor_dest,
+        const size_t rows,
+        const size_t columns,
+        const size_t row_stride) {
+        size_t row;
+#pragma omp parallel for default(none) shared(tensor_one, tensor_two, tensor_dest, rows, columns, row_stride) private(row)
+        for (row = 0; row < rows; ++row) {
+#pragma omp simd
+            for (size_t column = 0; column < columns; ++column) {
+                tensor_dest[row * row_stride + column] = pow(
+                    tensor_one[row * row_stride + column], tensor_two[row * row_stride + column]);
+            }
+        }
+    }
+
+    void StandardMath::element_wise_power(
+        const void *tensor_one,
+        const void *exponent_tensor,
+        void *tensor_dest,
+        const size_t rows,
+        const size_t columns,
+        const size_t row_stride,
+        const Dtype dtype) {
+        set_num_threads();
+
+        element_wise_dispatcher(
+            1,
+            tensor_one,
+            exponent_tensor,
+            tensor_dest,
+            rows,
+            columns,
+            row_stride,
+            dtype);
+    }
+
+    void StandardMath::element_wise_add(
+        const void *tensor_one,
+        const void *tensor_two,
+        void *tensor_dest,
+        const size_t rows,
+        const size_t columns,
+        const size_t row_stride,
+        const Dtype dtype) {
+        element_wise_dispatcher(
+            2,
+            tensor_one,
+            tensor_two,
+            tensor_dest,
+            rows,
+            columns,
+            row_stride,
+            dtype);
+    }
+
+    void StandardMath::element_wise_sub(
+        const void *tensor_one,
+        const void *tensor_two,
+        void *tensor_dest,
+        const size_t rows,
+        const size_t columns,
+        const size_t row_stride,
+        const Dtype dtype) {
+        element_wise_dispatcher(
+            3,
+            tensor_one,
+            tensor_two,
+            tensor_dest,
+            rows,
+            columns,
+            row_stride,
+            dtype);
+    }
+
+
 #ifdef AVX2
 #define SKIP 2
 #define UNROLLS 2
@@ -126,7 +290,6 @@ namespace cobraml::core {
         size_t const rows,
         size_t const columns,
         size_t const row_stride) {
-
         size_t start;
         size_t const row_count{get_row_count(rows, SKIPf32)}; // get rows w/o remainders
         constexpr size_t skip{get_block_len<float>()}; // SIMD vector length for float dtype
@@ -142,7 +305,7 @@ namespace cobraml::core {
         assert(reinterpret_cast<uintptr_t>(dest) % 32 == 0);
 #endif
 
-#pragma omp parallel for default(none) shared(std::cout, column_count, alpha, beta, matrix, vector, dest, row_count, columns, skip, row_stride) private(start) schedule(dynamic)
+#pragma omp parallel for default(none) shared(std::cout, column_count, alpha, beta, matrix, vector, dest, row_count, columns, skip, row_stride) private(start) schedule(static)
         for (start = 0; start < row_count / SKIPf32; ++start) {
             __m256 partial_1{_mm256_setzero_ps()};
             __m256 partial_2{_mm256_setzero_ps()};
@@ -192,7 +355,7 @@ namespace cobraml::core {
         }
 
 
-#pragma omp parallel for default(none) shared(std::cout, alpha, beta, matrix, vector, dest, rows, row_count, columns, row_stride) private(start) schedule(dynamic)
+#pragma omp parallel for default(none) shared(std::cout, alpha, beta, matrix, vector, dest, rows, row_count, columns, row_stride) private(start) schedule(static)
         for (start = row_count; start < rows; ++start) {
             float partial = 0;
 
@@ -231,7 +394,7 @@ namespace cobraml::core {
         assert(reinterpret_cast<uintptr_t>(dest) % 32 == 0);
 #endif
 
-#pragma omp parallel for default(none) shared(row_stride, std::cout, column_count, alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(dynamic)
+#pragma omp parallel for default(none) shared(row_stride, std::cout, column_count, alpha, beta, matrix, vector, dest, row_count, columns, skip) private(start) schedule(static)
         for (start = 0; start < row_count / SKIP; ++start) {
             double partial_1 = 0;
             double partial_2 = 0;
@@ -292,7 +455,7 @@ namespace cobraml::core {
         }
 
 
-#pragma omp parallel for default(none) shared(row_stride, std::cout, alpha, beta, matrix, vector, dest, rows, row_count, columns) private(start) schedule(dynamic)
+#pragma omp parallel for default(none) shared(row_stride, std::cout, alpha, beta, matrix, vector, dest, rows, row_count, columns) private(start) schedule(static)
         for (start = row_count; start < rows; ++start) {
             double partial = 0;
 

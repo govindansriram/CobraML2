@@ -105,6 +105,15 @@ namespace cobraml::core {
          */
         [[nodiscard]] std::vector<size_t> get_stride() const;
 
+        /**
+         * Hadamard Product (Element WIse Multiplication)
+         * @param other the Multiplier
+         * @return the element wise product
+         */
+        Brarray operator*(const Brarray & other) const;
+        Brarray operator+(const Brarray & other) const;
+        Brarray operator-(const Brarray & other) const;
+
 
         /**
          * provides access to the underlying buffer
@@ -131,6 +140,7 @@ namespace cobraml::core {
                                                          shape,
                                                          data.data())) {}
 
+        // Start of the Friend API
         template<typename T>
         friend void gemv(
             Brarray &result,
@@ -146,7 +156,13 @@ namespace cobraml::core {
             T alpha,
             T beta);
 
+        friend Brarray multiply(const Brarray &multiplicand, const Brarray &multiplier, bool track_gradients);
+        friend Brarray pow(const Brarray &brarray, const Brarray &exponent, bool track_gradients);
+        friend Brarray add(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
+        friend Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
         friend std::ostream &operator<<(std::ostream &outs, const Brarray &b);
+
+        // End of the Friend API
 
         /**
          * Gets the tensor present at that specific dimension shares data with the original tensor
@@ -228,6 +244,11 @@ namespace cobraml::core {
         gemv(result, matrix, vector, alpha, beta);
         return result;
     }
+
+    Brarray multiply(const Brarray &multiplicand, const Brarray &multiplier, bool track_gradients=true);
+    Brarray pow(const Brarray &brarray, const Brarray &exponent, bool track_gradients=true);
+    Brarray add(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);
+    Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);
 }
 
 #endif //BARRAY_H

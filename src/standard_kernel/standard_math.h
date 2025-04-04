@@ -6,7 +6,7 @@
 #define STANDARD_MATH_H
 
 #include <iostream>
-
+#include <cmath>
 #include "../math_dis.h"
 
 namespace cobraml::core {
@@ -66,7 +66,7 @@ namespace cobraml::core {
         size_t const row_stride) {
         size_t start;
 
-#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, rows, columns, row_stride) private(start) schedule(dynamic)
+#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, rows, columns, row_stride) private(start) schedule(static)
         for (start = 0; start < rows; ++start) {
             NumType partial = 0;
 
@@ -103,6 +103,110 @@ namespace cobraml::core {
         const size_t columns,
         size_t const row_stride) {
         gemv_parallel_simd(matrix, vector, dest, alpha, beta, rows, columns, row_stride);
+    }
+
+    template<typename NumType>
+    void hadamard_product_naive(
+        const NumType *tensor_one,
+        const NumType *tensor_two,
+        NumType *tensor_dest,
+        const size_t rows,
+        const size_t columns,
+        const size_t row_stride) {
+        size_t row;
+#pragma omp parallel for default(none) shared(tensor_one, tensor_two, tensor_dest, rows, columns, row_stride) private(row)
+        for (row = 0; row < rows; ++row) {
+#pragma omp simd
+            for (size_t column = 0; column < columns; ++column) {
+                tensor_dest[row * row_stride + column] =
+                        tensor_one[row * row_stride + column] * tensor_two[row * row_stride + column];
+            }
+        }
+    }
+
+    template<typename NumType>
+    void element_wise_power(
+        const NumType *tensor_one,
+        const NumType *tensor_exponent,
+        NumType *tensor_dest,
+        const size_t rows,
+        const size_t columns,
+        const size_t row_stride) {
+        size_t row;
+#pragma omp parallel for default(none) shared(tensor_one, tensor_exponent, tensor_dest, rows, columns, row_stride) private(row)
+        for (row = 0; row < rows; ++row) {
+            for (size_t column = 0; column < columns; ++column) {
+                tensor_dest[row * row_stride + column] = static_cast<NumType>(
+                    pow(static_cast<double>(tensor_one[row * row_stride + column]),
+                        static_cast<double>(tensor_exponent[row * row_stride + column])));
+            }
+        }
+    }
+
+    template<typename NumType>
+    void element_wise_add(
+        const NumType *tensor_one,
+        const NumType *tensor_two,
+        NumType *tensor_dest,
+        const size_t rows,
+        const size_t columns,
+        const size_t row_stride) {
+        size_t row;
+#pragma omp parallel for default(none) shared(tensor_one, tensor_two, tensor_dest, rows, columns, row_stride) private(row)
+        for (row = 0; row < rows; ++row) {
+#pragma omp simd
+            for (size_t column = 0; column < columns; ++column) {
+                tensor_dest[row * row_stride + column] =
+                        tensor_one[row * row_stride + column] + tensor_two[row * row_stride + column];
+            }
+        }
+    }
+
+    template<typename NumType>
+void element_wise_subtract(
+    const NumType *tensor_one,
+    const NumType *tensor_two,
+    NumType *tensor_dest,
+    const size_t rows,
+    const size_t columns,
+    const size_t row_stride) {
+        size_t row;
+#pragma omp parallel for default(none) shared(tensor_one, tensor_two, tensor_dest, rows, columns, row_stride) private(row)
+        for (row = 0; row < rows; ++row) {
+#pragma omp simd
+            for (size_t column = 0; column < columns; ++column) {
+                tensor_dest[row * row_stride + column] =
+                        tensor_one[row * row_stride + column] - tensor_two[row * row_stride + column];
+            }
+        }
+    }
+
+    template<>
+    void element_wise_power<double>(
+        const double *tensor_one,
+        const double *tensor_two,
+        double *tensor_dest,
+        size_t rows,
+        size_t columns,
+        size_t row_stride);
+
+    template<typename T>
+    using ElementWiseFunc = void (*)(const T *, const T *, T *, size_t, size_t, size_t);
+
+    template<typename T>
+    ElementWiseFunc<T> element_wise_func_dispatcher(uint8_t index) {
+        switch (index) {
+            case 0:
+                return &hadamard_product_naive<T>; // Return a pointer to func_0
+            case 1:
+                return &element_wise_power<T>; // Return a pointer to func_1
+            case 2:
+                return &element_wise_add<T>;
+            case 3:
+                return &element_wise_subtract<T>;
+            default:
+                throw std::runtime_error("invalid index provided for element wise function");
+        }
     }
 
 
@@ -183,12 +287,49 @@ namespace cobraml::core {
 #endif
 
     class StandardMath final : public Math {
+    public:
         void gemv(
             const void *matrix,
             const void *vector,
             void *dest,
             const void *alpha,
             const void *beta,
+            size_t rows,
+            size_t columns,
+            size_t row_stride,
+            Dtype dtype) override;
+
+        void hadamard_product(
+            const void *tensor_one,
+            const void *tensor_two,
+            void *tensor_dest,
+            size_t rows,
+            size_t columns,
+            size_t row_stride,
+            Dtype dtype) override;
+
+        void element_wise_power(
+            const void *tensor_one,
+            const void *exponent_tensor,
+            void *tensor_dest,
+            size_t rows,
+            size_t columns,
+            size_t row_stride,
+            Dtype dtype) override;
+
+        void element_wise_add(
+            const void *tensor_one,
+            const void *tensor_two,
+            void *tensor_dest,
+            size_t rows,
+            size_t columns,
+            size_t row_stride,
+            Dtype dtype) override;
+
+        void element_wise_sub(
+            const void *tensor_one,
+            const void *tensor_two,
+            void *tensor_dest,
             size_t rows,
             size_t columns,
             size_t row_stride,

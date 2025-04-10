@@ -31,6 +31,53 @@ namespace cobraml::core {
         }
     }
 
+    TensorIter::TensorIter(const size_t *shape, const size_t *stride_one, const size_t *stride_two,
+                           const size_t shape_len): shape(shape), stride_one(stride_one), stride_two(stride_two),
+                                                    shape_len(shape_len) {
+        computed_stride.reserve(shape_len);
+        size_t sum{1};
+        for (size_t i{0}; i < shape_len; ++i) {
+            sum *= shape[i];
+        }
+
+        total_elements = sum;
+
+        for (size_t i{0}; i < shape_len; ++i) {
+            sum /= shape[i];
+            computed_stride.push_back(sum);
+        }
+
+#ifndef BENCHMARK
+        assert(computed_stride[computed_stride.size() - 1] == 1);
+#endif
+    }
+
+    size_t compute_index(size_t index, const std::vector<size_t> &generic_stride, const size_t *padded_stride) {
+        size_t comp_ind{0};
+
+        for (size_t i{0}; i < generic_stride.size(); ++i) {
+            const size_t mult = index / generic_stride[i];
+            comp_ind += mult * padded_stride[i];
+            index = index % generic_stride[i];
+        }
+
+        return comp_ind;
+    }
+
+    void TensorIter::get_indexes(size_t *index_buffer_1, size_t *index_buffer_2, const size_t start_index,
+                                 const size_t index_count) const {
+        if (start_index + index_count > total_elements) {
+            throw std::runtime_error("requested element not present in the array");
+        }
+
+        for (size_t i{0}; i < index_count; ++i) {
+            const auto idx{start_index + i};
+            index_buffer_1[i] = compute_index(idx, computed_stride, stride_one);
+            index_buffer_2[i] = compute_index(idx, computed_stride, stride_two);
+        }
+    }
+
+
     void StandardMath::gemv(
         const void *matrix,
         const void *vector,
@@ -109,62 +156,125 @@ namespace cobraml::core {
         }
     }
 
-    void element_wise_dispatcher(
-        const uint8_t index,
+#ifndef BENCHMARK
+#define BLOCK 5
+#else
+    BLOCK 1000
+#endif
+
+#define MULT_OP(multiplier, multiplicand) ((multiplier) * (multiplicand))
+#define DIV_OP(multiplier, multiplicand) ((multiplier) / (multiplicand))
+#define ADD_OP(multiplier, multiplicand) ((multiplier) + (multiplicand))
+#define SUB_OP(multiplier, multiplicand) ((multiplier) - (multiplicand))
+
+#define OMP_PARALLEL_FOR_ELEMENT_WISE _Pragma("omp parallel for default(none) shared(std::cout, typed_tensor_one, typed_tensor_two, typed_tensor_dest, shape, shape_len, stride_one, stride_two, dest_row_stride, max_iters, iter) private(cur_iter)")
+#define OMP_SIMD_FOR_ELEMENT_WISE _Pragma("omp simd")
+
+    // TODO preallocate data_ptr outside loop
+    /**
+     * Iterates through two tensors with the same "shape" and performs an element wise operation
+     * @param operation
+     * @param tensor_one
+     * @param tensor_two
+     * @param tensor_dest
+     * @param shape
+     * @param shape_len
+     * @param stride_one
+     * @param stride_two
+     * @param dest_row_stride
+     * @param max_iters
+     * @param iter
+     */
+#define ELEMENT_WISE_ITERATOR(operation, tensor_one, tensor_two, tensor_dest, shape, shape_len, stride_one, stride_two, dest_row_stride, max_iters, iter){\
+    const TensorIter iter(shape, stride_one, stride_two, shape_len);\
+    const auto max_iters{static_cast<size_t>(std::ceil(static_cast<float>(iter.total_elements) / BLOCK))};\
+    size_t cur_iter;\
+OMP_PARALLEL_FOR_ELEMENT_WISE\
+    for (cur_iter = 0; cur_iter < max_iters; ++cur_iter) {\
+        const size_t start_index{cur_iter * BLOCK};\
+        const size_t total{start_index + BLOCK > iter.total_elements ? iter.total_elements - start_index : BLOCK};\
+        auto *data_ptr = new size_t[total * 2];\
+        iter.get_indexes(data_ptr, data_ptr + total, start_index, total);\
+OMP_SIMD_FOR_ELEMENT_WISE\
+        for (size_t idx = 0; idx < total; ++idx) {\
+            const size_t dest_index{((cur_iter * BLOCK + idx) / shape[shape_len - 1] * dest_row_stride) + (\
+            (cur_iter * BLOCK + idx) % shape[shape_len - 1])};\
+            tensor_dest[dest_index] = operation(tensor_one[data_ptr[idx]], tensor_two[data_ptr[total + idx]]);\
+        }\
+        delete[] data_ptr;\
+    }\
+}
+
+    template<typename NumType>
+    void element_wise_op_handler(
+        const Operations op,
+        const void *tensor_one,
+        const void *tensor_two,
+        void *tensor_dest,
+        const size_t *shape,
+        const size_t shape_len,
+        const size_t *stride_one,
+        const size_t *stride_two,
+        const size_t dest_row_stride) {
+        const auto typed_tensor_one{static_cast<const NumType *>(tensor_one)};
+        const auto typed_tensor_two{static_cast<const NumType *>(tensor_two)};
+        const auto typed_tensor_dest{static_cast<NumType *>(tensor_dest)};
+
+        switch (op) {
+            case MULT: {
+                ELEMENT_WISE_ITERATOR(MULT_OP, typed_tensor_one, typed_tensor_two, typed_tensor_dest, shape, shape_len,
+                                      stride_one, stride_two, dest_row_stride, max_iters, iter);
+                return;
+            }
+            default: {
+                throw std::runtime_error("invalid element wise operation specified");
+            }
+        }
+    }
+
+    void element_wise_type_handler(
+        const Operations op,
         const void *buffer_one,
         const void *buffer_two,
         void *buffer_dest,
-        const size_t rows,
-        const size_t columns,
-        const size_t row_stride,
+        const size_t *shape,
+        const size_t shape_len,
+        const size_t *stride_one,
+        const size_t *stride_two,
+        const size_t dest_row_stride,
         const Dtype dtype) {
         switch (dtype) {
             case FLOAT64: {
-                const auto mat_one = static_cast<const double *>(buffer_one);
-                const auto mat_two = static_cast<const double *>(buffer_two);
-                const auto mat_dest = static_cast<double *>(buffer_dest);
-                element_wise_func_dispatcher<double>(index)(
-                    mat_one, mat_two, mat_dest, rows, columns, row_stride);
+                element_wise_op_handler<double>(op, buffer_one, buffer_two,
+                                                buffer_dest, shape, shape_len, stride_one, stride_two, dest_row_stride);
                 return;
             }
             case FLOAT32: {
-                const auto mat_one = static_cast<const float *>(buffer_one);
-                const auto mat_two = static_cast<const float *>(buffer_two);
-                const auto mat_dest = static_cast<float *>(buffer_dest);
-                element_wise_func_dispatcher<float>(index)(
-                    mat_one, mat_two, mat_dest, rows, columns, row_stride);
+                element_wise_op_handler<float>(op, buffer_one, buffer_two,
+                                               buffer_dest, shape, shape_len, stride_one, stride_two, dest_row_stride);
                 return;
             }
             case INT8: {
-                const auto mat_one = static_cast<const int8_t *>(buffer_one);
-                const auto mat_two = static_cast<const int8_t *>(buffer_two);
-                const auto mat_dest = static_cast<int8_t *>(buffer_dest);
-                element_wise_func_dispatcher<int8_t>(index)(
-                    mat_one, mat_two, mat_dest, rows, columns, row_stride);
+                element_wise_op_handler<int8_t>(op, buffer_one, buffer_two,
+                                                buffer_dest, shape, shape_len, stride_one, stride_two, dest_row_stride);
                 return;
             }
             case INT16: {
-                const auto mat_one = static_cast<const int16_t *>(buffer_one);
-                const auto mat_two = static_cast<const int16_t *>(buffer_two);
-                const auto mat_dest = static_cast<int16_t *>(buffer_dest);
-                element_wise_func_dispatcher<int16_t>(index)(
-                    mat_one, mat_two, mat_dest, rows, columns, row_stride);
+                element_wise_op_handler<int16_t>(op, buffer_one, buffer_two,
+                                                 buffer_dest, shape, shape_len, stride_one, stride_two,
+                                                 dest_row_stride);
                 return;
             }
             case INT32: {
-                const auto mat_one = static_cast<const int32_t *>(buffer_one);
-                const auto mat_two = static_cast<const int32_t *>(buffer_two);
-                const auto mat_dest = static_cast<int32_t *>(buffer_dest);
-                element_wise_func_dispatcher<int32_t>(index)(
-                    mat_one, mat_two, mat_dest, rows, columns, row_stride);
+                element_wise_op_handler<int32_t>(op, buffer_one, buffer_two,
+                                                 buffer_dest, shape, shape_len, stride_one, stride_two,
+                                                 dest_row_stride);
                 return;
             }
             case INT64: {
-                const auto mat_one = static_cast<const int64_t *>(buffer_one);
-                const auto mat_two = static_cast<const int64_t *>(buffer_two);
-                const auto mat_dest = static_cast<int64_t *>(buffer_dest);
-                element_wise_func_dispatcher<int64_t>(index)(
-                    mat_one, mat_two, mat_dest, rows, columns, row_stride);
+                element_wise_op_handler<int64_t>(op, buffer_one, buffer_two,
+                                                 buffer_dest, shape, shape_len, stride_one, stride_two,
+                                                 dest_row_stride);
                 return;
             }
             case INVALID: {
@@ -177,101 +287,26 @@ namespace cobraml::core {
         const void *tensor_one,
         const void *tensor_two,
         void *tensor_dest,
-        const size_t rows,
-        const size_t columns,
-        const size_t row_stride,
+        const size_t *shape,
+        const size_t shape_len,
+        const size_t *stride_one,
+        const size_t *stride_two,
+        const size_t dest_row_stride,
         const Dtype dtype) {
         set_num_threads();
 
-        element_wise_dispatcher(
-            0,
+        element_wise_type_handler(
+            MULT,
             tensor_one,
             tensor_two,
             tensor_dest,
-            rows,
-            columns,
-            row_stride,
+            shape,
+            shape_len,
+            stride_one,
+            stride_two,
+            dest_row_stride,
             dtype);
     }
-
-    template<>
-    void element_wise_power<double>(
-        const double *tensor_one,
-        const double *tensor_two,
-        double *tensor_dest,
-        const size_t rows,
-        const size_t columns,
-        const size_t row_stride) {
-        size_t row;
-#pragma omp parallel for default(none) shared(tensor_one, tensor_two, tensor_dest, rows, columns, row_stride) private(row)
-        for (row = 0; row < rows; ++row) {
-#pragma omp simd
-            for (size_t column = 0; column < columns; ++column) {
-                tensor_dest[row * row_stride + column] = pow(
-                    tensor_one[row * row_stride + column], tensor_two[row * row_stride + column]);
-            }
-        }
-    }
-
-    void StandardMath::element_wise_power(
-        const void *tensor_one,
-        const void *exponent_tensor,
-        void *tensor_dest,
-        const size_t rows,
-        const size_t columns,
-        const size_t row_stride,
-        const Dtype dtype) {
-        set_num_threads();
-
-        element_wise_dispatcher(
-            1,
-            tensor_one,
-            exponent_tensor,
-            tensor_dest,
-            rows,
-            columns,
-            row_stride,
-            dtype);
-    }
-
-    void StandardMath::element_wise_add(
-        const void *tensor_one,
-        const void *tensor_two,
-        void *tensor_dest,
-        const size_t rows,
-        const size_t columns,
-        const size_t row_stride,
-        const Dtype dtype) {
-        element_wise_dispatcher(
-            2,
-            tensor_one,
-            tensor_two,
-            tensor_dest,
-            rows,
-            columns,
-            row_stride,
-            dtype);
-    }
-
-    void StandardMath::element_wise_sub(
-        const void *tensor_one,
-        const void *tensor_two,
-        void *tensor_dest,
-        const size_t rows,
-        const size_t columns,
-        const size_t row_stride,
-        const Dtype dtype) {
-        element_wise_dispatcher(
-            3,
-            tensor_one,
-            tensor_two,
-            tensor_dest,
-            rows,
-            columns,
-            row_stride,
-            dtype);
-    }
-
 
 #ifdef AVX2
 #define SKIP 2

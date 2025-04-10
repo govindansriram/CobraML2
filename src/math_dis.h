@@ -40,9 +40,11 @@ namespace cobraml::core {
         virtual void hadamard_product(const void *tensor_one,
                                       const void *tensor_two,
                                       void *tensor_dest,
-                                      size_t rows,
-                                      size_t columns,
-                                      size_t row_stride,
+                                      const size_t *shape,
+                                      size_t shape_len,
+                                      const size_t *stride_one,
+                                      const size_t *stride_two,
+                                      size_t dest_row_stride,
                                       Dtype dtype) = 0;
 
         // virtual void hadamard_division(const void *matrix_one,
@@ -53,29 +55,29 @@ namespace cobraml::core {
         //                                size_t row_stride,
         //                                Dtype dtype);
         //
-        virtual void element_wise_add(const void *tensor_one,
-                                      const void *tensor_two,
-                                      void *tensor_dest,
-                                      size_t rows,
-                                      size_t columns,
-                                      size_t row_stride,
-                                      Dtype dtype) = 0;
-
-        virtual void element_wise_sub(const void *tensor_one,
-                                      const void *tensor_two,
-                                      void *tensor_dest,
-                                      size_t rows,
-                                      size_t columns,
-                                      size_t row_stride,
-                                      Dtype dtype) = 0;
-
-        virtual void element_wise_power(const void *tensor,
-                                        const void *exponent_tensor,
-                                        void *tensor_dest,
-                                        size_t rows,
-                                        size_t columns,
-                                        size_t row_stride,
-                                        Dtype dtype) = 0;
+        // virtual void element_wise_add(const void *tensor_one,
+        //                               const void *tensor_two,
+        //                               void *tensor_dest,
+        //                               size_t rows,
+        //                               size_t columns,
+        //                               size_t row_stride,
+        //                               Dtype dtype) = 0;
+        //
+        // virtual void element_wise_sub(const void *tensor_one,
+        //                               const void *tensor_two,
+        //                               void *tensor_dest,
+        //                               size_t rows,
+        //                               size_t columns,
+        //                               size_t row_stride,
+        //                               Dtype dtype) = 0;
+        //
+        // virtual void element_wise_power(const void *tensor,
+        //                                 const void *exponent_tensor,
+        //                                 void *tensor_dest,
+        //                                 size_t rows,
+        //                                 size_t columns,
+        //                                 size_t row_stride,
+        //                                 Dtype dtype) = 0;
 
         // virtual void element_wise_natural_logarithm(const void *matrix_one,
         //                                             const void *matrix_two,

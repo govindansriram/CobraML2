@@ -169,6 +169,7 @@ TEST(ArrayTestFunctionals, test_indexing) {
                 cobraml::core::Brarray scalar{vector[k]};
                 ASSERT_EQ(shape_scalar, scalar.get_shape());
                 ASSERT_EQ(scalar.item<int>(), vec[i * 12 + j * 4 + k]);
+                ASSERT_TRUE(check_alignment(scalar.get_buffer<int>()));
             }
         }
     }
@@ -179,33 +180,28 @@ TEST(ArrayTestFunctionals, test_indexing) {
     cobraml::core::Brarray arr2;
     ASSERT_THROW(arr2[0], std::runtime_error);
 
-    // ensuring the buffer is shared
-    cobraml::core::Brarray vector{arr[1][0]};
-    vector[2].set_item(20);
+    cobraml::core::Brarray scal_arr{arr[0][0][0]};
+    ASSERT_THROW(scal_arr[1], std::out_of_range);
+
+    arr2 = arr[1][0];;
+    arr2.get_buffer<int>()[2] = 20;
     ASSERT_EQ(arr[1][0][2].item<int>(), 20);
-}
 
-TEST(ArrayTestFunctionals, set_item) {
-    const std::vector vec{
-        1, 2, 3, 4,
-        5, 6, 7, 8,
-        9, 9, 10, 11,
+    // ensure scalars are deep copies
+    scal_arr = arr[0][0][0];
+    scal_arr.get_buffer<int>()[0] = 100;
+    ASSERT_EQ(scal_arr[0].item<int>(), 100);
+    ASSERT_NE(arr[0][0][0].item<int>(), 100);
 
-        12, 13, 14, 15,
-        16, 17, 18, 19,
-        20, 21, 22, 23
-    };
+    cobraml::core::Brarray gpu_tensor(cobraml::core::GPU, cobraml::core::FLOAT32, {10, 10});
 
-    const std::vector<size_t> shape_ten{2, 3, 4};
-    cobraml::core::Brarray arr(cobraml::core::CPU, cobraml::core::INT32, shape_ten, vec);
+    gpu_tensor = gpu_tensor[4];
+    ASSERT_EQ(gpu_tensor.get_dtype(), cobraml::core::FLOAT32);
+    ASSERT_EQ(gpu_tensor.get_device(), cobraml::core::GPU);
 
-    ASSERT_THROW(arr.set_item(10), std::out_of_range);
-    ASSERT_THROW(arr[0][0][0].set_item<float>(10.f), std::runtime_error);
-    ASSERT_THROW(cobraml::core::Brarray().set_item(10), std::runtime_error);
-
-    auto scalar{arr[0][2][3]};
-    scalar.set_item(100);
-    ASSERT_EQ(arr[0][2][3].item<int>(), 100);
+    gpu_tensor = gpu_tensor[0];
+    ASSERT_EQ(gpu_tensor.get_dtype(), cobraml::core::FLOAT32);
+    ASSERT_EQ(gpu_tensor.get_device(), cobraml::core::GPU);
 }
 
 TEST(ArrayTestFunctionals, default_constructor) {

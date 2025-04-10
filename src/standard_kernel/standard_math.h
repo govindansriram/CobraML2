@@ -7,9 +7,44 @@
 
 #include <iostream>
 #include <cmath>
+#include <vector>
+
 #include "../math_dis.h"
 
 namespace cobraml::core {
+
+    enum Operations {
+        MULT,
+        DIV,
+        ADD,
+        SUB,
+        POW,
+    };
+
+    struct TensorIter {
+        std::vector<size_t> computed_stride{};
+        const size_t *shape;
+        const size_t *stride_one;
+        const size_t *stride_two;
+        size_t shape_len{0};
+        size_t total_elements{0};
+
+        TensorIter(const size_t *shape, const size_t *stride_one, const size_t *stride_two, size_t shape_len);
+
+        TensorIter() = delete;
+
+        TensorIter(const TensorIter &) = delete; // copy ctor
+        TensorIter(TensorIter &&) = delete; // move ctor
+        TensorIter &operator=(const TensorIter &) = delete; // copy assignment
+        TensorIter &operator=(TensorIter &&) = delete;
+
+        void get_indexes(
+            size_t *index_buffer_1,
+            size_t *index_buffer_2,
+            size_t start_index,
+            size_t index_count) const;
+    };
+
     template<typename NumType>
     void gemv_naive(
         const NumType *matrix,
@@ -105,110 +140,47 @@ namespace cobraml::core {
         gemv_parallel_simd(matrix, vector, dest, alpha, beta, rows, columns, row_stride);
     }
 
+#ifndef BENCHMARK
+#define BLOCK 5
+#else
+    BLOCK 1000
+#endif
+
     template<typename NumType>
     void hadamard_product_naive(
         const NumType *tensor_one,
         const NumType *tensor_two,
         NumType *tensor_dest,
-        const size_t rows,
-        const size_t columns,
-        const size_t row_stride) {
-        size_t row;
-#pragma omp parallel for default(none) shared(tensor_one, tensor_two, tensor_dest, rows, columns, row_stride) private(row)
-        for (row = 0; row < rows; ++row) {
+        const size_t *shape,
+        const size_t shape_len,
+        const size_t *stride_one,
+        const size_t *stride_two,
+        const size_t dest_row_stride) {
+        const TensorIter iter(shape, stride_one, stride_two, shape_len);
+        const auto max_iters{static_cast<size_t>(std::ceil(static_cast<float>(iter.total_elements) / BLOCK))};
+
+        size_t cur_iter;
+#pragma omp parallel for default(none) shared(std::cout, tensor_one, tensor_two, tensor_dest, shape, shape_len, stride_one, stride_two, dest_row_stride, max_iters, iter) private(cur_iter)
+        for (cur_iter = 0; cur_iter < max_iters; ++cur_iter) {
+            const size_t start_index{cur_iter * BLOCK};
+            const size_t total{start_index + BLOCK > iter.total_elements ? iter.total_elements - start_index : BLOCK};
+            auto *data_ptr = new size_t[total * 2]; // TODO preallocate outside loop
+
+            iter.get_indexes(data_ptr, data_ptr + total, start_index, total);
+
 #pragma omp simd
-            for (size_t column = 0; column < columns; ++column) {
-                tensor_dest[row * row_stride + column] =
-                        tensor_one[row * row_stride + column] * tensor_two[row * row_stride + column];
+            for (size_t idx = 0; idx < total; ++idx) {
+                const size_t dest_index{
+                    ((cur_iter * BLOCK + idx) / shape[shape_len - 1] * dest_row_stride) + (
+                        (cur_iter * BLOCK + idx) % shape[shape_len - 1])
+                };
+
+                tensor_dest[dest_index] = tensor_one[data_ptr[idx]] * tensor_two[data_ptr[total + idx]];
             }
+
+            delete[] data_ptr;
         }
     }
-
-    template<typename NumType>
-    void element_wise_power(
-        const NumType *tensor_one,
-        const NumType *tensor_exponent,
-        NumType *tensor_dest,
-        const size_t rows,
-        const size_t columns,
-        const size_t row_stride) {
-        size_t row;
-#pragma omp parallel for default(none) shared(tensor_one, tensor_exponent, tensor_dest, rows, columns, row_stride) private(row)
-        for (row = 0; row < rows; ++row) {
-            for (size_t column = 0; column < columns; ++column) {
-                tensor_dest[row * row_stride + column] = static_cast<NumType>(
-                    pow(static_cast<double>(tensor_one[row * row_stride + column]),
-                        static_cast<double>(tensor_exponent[row * row_stride + column])));
-            }
-        }
-    }
-
-    template<typename NumType>
-    void element_wise_add(
-        const NumType *tensor_one,
-        const NumType *tensor_two,
-        NumType *tensor_dest,
-        const size_t rows,
-        const size_t columns,
-        const size_t row_stride) {
-        size_t row;
-#pragma omp parallel for default(none) shared(tensor_one, tensor_two, tensor_dest, rows, columns, row_stride) private(row)
-        for (row = 0; row < rows; ++row) {
-#pragma omp simd
-            for (size_t column = 0; column < columns; ++column) {
-                tensor_dest[row * row_stride + column] =
-                        tensor_one[row * row_stride + column] + tensor_two[row * row_stride + column];
-            }
-        }
-    }
-
-    template<typename NumType>
-void element_wise_subtract(
-    const NumType *tensor_one,
-    const NumType *tensor_two,
-    NumType *tensor_dest,
-    const size_t rows,
-    const size_t columns,
-    const size_t row_stride) {
-        size_t row;
-#pragma omp parallel for default(none) shared(tensor_one, tensor_two, tensor_dest, rows, columns, row_stride) private(row)
-        for (row = 0; row < rows; ++row) {
-#pragma omp simd
-            for (size_t column = 0; column < columns; ++column) {
-                tensor_dest[row * row_stride + column] =
-                        tensor_one[row * row_stride + column] - tensor_two[row * row_stride + column];
-            }
-        }
-    }
-
-    template<>
-    void element_wise_power<double>(
-        const double *tensor_one,
-        const double *tensor_two,
-        double *tensor_dest,
-        size_t rows,
-        size_t columns,
-        size_t row_stride);
-
-    template<typename T>
-    using ElementWiseFunc = void (*)(const T *, const T *, T *, size_t, size_t, size_t);
-
-    template<typename T>
-    ElementWiseFunc<T> element_wise_func_dispatcher(uint8_t index) {
-        switch (index) {
-            case 0:
-                return &hadamard_product_naive<T>; // Return a pointer to func_0
-            case 1:
-                return &element_wise_power<T>; // Return a pointer to func_1
-            case 2:
-                return &element_wise_add<T>;
-            case 3:
-                return &element_wise_subtract<T>;
-            default:
-                throw std::runtime_error("invalid index provided for element wise function");
-        }
-    }
-
 
 #ifdef AVX2
 
@@ -303,37 +275,39 @@ void element_wise_subtract(
             const void *tensor_one,
             const void *tensor_two,
             void *tensor_dest,
-            size_t rows,
-            size_t columns,
-            size_t row_stride,
+            const size_t *shape,
+            size_t shape_len,
+            const size_t *stride_one,
+            const size_t *stride_two,
+            size_t dest_row_stride,
             Dtype dtype) override;
 
-        void element_wise_power(
-            const void *tensor_one,
-            const void *exponent_tensor,
-            void *tensor_dest,
-            size_t rows,
-            size_t columns,
-            size_t row_stride,
-            Dtype dtype) override;
-
-        void element_wise_add(
-            const void *tensor_one,
-            const void *tensor_two,
-            void *tensor_dest,
-            size_t rows,
-            size_t columns,
-            size_t row_stride,
-            Dtype dtype) override;
-
-        void element_wise_sub(
-            const void *tensor_one,
-            const void *tensor_two,
-            void *tensor_dest,
-            size_t rows,
-            size_t columns,
-            size_t row_stride,
-            Dtype dtype) override;
+        // void element_wise_power(
+        //     const void *tensor_one,
+        //     const void *exponent_tensor,
+        //     void *tensor_dest,
+        //     size_t rows,
+        //     size_t columns,
+        //     size_t row_stride,
+        //     Dtype dtype) override;
+        //
+        // void element_wise_add(
+        //     const void *tensor_one,
+        //     const void *tensor_two,
+        //     void *tensor_dest,
+        //     size_t rows,
+        //     size_t columns,
+        //     size_t row_stride,
+        //     Dtype dtype) override;
+        //
+        // void element_wise_sub(
+        //     const void *tensor_one,
+        //     const void *tensor_two,
+        //     void *tensor_dest,
+        //     size_t rows,
+        //     size_t columns,
+        //     size_t row_stride,
+        //     Dtype dtype) override;
     };
 }
 

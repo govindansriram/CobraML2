@@ -83,6 +83,9 @@ namespace cobraml::core {
 
         Brarray &operator=(const Brarray &other);
 
+        Brarray(Brarray &&other) noexcept;
+        Brarray& operator=(Brarray&& other) noexcept;
+
         [[nodiscard]] virtual std::string to_string() const;
 
         /**
@@ -111,8 +114,8 @@ namespace cobraml::core {
          * @return the element wise product
          */
         Brarray operator*(const Brarray & other) const;
-        Brarray operator+(const Brarray & other) const;
-        Brarray operator-(const Brarray & other) const;
+        // Brarray operator+(const Brarray & other) const;
+        // Brarray operator-(const Brarray & other) const;
 
 
         /**
@@ -121,7 +124,7 @@ namespace cobraml::core {
          * @return the raw ptr buffer
          */
         template<typename T>
-        const T *get_buffer() const{
+        T *get_buffer() const{
             const Dtype current{this->get_dtype()};
             if (constexpr Dtype given = get_dtype_from_type<T>::type; given != current) {
                 throw std::runtime_error(
@@ -156,10 +159,18 @@ namespace cobraml::core {
             T alpha,
             T beta);
 
-        friend Brarray multiply(const Brarray &multiplicand, const Brarray &multiplier, bool track_gradients);
+        friend Brarray mult(const Brarray &multiplicand, const Brarray &multiplier, bool track_gradients);
+        friend Brarray imult(const Brarray &multiplicand, const Brarray &multiplier);
+
         friend Brarray pow(const Brarray &brarray, const Brarray &exponent, bool track_gradients);
+        friend Brarray ipow(const Brarray &brarray, const Brarray &exponent);
+
         friend Brarray add(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
+        friend Brarray iadd(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
+
         friend Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
+        friend Brarray isub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
+
         friend std::ostream &operator<<(std::ostream &outs, const Brarray &b);
 
         // End of the Friend API
@@ -245,10 +256,10 @@ namespace cobraml::core {
         return result;
     }
 
-    Brarray multiply(const Brarray &multiplicand, const Brarray &multiplier, bool track_gradients=true);
-    Brarray pow(const Brarray &brarray, const Brarray &exponent, bool track_gradients=true);
-    Brarray add(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);
-    Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);
+    Brarray mult(const Brarray &multiplicand, const Brarray &multiplier, bool track_gradients=true);
+    // Brarray pow(const Brarray &brarray, const Brarray &exponent, bool track_gradients=true);
+    // Brarray add(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);
+    // Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);
 }
 
 #endif //BARRAY_H

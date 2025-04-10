@@ -31,6 +31,8 @@ set(SOURCES
         src/math_dis.cpp
         src/brarray.cpp
         include/brarray.h
+        src/autograd/computation_graph.cpp
+        src/autograd/computation_graph.h
 )
 
 add_library(cobraml SHARED ${SOURCES})
@@ -39,7 +41,7 @@ add_library(cobraml SHARED ${SOURCES})
 target_include_directories(cobraml PUBLIC include)
 
 # Include directory for private headers
-target_include_directories(cobraml PRIVATE src/standard_kernel)
+target_include_directories(cobraml PRIVATE src/standard_kernel src/autograd)
 
 # Define install rules
 install(TARGETS cobraml

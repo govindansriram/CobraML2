@@ -113,6 +113,24 @@ namespace cobraml::core {
         ArrayImpl(const ArrayImpl &) = delete;
 
         ArrayImpl &operator=(const ArrayImpl &) = delete;
+
+        void multiply(const ArrayImpl *other,
+                      ArrayImpl *dest,
+                      const std::vector<size_t> &common_shape,
+                      const std::vector<size_t> &this_stride,
+                      const std::vector<size_t> &other_stride) const {
+
+            this->m_dispatcher->hadamard_product(
+                static_cast<char *>(this->buffer()) + this->offset,
+                static_cast<char *>(other->buffer()) + this->offset,
+                static_cast<char *>(dest->buffer()) + this->offset,
+                common_shape.data(),
+                common_shape.size(),
+                this_stride.data(),
+                other_stride.data(),
+                dest->buffer_container->columns,
+                dtype);
+        }
     };
 
     Brarray::Brarray(Device const device, Dtype const dtype, std::vector<size_t> const &shape): impl(
@@ -136,6 +154,17 @@ namespace cobraml::core {
                 &char_ptr[i * requested_cols * dtype_size],
                 dtype_size * requested_cols);
         }
+    }
+
+    Brarray::Brarray(Brarray &&other) noexcept: impl(std::move(other.impl)) {
+        other.impl = nullptr;
+    }
+
+    Brarray &Brarray::operator=(Brarray &&other) noexcept {
+        if (this == &other) return *this;
+        this->impl = std::move(other.impl);
+        other.impl = nullptr;
+        return *this;
     }
 
     Dtype Brarray::get_dtype() const {
@@ -194,169 +223,165 @@ namespace cobraml::core {
 
     void check_dtype(const Brarray &b1, const Brarray &b2) {
         is_invalid(b1.get_dtype());
-        // std::cout << "here" << std::endl;
         if (b1.get_dtype() != b2.get_dtype()) throw std::runtime_error("dtypes do not match");
     }
 
-    void check_shapes(const Brarray &b1, const Brarray &b2) {
+    bool check_shapes(const Brarray &b1, const Brarray &b2) {
         if (b1.get_shape().empty()) throw std::runtime_error("brarray is empty");
-        if (b1.get_shape() != b2.get_shape()) throw std::runtime_error("dtypes do not match");
+        if (b1.get_shape() != b2.get_shape()) return false;
+        return true;
     }
 
     void check_devices(const Brarray &b1, const Brarray &b2) {
         if (b1.get_device() != b2.get_device()) throw std::runtime_error("devices do not match");
     }
 
+    void leading_expand_dims(const int index, std::vector<size_t> &shape) {
+        if (shape.empty()) throw std::runtime_error("shape must not be empty");
+        if (static_cast<size_t>(index) > shape.size() - 1) throw std::runtime_error("index is not a leading dimension");
+        std::vector<size_t> new_shape(shape.size() + 1, 1);
+        shape.insert(shape.begin() + index, 1);
+    }
+
+    bool can_broadcast(const Brarray &arr_one, const Brarray &arr_two) {
+        const std::vector<size_t> &one_shape{arr_one.get_shape()};
+        const std::vector<size_t> &two_shape{arr_two.get_shape()};
+
+        const size_t small{std::min(arr_one.get_shape().size(), arr_two.get_shape().size())};
+
+        for (size_t i{1}; i < small + 1; ++i) {
+            if (one_shape[one_shape.size() - i] == two_shape[two_shape.size() - i]) continue;
+            if (one_shape[one_shape.size() - i] == 1 || two_shape[two_shape.size() - i] == 1) continue;
+            return false;
+        }
+
+        return true;
+    }
+
+    std::vector<size_t> calculate_broadcasted_shape(const Brarray &arr_one, const Brarray &arr_two) {
+        const std::vector<size_t> &one_shape{arr_one.get_shape()};
+        const std::vector<size_t> &two_shape{arr_two.get_shape()};
+
+        const size_t small{std::min(arr_one.get_shape().size(), arr_two.get_shape().size())};
+        const std::vector<size_t> &short_shape{small == one_shape.size() ? one_shape : two_shape};
+        const std::vector<size_t> &long_shape{small == one_shape.size() ? two_shape : one_shape};
+
+        std::vector<size_t> new_shape(long_shape.size(), 0);
+
+        size_t i{1};
+        for (; i <= short_shape.size(); ++i)
+            new_shape[new_shape.size() - i] = std::max(
+                short_shape[short_shape.size() - i],
+                long_shape[long_shape.size() - i]);
+        for (; i <= long_shape.size(); ++i) new_shape[new_shape.size() - i] = long_shape[long_shape.size() - i];
+
+        return new_shape;
+    }
+
+    std::vector<size_t> calculate_broadcasted_stride(
+        const std::vector<size_t> &broadcast_shape,
+        std::vector<size_t> original_shape,
+        const size_t columns) {
+        while (original_shape.size() < broadcast_shape.size()) {
+            leading_expand_dims(0, original_shape);
+        }
+
+        std::vector<size_t> new_stride(original_shape.size(), 1);
+        init_stride(original_shape, new_stride, columns);
+
+        for (size_t i = 0; i < original_shape.size(); ++i) {
+            if (original_shape[i] == 1) new_stride[i] = 0;
+        }
+
+        return new_stride;
+    }
+
+    struct ElementWiseData {
+        std::vector<size_t> shape{};
+        std::vector<size_t> stride_one{};
+        std::vector<size_t> stride_two{};
+    };
+
+    ElementWiseData validate_element_wise(
+        const Brarray &arr_one,
+        const Brarray &arr_two,
+        const size_t last_stride_one,
+        const size_t last_stride_two) {
+
+        check_dtype(arr_one, arr_two);
+        check_devices(arr_one, arr_two);
+
+        ElementWiseData ret;
+
+        if (!check_shapes(arr_one, arr_two)) {
+            if (can_broadcast(arr_one, arr_two)) {
+                ret.shape = calculate_broadcasted_shape(arr_one, arr_two);
+                ret.stride_one = calculate_broadcasted_stride(
+                    ret.shape,
+                    arr_one.get_shape(),
+                    last_stride_one);
+
+                ret.stride_two = calculate_broadcasted_stride(
+                    ret.shape,
+                    arr_two.get_shape(),
+                    last_stride_two);
+                return ret;
+            }
+
+            throw std::runtime_error("cannot perform element wise operations on invalid shapes");
+            // TODO make more descriptive
+        }
+
+        ret.shape = arr_one.get_shape();
+        ret.stride_one = arr_one.get_stride();
+        ret.stride_two = arr_two.get_stride();
+
+        return ret;
+    }
+
     Brarray Brarray::operator*(const Brarray &other) const {
-        const Brarray &current{*this};
-        check_shapes(current, other);
-        check_dtype(current, other);
-        check_devices(current, other);
+        return mult(*this, other, true);
+    }
 
-        Brarray result(this->get_device(), this->get_dtype(), this->get_shape());
+    Brarray mult(const Brarray &multiplicand, const Brarray &multiplier, const bool track_gradients) {
+        if (track_gradients) {}
 
-        this->impl->m_dispatcher->hadamard_product(
-            this->get_raw_buffer(),
-            other.get_raw_buffer(),
-            result.get_raw_buffer(),
-            this->impl->buffer_container->rows,
-            this->get_shape()[this->get_shape().size() - 1],
-            this->impl->buffer_container->columns,
-            this->get_dtype());
+        const auto [shape, stride_one, stride_two]{
+            validate_element_wise(
+                multiplicand,
+                multiplier,
+                multiplicand.impl->buffer_container->columns,
+                multiplier.impl->buffer_container->columns)};
+
+        // std::cout << "shape: ";
+        // for (const auto dim: shape) {
+        //     std::cout << dim << ",";
+        // }
+        // std::cout << std::endl;
+        //
+        // std::cout << "stride one: ";
+        // for (const auto dim: stride_one) {
+        //     std::cout << dim << ",";
+        // }
+        // std::cout << std::endl;
+        //
+        // std::cout << "stride two: ";
+        // for (const auto dim: stride_two) {
+        //     std::cout << dim << ",";
+        // }
+        // std::cout << std::endl;
+
+        Brarray result(multiplicand.get_device(), multiplicand.get_dtype(), shape);
+
+        multiplicand.impl->multiply(
+            multiplier.impl.get(),
+            result.impl.get(),
+            shape,
+            stride_one,
+            stride_two);
 
         return result;
     }
-
-    Brarray Brarray::operator+(const Brarray &other) const {
-        const Brarray &current{*this};
-        check_shapes(current, other);
-        check_dtype(current, other);
-        check_devices(current, other);
-
-        Brarray result(this->get_device(), this->get_dtype(), this->get_shape());
-
-        this->impl->m_dispatcher->element_wise_add(
-            this->get_raw_buffer(),
-            other.get_raw_buffer(),
-            result.get_raw_buffer(),
-            this->impl->buffer_container->rows,
-            this->get_shape()[this->get_shape().size() - 1],
-            this->impl->buffer_container->columns,
-            this->get_dtype());
-
-        return result;
-    }
-
-    Brarray Brarray::operator-(const Brarray &other) const {
-        const Brarray &current{*this};
-        check_shapes(current, other);
-        check_dtype(current, other);
-        check_devices(current, other);
-
-        Brarray result(this->get_device(), this->get_dtype(), this->get_shape());
-
-        this->impl->m_dispatcher->element_wise_sub(
-            this->get_raw_buffer(),
-            other.get_raw_buffer(),
-            result.get_raw_buffer(),
-            this->impl->buffer_container->rows,
-            this->get_shape()[this->get_shape().size() - 1],
-            this->impl->buffer_container->columns,
-            this->get_dtype());
-
-        return result;
-    }
-
-    Brarray multiply(const Brarray &multiplicand, const Brarray &multiplier, const bool track_gradients) {
-        if (!track_gradients) {
-        }
-
-        check_shapes(multiplicand, multiplier);
-        check_dtype(multiplicand, multiplier);
-        check_devices(multiplicand, multiplier);
-
-        Brarray dest(multiplicand.get_device(), multiplicand.get_dtype(), multiplicand.get_shape());
-
-        multiplicand.impl->m_dispatcher->hadamard_product(
-            multiplicand.get_raw_buffer(),
-            multiplier.get_raw_buffer(),
-            dest.get_raw_buffer(),
-            multiplicand.impl->buffer_container->rows,
-            multiplicand.get_shape()[multiplicand.get_shape().size() - 1],
-            multiplicand.impl->buffer_container->columns,
-            multiplicand.get_dtype());
-
-        return dest;
-    }
-
-    Brarray pow(const Brarray &brarray, const Brarray &exponent, const bool track_gradients) {
-        if (!track_gradients) {
-        }
-
-        check_shapes(brarray, exponent);
-        check_dtype(brarray, exponent);
-        check_devices(brarray, exponent);
-
-        Brarray dest(brarray.get_device(), brarray.get_dtype(), brarray.get_shape());
-
-        brarray.impl->m_dispatcher->element_wise_power(
-            brarray.get_raw_buffer(),
-            exponent.get_raw_buffer(),
-            dest.get_raw_buffer(),
-            brarray.impl->buffer_container->rows,
-            brarray.get_shape()[brarray.get_shape().size() - 1],
-            brarray.impl->buffer_container->columns,
-            brarray.get_dtype());
-
-        return dest;
-    }
-
-    Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, const bool track_gradients) {
-        if (!track_gradients) {
-        }
-
-        check_shapes(brarray_one, brarray_two);
-        check_dtype(brarray_one, brarray_two);
-        check_devices(brarray_one, brarray_two);
-
-        Brarray dest(brarray_one.get_device(), brarray_one.get_dtype(), brarray_one.get_shape());
-
-        brarray_one.impl->m_dispatcher->element_wise_sub(
-            brarray_one.get_raw_buffer(),
-            brarray_two.get_raw_buffer(),
-            dest.get_raw_buffer(),
-            brarray_one.impl->buffer_container->rows,
-            brarray_one.get_shape()[brarray_one.get_shape().size() - 1],
-            brarray_one.impl->buffer_container->columns,
-            brarray_one.get_dtype());
-
-        return dest;
-    }
-
-    Brarray add(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients) {
-        if (!track_gradients) {
-        }
-
-        check_shapes(brarray_one, brarray_two);
-        check_dtype(brarray_one, brarray_two);
-        check_devices(brarray_one, brarray_two);
-
-        Brarray dest(brarray_one.get_device(), brarray_one.get_dtype(), brarray_one.get_shape());
-
-        brarray_one.impl->m_dispatcher->element_wise_add(
-            brarray_one.get_raw_buffer(),
-            brarray_two.get_raw_buffer(),
-            dest.get_raw_buffer(),
-            brarray_one.impl->buffer_container->rows,
-            brarray_one.get_shape()[brarray_one.get_shape().size() - 1],
-            brarray_one.impl->buffer_container->columns,
-            brarray_one.get_dtype());
-
-        return dest;
-    }
-
-
-
 
     bool Brarray::is_matrix() const {
         return get_shape().size() == 2;
@@ -403,10 +428,12 @@ namespace cobraml::core {
         if (!vector.is_vector()) throw std::runtime_error("supplied 'vector' is not a vector");
         if (!this->is_vector()) throw std::runtime_error("the current brarray is not a vector");
         if (!matrix.is_matrix()) throw std::runtime_error("supplied 'matrix' is not a matrix");
-        if (matrix.get_shape()[1] != vector.get_shape()[0]) throw std::runtime_error(
-            "vector and matrix have different columns lengths");
-        if (matrix.get_shape()[0] != this->get_shape()[0]) throw std::runtime_error(
-            "the current brarray must be of shape (matrix.get_shape()[0])");
+        if (matrix.get_shape()[1] != vector.get_shape()[0])
+            throw std::runtime_error(
+                "vector and matrix have different columns lengths");
+        if (matrix.get_shape()[0] != this->get_shape()[0])
+            throw std::runtime_error(
+                "the current brarray must be of shape (matrix.get_shape()[0])");
 
 
         if (matrix.get_device() != vector.get_device() || this->get_device() != matrix.get_device()) {
@@ -446,26 +473,31 @@ namespace cobraml::core {
         if (current_shape.empty()) throw std::out_of_range("index out of bounds");
         if (index >= current_shape[0]) throw std::out_of_range("index out of bounds");
 
-        Brarray ret;
-        size_t jump;
-
         if (current_shape.size() == 1) {
-            ret.impl->stride = {1};
-            ret.impl->shape = {1};
-            jump = 1;
-        } else {
-            ret.impl->stride = impl->stride;
-            ret.impl->shape = impl->shape;
-            jump = ret.impl->stride[0];
-            ret.impl->stride.erase(ret.impl->stride.begin());
-            ret.impl->shape.erase(ret.impl->shape.begin());
+            // sadly deep copy is required to maintain alignment
+            // std::cout << "deep copy" << std::endl;
+            Brarray scalar(impl->device, impl->dtype, {1});
+            scalar.impl->buffer_container->allocator->mem_copy(
+                scalar.get_raw_buffer(),
+                static_cast<char *>(this->get_raw_buffer()) + index * dtype_to_bytes(this->impl->dtype),
+                dtype_to_bytes(this->impl->dtype)
+            );
+
+            return scalar;
         }
 
+        Brarray ret;
+
+        ret.impl->stride = impl->stride;
+        ret.impl->shape = impl->shape;
+        ret.impl->stride.erase(ret.impl->stride.begin());
+        ret.impl->shape.erase(ret.impl->shape.begin());
         ret.impl->dtype = impl->dtype;
         ret.impl->buffer_container = impl->buffer_container;
         ret.impl->m_dispatcher = impl->m_dispatcher;
         ret.impl->offset = impl->offset;
-        ret.impl->offset += jump * index * dtype_to_bytes(this->impl->dtype);
+        ret.impl->offset += impl->stride[0] * index * dtype_to_bytes(this->impl->dtype);
+        ret.impl->device = impl->device;
 
         return ret;
     }

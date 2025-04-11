@@ -14,32 +14,40 @@ namespace cobraml::core {
     struct ActivationNode;
 
     struct AutogradNode {
-        virtual ~AutogradNode() = default;
-        std::vector<std::pair<std::weak_ptr<AutogradNode>, int>> next_nodes;
+        std::vector<std::pair<std::weak_ptr<AutogradNode>, int>> next_nodes{};
         std::vector<std::shared_ptr<AutogradNode>> prev_nodes;
+        bool retain_grad;
+
+        AutogradNode(const std::initializer_list<std::shared_ptr<AutogradNode>>& previous_nodes, bool retain_grad);
+        virtual void add_next_node(const std::shared_ptr<AutogradNode> &node, int key);
+        virtual ~AutogradNode() = default;
 
     protected:
-        virtual const Brarray &get_next_gradient(int key) = 0;
-        virtual void compute_gradients() = 0;
+        virtual void accumulate_gradients(Brarray &local_gradient);
+        [[nodiscard]] virtual const Brarray &get_gradient(int key) const = 0;
+        virtual void compute_backwards_gradients() = 0;
+        virtual void release_gradients() = 0;
         friend void back_propagate(const std::shared_ptr<ActivationNode> &activation_node);
     };
 
-    struct ActivationNode: AutogradNode {
-        ActivationNode() = default;
-        // void add_next_node(const std::shared_ptr<AutogradNode> &node);
-        // void add_prev_node(const std::shared_ptr<AutogradNode> &node);
-        const Brarray& get_gradient();
+    struct ActivationNode final : AutogradNode {
+        Brarray gradient{};
+        Brarray activation;
+
+        ActivationNode(
+            const Brarray &activation,
+            const std::initializer_list<std::shared_ptr<AutogradNode>> &ptrs,
+            bool retain_gradients);
+        Brarray& get_gradient();
 
     protected:
-        std::unique_ptr<Brarray> gradient{std::make_unique<Brarray>()};
-        void compute_gradients() override;
-        const Brarray &get_next_gradient(int key) override;
+        void compute_backwards_gradients() override;
+        [[nodiscard]] const Brarray &get_gradient(int) const override;
+        void release_gradients() override;
     };
 
     void back_propagate(const std::shared_ptr<ActivationNode> &activation_node);
 }
 
-// TODO single element gemv may fail due to unalligned data
-// Test GEMV on indexed tensors
 
 #endif //COMPUTATION_GRAPH_H

@@ -5,7 +5,6 @@
 #ifndef BARRAY_H
 #define BARRAY_H
 #include <memory>
-#include <queue>
 #include <sstream>
 #include <vector>
 #include "enums.h"
@@ -48,8 +47,6 @@ namespace cobraml::core {
          *
          * @param matrix A
          * @param vector x
-         * @param rows
-         * @param columns
          * @param alpha α
          * @param beta β
          */
@@ -108,13 +105,30 @@ namespace cobraml::core {
          */
         [[nodiscard]] std::vector<size_t> get_stride() const;
 
+
+        // Gradient Descent
+        void requires_grad(bool state);
+        void retain_grad(bool state);
+        [[nodiscard]] bool retain_grad() const;
+        [[nodiscard]] bool requires_grad() const;
+        Brarray& get_gradient();
+        [[nodiscard]] Brarray shared_copy() const;
+        void backwards();
+
+
         /**
          * Hadamard Product (Element WIse Multiplication)
          * @param other the Multiplier
          * @return the element wise product
          */
         Brarray operator*(const Brarray & other) const;
-        // Brarray operator+(const Brarray & other) const;
+        Brarray operator+(const Brarray & other) const;
+
+        template<typename Dtype>
+        Brarray operator*(Dtype other) const;
+
+        template<typename Dtype>
+        Brarray operator+(Dtype other) const;
         // Brarray operator-(const Brarray & other) const;
 
 
@@ -159,17 +173,24 @@ namespace cobraml::core {
             T alpha,
             T beta);
 
-        friend Brarray mult(const Brarray &multiplicand, const Brarray &multiplier, bool track_gradients);
-        friend Brarray imult(const Brarray &multiplicand, const Brarray &multiplier);
+        friend Brarray mult(const Brarray &input, const Brarray &other, bool track_gradients);
+        friend Brarray add(const Brarray &input, const Brarray &other, bool track_gradients);
+
+        template<typename Dtype>
+        friend void imult(Brarray &input, Dtype other);
+        friend void imult(Brarray &input, const Brarray &other);
+
+        template<typename Dtype>
+        friend void iadd(Brarray &input, Dtype other);
+        friend void iadd(Brarray &input, const Brarray &other);
 
         friend Brarray pow(const Brarray &brarray, const Brarray &exponent, bool track_gradients);
-        friend Brarray ipow(const Brarray &brarray, const Brarray &exponent);
+        friend void ipow(const Brarray &brarray, const Brarray &exponent);
 
-        friend Brarray add(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
-        friend Brarray iadd(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
+        friend void iadd(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
 
         friend Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
-        friend Brarray isub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
+        friend void isub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
 
         friend std::ostream &operator<<(std::ostream &outs, const Brarray &b);
 
@@ -256,7 +277,16 @@ namespace cobraml::core {
         return result;
     }
 
-    Brarray mult(const Brarray &multiplicand, const Brarray &multiplier, bool track_gradients=true);
+    Brarray mult(const Brarray &input, const Brarray &other, bool track_gradients=true);
+    void imult(Brarray &input, const Brarray &other);
+    template<typename Dtype>
+    void imult(Brarray &input, Dtype other);
+
+    Brarray add(const Brarray &input, const Brarray &other, bool track_gradients);
+    void iadd(Brarray &input, const Brarray &other);
+    template<typename Dtype>
+    void iadd(Brarray &input, Dtype other);
+
     // Brarray pow(const Brarray &brarray, const Brarray &exponent, bool track_gradients=true);
     // Brarray add(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);
     // Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);

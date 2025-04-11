@@ -288,4 +288,59 @@ TEST(ArrayTestFunctionals, print) {
     std::cout << arr << std::endl;
 }
 
+TEST(ArrayTestFunctionals, shared_copy) {
+    const cobraml::core::Brarray base(cobraml::core::CPU, cobraml::core::INT32, {4, 4});
+    const cobraml::core::Brarray base2{base.shared_copy()};
+    ASSERT_EQ(base.get_shape(), base2.get_shape());
+    ASSERT_EQ(base.get_dtype(), base2.get_dtype());
+    ASSERT_EQ(base.get_device(), base2.get_device());
+
+    base.get_buffer<int>()[0] = 11;
+    ASSERT_EQ(base.get_buffer<int>()[0], base2.get_buffer<int>()[0]);
+}
+
+TEST(ArrayTestFunctionals, requires_grad) {
+    cobraml::core::Brarray base(cobraml::core::CPU, cobraml::core::INT32, {4, 4});
+    ASSERT_FALSE(base.requires_grad());
+
+    base.requires_grad(true);
+    ASSERT_TRUE(base.requires_grad());
+    ASSERT_TRUE(base.retain_grad());
+
+    ASSERT_TRUE(base.get_gradient().get_dtype() == cobraml::core::INVALID);
+
+    const auto base_clone{base.shared_copy()};
+    ASSERT_FALSE(base_clone.requires_grad());
+
+    base.requires_grad(false);
+    ASSERT_FALSE(base.requires_grad());
+
+    ASSERT_THROW(base.retain_grad(false), std::runtime_error);
+
+    base.requires_grad(true);
+    base.retain_grad(false);
+    ASSERT_FALSE(base.retain_grad());
+
+    ASSERT_THROW(std::cout << base.get_gradient(), std::runtime_error);
+}
+
+TEST(ArrayTestFunctionals, backward) {
+    cobraml::core::Brarray base(cobraml::core::CPU, cobraml::core::INT32, {3, 3, 5});
+    cobraml::core::Brarray vec(cobraml::core::CPU, cobraml::core::INT32, {3, 1, 1}, std::vector{1, 2, 3});
+    cobraml::core::iadd(base, 1);
+    // cobraml::core::Brarray ref = base[1];
+    cobraml::core::imult(base, vec);
+
+    std::cout << base;
+    // ref = base[9];
+    // cobraml::core::iadd(ref, 11);
+    // ref = base[0];
+    // cobraml::core::iadd(ref, 12);
+    // cobraml::core::imult(base, -8);
+
+    // auto base_0 = base[0][0];
+    // base_0.requires_grad(true);
+    // base_0.backwards();
+}
+
 //modify and test gemv

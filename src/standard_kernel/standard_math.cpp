@@ -159,7 +159,7 @@ namespace cobraml::core {
 #ifndef BENCHMARK
 #define BLOCK 5
 #else
-    BLOCK 1000
+#define BLOCK 1000
 #endif
 
 #define MULT_OP(multiplier, multiplicand) ((multiplier) * (multiplicand))
@@ -223,6 +223,11 @@ OMP_SIMD_FOR_ELEMENT_WISE\
         switch (op) {
             case MULT: {
                 ELEMENT_WISE_ITERATOR(MULT_OP, typed_tensor_one, typed_tensor_two, typed_tensor_dest, shape, shape_len,
+                                      stride_one, stride_two, dest_row_stride, max_iters, iter);
+                return;
+            }
+            case ADD: {
+                ELEMENT_WISE_ITERATOR(ADD_OP, typed_tensor_one, typed_tensor_two, typed_tensor_dest, shape, shape_len,
                                       stride_one, stride_two, dest_row_stride, max_iters, iter);
                 return;
             }
@@ -297,6 +302,31 @@ OMP_SIMD_FOR_ELEMENT_WISE\
 
         element_wise_type_handler(
             MULT,
+            tensor_one,
+            tensor_two,
+            tensor_dest,
+            shape,
+            shape_len,
+            stride_one,
+            stride_two,
+            dest_row_stride,
+            dtype);
+    }
+
+    void StandardMath::element_wise_add(
+        const void *tensor_one,
+        const void *tensor_two,
+        void *tensor_dest,
+        const size_t *shape,
+        const size_t shape_len,
+        const size_t *stride_one,
+        const size_t *stride_two,
+        const size_t dest_row_stride,
+        const Dtype dtype) {
+        set_num_threads();
+
+        element_wise_type_handler(
+            ADD,
             tensor_one,
             tensor_two,
             tensor_dest,

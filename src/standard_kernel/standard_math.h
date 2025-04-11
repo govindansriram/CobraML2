@@ -140,48 +140,6 @@ namespace cobraml::core {
         gemv_parallel_simd(matrix, vector, dest, alpha, beta, rows, columns, row_stride);
     }
 
-#ifndef BENCHMARK
-#define BLOCK 5
-#else
-    BLOCK 1000
-#endif
-
-    template<typename NumType>
-    void hadamard_product_naive(
-        const NumType *tensor_one,
-        const NumType *tensor_two,
-        NumType *tensor_dest,
-        const size_t *shape,
-        const size_t shape_len,
-        const size_t *stride_one,
-        const size_t *stride_two,
-        const size_t dest_row_stride) {
-        const TensorIter iter(shape, stride_one, stride_two, shape_len);
-        const auto max_iters{static_cast<size_t>(std::ceil(static_cast<float>(iter.total_elements) / BLOCK))};
-
-        size_t cur_iter;
-#pragma omp parallel for default(none) shared(std::cout, tensor_one, tensor_two, tensor_dest, shape, shape_len, stride_one, stride_two, dest_row_stride, max_iters, iter) private(cur_iter)
-        for (cur_iter = 0; cur_iter < max_iters; ++cur_iter) {
-            const size_t start_index{cur_iter * BLOCK};
-            const size_t total{start_index + BLOCK > iter.total_elements ? iter.total_elements - start_index : BLOCK};
-            auto *data_ptr = new size_t[total * 2]; // TODO preallocate outside loop
-
-            iter.get_indexes(data_ptr, data_ptr + total, start_index, total);
-
-#pragma omp simd
-            for (size_t idx = 0; idx < total; ++idx) {
-                const size_t dest_index{
-                    ((cur_iter * BLOCK + idx) / shape[shape_len - 1] * dest_row_stride) + (
-                        (cur_iter * BLOCK + idx) % shape[shape_len - 1])
-                };
-
-                tensor_dest[dest_index] = tensor_one[data_ptr[idx]] * tensor_two[data_ptr[total + idx]];
-            }
-
-            delete[] data_ptr;
-        }
-    }
-
 #ifdef AVX2
 
     template<>
@@ -272,6 +230,17 @@ namespace cobraml::core {
             Dtype dtype) override;
 
         void hadamard_product(
+            const void *tensor_one,
+            const void *tensor_two,
+            void *tensor_dest,
+            const size_t *shape,
+            size_t shape_len,
+            const size_t *stride_one,
+            const size_t *stride_two,
+            size_t dest_row_stride,
+            Dtype dtype) override;
+
+        void element_wise_add(
             const void *tensor_one,
             const void *tensor_two,
             void *tensor_dest,

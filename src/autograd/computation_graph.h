@@ -19,6 +19,7 @@ namespace cobraml::core {
         bool retain_grad;
 
         AutogradNode(const std::initializer_list<std::shared_ptr<AutogradNode>>& previous_nodes, bool retain_grad);
+        AutogradNode(const std::vector<std::shared_ptr<AutogradNode>>& previous_nodes, bool retain_grad);
         virtual void add_next_node(const std::shared_ptr<AutogradNode> &node, int key);
         virtual ~AutogradNode() = default;
 

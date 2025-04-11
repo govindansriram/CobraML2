@@ -8,6 +8,7 @@
 #include "math_dis.h"
 #include "allocator.h"
 #include "computation_graph.h"
+#include "layers/element_wise.h"
 
 namespace cobraml::core {
     void init_stride(std::vector<size_t> const &shape,
@@ -121,8 +122,6 @@ namespace cobraml::core {
                       const std::vector<size_t> &this_stride,
                       const std::vector<size_t> &other_stride) const {
 
-            // std::cout << this->offset << std::endl;
-
             this->m_dispatcher->hadamard_product(
                 static_cast<char *>(this->buffer()) + this->offset,
                 static_cast<char *>(other->buffer()) + other->offset,
@@ -152,6 +151,24 @@ namespace cobraml::core {
                 dest->buffer_container->columns,
                 dtype);
         }
+
+        [[nodiscard]] bool requires_grad() const {
+            return node != nullptr;
+        }
+
+        void retain_grad(const bool state) {
+            if (!requires_grad()) throw std::runtime_error("brarray must require gradients in order to retain them");
+            if (!node->retain_grad && state) node->retain_grad = true;
+            else if(node->retain_grad && !state) node->retain_grad = false;
+        }
+
+        void elementwise_link_nodes(const ArrayImpl *input, const ArrayImpl *other, const std::shared_ptr<AutogradNode> &node) {
+            if (!requires_grad()) throw std::runtime_error("brarray does not require gradients");
+            if (input->requires_grad()) input->node->add_next_node(node, 0);
+            if (other->requires_grad()) other->node->add_next_node(node, 1);
+            this->node->prev_nodes.push_back(node);
+            node->add_next_node(this->node, 0);
+        }
     };
 
     Brarray::Brarray(Device const device, Dtype const dtype, std::vector<size_t> const &shape): impl(
@@ -172,16 +189,11 @@ namespace cobraml::core {
     }
 
     bool Brarray::requires_grad() const {
-        return impl->node != nullptr;
+        return impl->requires_grad();
     }
 
     void Brarray::retain_grad(const bool state) {
-        if (!requires_grad()) throw std::runtime_error("brarray must require gradients in order to retain them");
-       if (!impl->node->retain_grad && state) {
-           impl->node->retain_grad = true;
-       } else if(impl->node->retain_grad && !state) {
-           impl->node->retain_grad = false;
-       }
+        impl->retain_grad(state);
     }
 
     bool Brarray::retain_grad() const{
@@ -465,7 +477,6 @@ namespace cobraml::core {
     }
 
     Brarray mult(const Brarray &input, const Brarray &other, const bool track_gradients) {
-        if (track_gradients) {}
 
         const auto [shape, stride_one, stride_two]{
             validate_element_wise(
@@ -475,6 +486,13 @@ namespace cobraml::core {
                 other.impl->buffer_container->columns)};
 
         Brarray result(input.get_device(), input.get_dtype(), shape);
+
+        if (track_gradients && (input.requires_grad() || other.requires_grad())) {
+            result.requires_grad(true);
+            result.retain_grad(false);
+            const auto mlt{std::make_shared<Multiply>(input, other, input.impl->node, other.impl->node)};
+            result.impl->elementwise_link_nodes(input.impl.get(), other.impl.get(), mlt);
+        }
 
         input.impl->multiply(
             other.impl.get(),

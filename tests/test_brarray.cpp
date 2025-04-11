@@ -325,13 +325,32 @@ TEST(ArrayTestFunctionals, requires_grad) {
 }
 
 TEST(ArrayTestFunctionals, backward) {
-    cobraml::core::Brarray base(cobraml::core::CPU, cobraml::core::INT32, {3, 3, 5});
-    cobraml::core::Brarray vec(cobraml::core::CPU, cobraml::core::INT32, {3, 1, 1}, std::vector{1, 2, 3});
-    cobraml::core::iadd(base, 1);
-    // cobraml::core::Brarray ref = base[1];
-    cobraml::core::imult(base, vec);
+    cobraml::core::Brarray base1(cobraml::core::CPU, cobraml::core::FLOAT32, {1});
 
-    std::cout << base;
+    iadd(base1, 5);
+
+
+    base1.requires_grad(true);
+
+    cobraml::core::Brarray z;
+
+    {
+        z = base1 * base1; // 4
+        z  = z * 10; // 2
+    }
+
+    ASSERT_TRUE(z.requires_grad());
+    z.backwards();
+
+    std::cout << z << std::endl;
+    std::cout << base1.get_gradient();
+    // std::cout << base2.get_gradient();
+    // cobraml::core::Brarray vec(cobraml::core::CPU, cobraml::core::INT32, {3, 1, 1}, std::vector{1, 2, 3});
+    // cobraml::core::iadd(base, 1);
+    // cobraml::core::Brarray ref = base[1];
+    // cobraml::core::imult(base, vec);
+
+    // std::cout << base;
     // ref = base[9];
     // cobraml::core::iadd(ref, 11);
     // ref = base[0];

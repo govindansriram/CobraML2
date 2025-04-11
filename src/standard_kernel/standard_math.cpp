@@ -288,6 +288,10 @@ OMP_SIMD_FOR_ELEMENT_WISE\
         }
     }
 
+    void reduction() {
+
+    }
+
     void StandardMath::hadamard_product(
         const void *tensor_one,
         const void *tensor_two,

@@ -412,3 +412,35 @@ TEST(MathTestFunc, imult) {
     b_vec = cobraml::core::Brarray(cobraml::core::CPU, cobraml::core::FLOAT32, {1, 36}, expanded_vector_1);
     ASSERT_THROW(imult(b_tensor, b_vec), std::runtime_error);
 }
+
+TEST(MathTestFunc, permute) {
+
+    const std::vector<float> data{
+        1,  2,  3,
+        4,  5,  6,
+        7,  8,  9,
+
+        10, 11, 12,
+        13, 14, 15,
+        16, 17, 18,
+
+        19, 20, 21,
+        22, 23, 24,
+        25, 26, 27,
+
+        28, 29, 30,
+        31, 32, 33,
+        34, 35, 36
+    };
+
+    cobraml::core::Brarray tensor(cobraml::core::CPU, cobraml::core::FLOAT32, {2, 2, 9}, data);
+    cobraml::core::Brarray matrix{tensor[0]};
+
+    std::cout << matrix.permute({1, 0});
+
+    tensor = tensor.permute({1, 2, 0});
+
+    std::cout << tensor;
+
+    std::cout << tensor.permute({0, 2, 1});
+}

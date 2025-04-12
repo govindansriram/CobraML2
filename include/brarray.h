@@ -112,9 +112,11 @@ namespace cobraml::core {
         [[nodiscard]] bool retain_grad() const;
         [[nodiscard]] bool requires_grad() const;
         Brarray& get_gradient();
-        [[nodiscard]] Brarray shared_copy() const;
         void backwards();
 
+
+        [[nodiscard]] Brarray shared_copy() const;
+        Brarray permute(const std::vector<size_t>& dims, bool requires_grad=true) const;
 
         /**
          * Hadamard Product (Element WIse Multiplication)

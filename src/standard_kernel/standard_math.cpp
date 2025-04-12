@@ -31,6 +31,21 @@ namespace cobraml::core {
         }
     }
 
+    static size_t get_thread_count() {
+        set_num_threads();
+        static size_t thread_count{0};
+
+        if (!thread_count) {
+#ifdef NUM_THREADS
+            thread_count = NUM_THREADS;
+#else
+            thread_count = omp_get_max_threads();
+#endif
+        }
+
+        return thread_count;
+    }
+
     TensorIter::TensorIter(const size_t *shape, const size_t *stride_one, const size_t *stride_two,
                            const size_t shape_len): shape(shape), stride_one(stride_one), stride_two(stride_two),
                                                     shape_len(shape_len) {
@@ -52,7 +67,7 @@ namespace cobraml::core {
 #endif
     }
 
-    size_t compute_index(size_t index, const std::vector<size_t> &generic_stride, const size_t *padded_stride) {
+    inline size_t compute_index(size_t index, const std::vector<size_t> &generic_stride, const size_t *padded_stride) {
         size_t comp_ind{0};
 
         for (size_t i{0}; i < generic_stride.size(); ++i) {
@@ -76,6 +91,26 @@ namespace cobraml::core {
             index_buffer_2[i] = compute_index(idx, computed_stride, stride_two);
         }
     }
+
+    // TODO test equals and permute
+    template<typename Dtype>
+    bool equals(
+        const void *tensor_1,
+        void *tensor_2,
+        const size_t total_len) {
+
+        const auto t1 = static_cast<const Dtype *>(tensor_1);
+        const auto t2 = static_cast<const Dtype *>(tensor_2);
+
+        size_t i;
+#pragma omp parallel for default(none) shared(t1, t2, total_len) private(i)
+        for (i = 0; i < total_len; ++i) {
+            if (t1[i] != t2[i]) return false;
+        }
+
+        return true;
+    }
+
 
 
     void StandardMath::gemv(
@@ -288,9 +323,182 @@ OMP_SIMD_FOR_ELEMENT_WISE\
         }
     }
 
-    void reduction() {
+    inline void compute_shape(
+        size_t index,
+        size_t * current_shape,
+        const size_t * original_stride,
+        const size_t shape_len) {
 
+        for (size_t i{0}; i < shape_len; ++i) {
+            current_shape[i] = index / original_stride[i];
+            index -= original_stride[i] * current_shape[i];
+        }
     }
+
+    inline size_t calculate_index(
+        const size_t * current_shape,
+        const size_t * permute_mask,
+        const size_t * new_stride,
+        const size_t shape_len) {
+
+        size_t idx{0};
+        for (size_t i{0}; i < shape_len; ++i) idx += current_shape[permute_mask[i]] * new_stride[i];
+        return idx;
+    }
+
+    template<typename Dtype>
+    void basic_permutation(
+        const void * tensor,
+        void * dest,
+        const size_t shape_len,
+        const size_t row_stride,
+        const size_t rows,
+        const size_t columns,
+        const size_t * permute_mask,
+        const size_t * original_stride,
+        const size_t * dest_stride) {
+
+        // std::cout << original_stride[0] << original_stride[1] << std::endl;
+
+        auto cast_tensor{static_cast<const Dtype *>(tensor)};
+        auto cast_dest{static_cast<Dtype *>(dest)};
+
+        // TODO create kernels for common case, matrix transpose, flatten in possible
+
+        const size_t tc{get_thread_count()};
+        auto shape_ptr = new size_t[tc * shape_len];
+
+        size_t column;
+        for (size_t row{0}; row < rows;  ++row) {
+            // TODO add prefetching of some sort for transposed column variables
+#pragma omp parallel for default(none) shared(std::cout, columns, row, row_stride, cast_tensor, cast_dest, shape_ptr, shape_len, permute_mask, dest_stride, original_stride) private(column)
+            for (column = 0; column < columns; ++column) {
+                size_t index = row * row_stride + column;
+                Dtype val = cast_tensor[index];
+
+                const size_t tid{static_cast<size_t>(omp_get_thread_num())};
+                size_t * current_shape{shape_ptr + tid * shape_len};
+                compute_shape(index, current_shape, original_stride, shape_len);
+
+                // std::cout << current_shape[0] << current_shape[1] << std::endl;
+
+                size_t dest_index = calculate_index(current_shape, permute_mask, dest_stride, shape_len);
+                cast_dest[dest_index] = val;
+            }
+        }
+
+        delete[] shape_ptr;
+    }
+
+    size_t total_rows(const size_t * shape, const size_t shape_len) {
+        size_t rows{1};
+        for (size_t i{0}; i < shape_len - 1; ++i) rows *= shape[i];
+        return rows;
+    }
+
+    void StandardMath::permute(
+        const void *tensor,
+        void *dest,
+        const size_t shape_len,
+        const size_t *original_shape,
+        const size_t *permute_mask,
+        const size_t *original_stride,
+        const size_t *dest_stride,
+        const Dtype dtype) {
+
+        const size_t row_stride{original_stride[shape_len - 2]};
+        const size_t columns{original_shape[shape_len - 1]};
+        const size_t rows{total_rows(original_shape, shape_len)};
+
+        switch (dtype) {
+            case FLOAT64: {
+                basic_permutation<double>(tensor, dest, shape_len, row_stride, rows,
+                    columns, permute_mask, original_stride, dest_stride);
+                return;
+            }
+            case FLOAT32: {
+                basic_permutation<float>(tensor, dest, shape_len, row_stride, rows,
+                    columns, permute_mask, original_stride, dest_stride);
+                return;
+            }
+            case INT64: {
+                basic_permutation<int64_t>(tensor, dest, shape_len, row_stride, rows,
+                    columns, permute_mask, original_stride, dest_stride);
+                return;
+            }
+            case INT32: {
+                basic_permutation<int32_t>(tensor, dest, shape_len, row_stride, rows,
+                    columns, permute_mask, original_stride, dest_stride);
+                return;
+            }
+            case INT16: {
+                basic_permutation<int16_t>(tensor, dest, shape_len, row_stride, rows,
+                    columns, permute_mask, original_stride, dest_stride);
+                return;
+            }
+            case INT8:{
+                basic_permutation<int8_t>(tensor, dest, shape_len, row_stride, rows,
+                    columns, permute_mask, original_stride, dest_stride);
+                return;
+            }
+            case INVALID: {
+                throw std::runtime_error("cannot calculate gemv on invalid type");
+            }
+        }
+    }
+
+
+//     template<typename Dtype>
+//     void single_reduction(
+//         const Dtype * tensor,
+//         Dtype * dest,
+//         const size_t tensor_rows,
+//         const size_t tensor_row_length,
+//         const size_t tensor_row_stride,
+//         const size_t dest_row_length,
+//         const size_t dest_row_stride) {
+//
+//         // TODO add faster binary reduction kernel, add permutaiton code (transpose kernel)
+//         // TODO add avx2 intrinsics
+//         // TODO look into #pragma omp parallel for collapse(2)
+//         // TODO look into omp tasks
+//
+//         const size_t tc = get_thread_count();
+//         const size_t block_size{tc >= tensor_row_length ? tensor_row_length : tensor_row_length / tc};
+//         const size_t block_count{static_cast<size_t>(
+//                 std::ceil(static_cast<double>(tensor_row_length) / static_cast<double>(block_size)))};
+//
+//         auto partials = new Dtype[block_count]{};
+//
+//         size_t blok;
+//         for (size_t row{0}; row < tensor_rows; ++row) {
+//             size_t idx{row / dest_row_length * dest_row_stride + row % dest_row_length};
+//
+// #pragma omp parallel for default(none) shared(tensor, block_count, block_size, tensor_row_length, row, tensor_row_stride, dest, dest_row_length, dest_row_stride, idx, partials) private(blok)
+//             for (blok = 0; blok < block_count; ++blok) {
+//                 size_t start{blok * block_size};
+//                 const size_t end = std::min((blok + 1) * block_size, tensor_row_length);
+//                 Dtype sum{0};
+//
+// #pragma omp simd reduction(+:sum)
+//                 for (; start < end; ++start) {
+//                     sum += tensor[row * tensor_row_stride + start];
+//                 }
+//
+//                 partials[blok] = sum;
+//             }
+//
+//             Dtype sum{0};
+// #pragma omp simd reduction(+:sum)
+//             for (size_t i = 0; i < block_count; ++i) {
+//                 sum += partials[i];
+//             }
+//
+//             dest[idx] = sum;
+//         }
+//
+//         delete[] partials;
+//     }
 
     void StandardMath::hadamard_product(
         const void *tensor_one,

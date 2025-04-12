@@ -218,6 +218,24 @@ namespace cobraml::core {
 
     class StandardMath final : public Math {
     public:
+
+        bool equals(
+            const void * tensor_1,
+            void * tensor_2,
+            const size_t * tensor_shape,
+            const size_t * tensor_stride,
+            Dtype dtype) override;
+
+        void permute(
+            const void *tensor,
+            void *dest,
+            size_t shape_len,
+            const size_t *original_shape,
+            const size_t *permute_mask,
+            const size_t *original_stride,
+            const size_t *dest_stride,
+            Dtype dtype) override;
+
         void gemv(
             const void *matrix,
             const void *vector,

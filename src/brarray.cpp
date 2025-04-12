@@ -116,6 +116,12 @@ namespace cobraml::core {
 
         ArrayImpl &operator=(const ArrayImpl &) = delete;
 
+        [[nodiscard]] void *get_raw_buffer() const {
+            if (buffer_container == nullptr) throw std::runtime_error("data buffer is null");
+            return static_cast<char *>(buffer()) + offset;
+        }
+
+
         void multiply(const ArrayImpl *other,
                       ArrayImpl *dest,
                       const std::vector<size_t> &common_shape,
@@ -123,9 +129,9 @@ namespace cobraml::core {
                       const std::vector<size_t> &other_stride) const {
 
             this->m_dispatcher->hadamard_product(
-                static_cast<char *>(this->buffer()) + this->offset,
-                static_cast<char *>(other->buffer()) + other->offset,
-                static_cast<char *>(dest->buffer()) + dest->offset,
+                get_raw_buffer(),
+                other->get_raw_buffer(),
+                dest->get_raw_buffer(),
                 common_shape.data(),
                 common_shape.size(),
                 this_stride.data(),
@@ -141,14 +147,26 @@ namespace cobraml::core {
                  const std::vector<size_t> &other_stride) const {
 
             this->m_dispatcher->element_wise_add(
-                static_cast<char *>(this->buffer()) + this->offset,
-                static_cast<char *>(other->buffer()) + other->offset,
-                static_cast<char *>(dest->buffer()) + dest->offset,
+            get_raw_buffer(),
+            other->get_raw_buffer(),
+            dest->get_raw_buffer(),
                 common_shape.data(),
                 common_shape.size(),
                 this_stride.data(),
                 other_stride.data(),
                 dest->buffer_container->columns,
+                dtype);
+        }
+
+        void permute(ArrayImpl *dest, const std::vector<size_t> &permute_mask) const {
+            m_dispatcher->permute(
+                get_raw_buffer(),
+                dest->get_raw_buffer(),
+                shape.size(),
+                shape.data(),
+                permute_mask.data(),
+                stride.data(),
+                dest->stride.data(),
                 dtype);
         }
 
@@ -258,11 +276,7 @@ namespace cobraml::core {
     }
 
     void *Brarray::get_raw_buffer() const {
-        if (impl->buffer_container == nullptr) {
-            throw std::runtime_error("data buffer is null");
-        }
-
-        return static_cast<char *>(impl->buffer()) + impl->offset;
+        return impl->get_raw_buffer();
     }
 
     Brarray::~Brarray() = default;
@@ -601,6 +615,41 @@ namespace cobraml::core {
         const Brarray& th{*this};
         return add(th, scalar_to_brarray(th, other), true);
     }
+
+    std::vector<size_t> get_permuted_shape(const std::vector<size_t> &shape, const std::vector<size_t> &mask) {
+        if (mask.size() != shape.size()) throw std::runtime_error("permutation is missing dimensions");
+
+        std::vector<size_t> ret;
+        ret.reserve(shape.size());
+
+        // arithmetic series sum
+        size_t sm = (shape.size() - 1) * shape.size() / 2;
+        for (const auto &dim: mask) {
+            if (dim >= shape.size()) throw std::runtime_error("invalid permutation provided"); //TODO make more descriptive
+            ret.push_back(shape[dim]);
+            sm -= dim;
+        }
+
+        if (sm != 0) throw std::runtime_error("invalid permutation provided");
+        return ret;
+    }
+
+    Brarray Brarray::permute(const std::vector<size_t>& dims, const bool requires_grad) const {
+        is_invalid(this->get_dtype());
+        if (is_vector()) throw std::runtime_error("cannot permute brarray with only 1 dimension");
+        const std::vector permuted_shape{get_permuted_shape(impl->shape, dims)};
+
+        if (permuted_shape == impl->shape) {
+            Brarray ret{*this};
+            return ret;
+        }
+
+        Brarray ret(this->get_device(), this->get_dtype(), permuted_shape);
+        if (requires_grad) {} // TODO add gradient integration
+        impl->permute(ret.impl.get(), dims);
+        return ret;
+    }
+
 
     bool Brarray::is_matrix() const {
         return get_shape().size() == 2;

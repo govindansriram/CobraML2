@@ -12,6 +12,36 @@ namespace cobraml::core {
     public:
         virtual ~Math() = default;
 
+        virtual bool equals(
+            const void * tensor_1,
+            void * tensor_2,
+            const size_t * tensor_shape,
+            const size_t * tensor_stride,
+            Dtype dtype) = 0;
+
+        /**
+         * permutes the data in tensor to fit the shape derived from the mask
+         * For example original_shape = [5, 10] permute_mask = [1, 0]
+         * this means dest_shape = [10, 50 so tensor[i][j] = dest[j][i]
+         * @param tensor the original data
+         * @param dest the permuted tensor being modified
+         * @param shape_len how many dimensions are present in the shape
+         * @param original_shape the shape of the tensor
+         * @param permute_mask the new ordering of the shape for the permuted tensor
+         * @param original_stride the stride of the original tensor
+         * @param dest_stride the stride of the permuted tensor
+         * @param dtype the datatype
+         */
+        virtual void permute(
+            const void * tensor,
+            void * dest,
+            size_t shape_len,
+            const size_t *original_shape,
+            const size_t * permute_mask,
+            const size_t * original_stride,
+            const size_t * dest_stride,
+            Dtype dtype) = 0;
+
         /**
          * generalized matrix vector multiplication
          * y=α×A×x+β×y

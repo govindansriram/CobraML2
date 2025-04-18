@@ -84,6 +84,24 @@ namespace cobraml::core {
     struct get_dtype_from_type<double> {
         static constexpr Dtype type = FLOAT64;
     };
+
+#define INSTANTIATE_OPERATOR(operation)\
+    template Brarray operation<float>(float other) const;\
+    template Brarray operation<double>(double other) const;\
+    template Brarray operation<int64_t>(int64_t other) const;\
+    template Brarray operation<int32_t>(int32_t other) const;\
+    template Brarray operation<int16_t>(int16_t other) const;\
+    template Brarray operation<int8_t>(int8_t other) const;\
+
+
+#define INSTANTIATE_INPLACE_OPERATOR(operation)\
+    template void operation<float>(Brarray &input, const float other);\
+    template void operation<double>(Brarray &input, const double other);\
+    template void operation<int64_t>(Brarray &input, const int64_t other);\
+    template void operation<int32_t>(Brarray &input, const int32_t other);\
+    template void operation<int16_t>(Brarray &input, const int16_t other);\
+    template void operation<int8_t>(Brarray &input, const int8_t other);\
+
 }
 
 #endif //ENUMS_H

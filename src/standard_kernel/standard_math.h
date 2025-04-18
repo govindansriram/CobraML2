@@ -6,10 +6,45 @@
 #define STANDARD_MATH_H
 
 #include <iostream>
+#include <cmath>
+#include <vector>
 
 #include "../math_dis.h"
 
 namespace cobraml::core {
+
+    enum Operations {
+        MULT,
+        DIV,
+        ADD,
+        SUB,
+        POW,
+    };
+
+    struct TensorIter {
+        std::vector<size_t> computed_stride{};
+        const size_t *shape;
+        const size_t *stride_one;
+        const size_t *stride_two;
+        size_t shape_len{0};
+        size_t total_elements{0};
+
+        TensorIter(const size_t *shape, const size_t *stride_one, const size_t *stride_two, size_t shape_len);
+
+        TensorIter() = delete;
+
+        TensorIter(const TensorIter &) = delete; // copy ctor
+        TensorIter(TensorIter &&) = delete; // move ctor
+        TensorIter &operator=(const TensorIter &) = delete; // copy assignment
+        TensorIter &operator=(TensorIter &&) = delete;
+
+        void get_indexes(
+            size_t *index_buffer_1,
+            size_t *index_buffer_2,
+            size_t start_index,
+            size_t index_count) const;
+    };
+
     template<typename NumType>
     void gemv_naive(
         const NumType *matrix,
@@ -66,7 +101,7 @@ namespace cobraml::core {
         size_t const row_stride) {
         size_t start;
 
-#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, rows, columns, row_stride) private(start) schedule(dynamic)
+#pragma omp parallel for default(none) shared(alpha, beta, matrix, vector, dest, rows, columns, row_stride) private(start) schedule(static)
         for (start = 0; start < rows; ++start) {
             NumType partial = 0;
 
@@ -104,7 +139,6 @@ namespace cobraml::core {
         size_t const row_stride) {
         gemv_parallel_simd(matrix, vector, dest, alpha, beta, rows, columns, row_stride);
     }
-
 
 #ifdef AVX2
 
@@ -183,6 +217,25 @@ namespace cobraml::core {
 #endif
 
     class StandardMath final : public Math {
+    public:
+
+        bool equals(
+            const void * tensor_1,
+            void * tensor_2,
+            const size_t * tensor_shape,
+            const size_t * tensor_stride,
+            Dtype dtype) override;
+
+        void permute(
+            const void *tensor,
+            void *dest,
+            size_t shape_len,
+            const size_t *original_shape,
+            const size_t *permute_mask,
+            const size_t *original_stride,
+            const size_t *dest_stride,
+            Dtype dtype) override;
+
         void gemv(
             const void *matrix,
             const void *vector,
@@ -193,6 +246,55 @@ namespace cobraml::core {
             size_t columns,
             size_t row_stride,
             Dtype dtype) override;
+
+        void hadamard_product(
+            const void *tensor_one,
+            const void *tensor_two,
+            void *tensor_dest,
+            const size_t *shape,
+            size_t shape_len,
+            const size_t *stride_one,
+            const size_t *stride_two,
+            size_t dest_row_stride,
+            Dtype dtype) override;
+
+        void element_wise_add(
+            const void *tensor_one,
+            const void *tensor_two,
+            void *tensor_dest,
+            const size_t *shape,
+            size_t shape_len,
+            const size_t *stride_one,
+            const size_t *stride_two,
+            size_t dest_row_stride,
+            Dtype dtype) override;
+
+        // void element_wise_power(
+        //     const void *tensor_one,
+        //     const void *exponent_tensor,
+        //     void *tensor_dest,
+        //     size_t rows,
+        //     size_t columns,
+        //     size_t row_stride,
+        //     Dtype dtype) override;
+        //
+        // void element_wise_add(
+        //     const void *tensor_one,
+        //     const void *tensor_two,
+        //     void *tensor_dest,
+        //     size_t rows,
+        //     size_t columns,
+        //     size_t row_stride,
+        //     Dtype dtype) override;
+        //
+        // void element_wise_sub(
+        //     const void *tensor_one,
+        //     const void *tensor_two,
+        //     void *tensor_dest,
+        //     size_t rows,
+        //     size_t columns,
+        //     size_t row_stride,
+        //     Dtype dtype) override;
     };
 }
 

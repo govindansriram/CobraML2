@@ -31,3 +31,9 @@ make same code for neon but possibly use inline asm
 - add mat mul and other mathemetical operators
 - add gpu support
 - take break (do either threading lib or GC)
+
+## FUTURE FEATURES
+
+- BUILTIN Quantization aware training
+- Builtin lora support
+- builtin autograd engine

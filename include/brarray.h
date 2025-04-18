@@ -5,7 +5,6 @@
 #ifndef BARRAY_H
 #define BARRAY_H
 #include <memory>
-#include <queue>
 #include <sstream>
 #include <vector>
 #include "enums.h"
@@ -48,8 +47,6 @@ namespace cobraml::core {
          *
          * @param matrix A
          * @param vector x
-         * @param rows
-         * @param columns
          * @param alpha α
          * @param beta β
          */
@@ -83,6 +80,9 @@ namespace cobraml::core {
 
         Brarray &operator=(const Brarray &other);
 
+        Brarray(Brarray &&other) noexcept;
+        Brarray& operator=(Brarray&& other) noexcept;
+
         [[nodiscard]] virtual std::string to_string() const;
 
         /**
@@ -106,13 +106,41 @@ namespace cobraml::core {
         [[nodiscard]] std::vector<size_t> get_stride() const;
 
 
+        // Gradient Descent
+        void requires_grad(bool state);
+        void retain_grad(bool state);
+        [[nodiscard]] bool retain_grad() const;
+        [[nodiscard]] bool requires_grad() const;
+        Brarray& get_gradient();
+        void backwards();
+
+
+        [[nodiscard]] Brarray shared_copy() const;
+        Brarray permute(const std::vector<size_t>& dims, bool requires_grad=true) const;
+
+        /**
+         * Hadamard Product (Element WIse Multiplication)
+         * @param other the Multiplier
+         * @return the element wise product
+         */
+        Brarray operator*(const Brarray & other) const;
+        Brarray operator+(const Brarray & other) const;
+
+        template<typename Dtype>
+        Brarray operator*(Dtype other) const;
+
+        template<typename Dtype>
+        Brarray operator+(Dtype other) const;
+        // Brarray operator-(const Brarray & other) const;
+
+
         /**
          * provides access to the underlying buffer
          * @tparam T the type that the ptr should be cast too, it must match the Dtype
          * @return the raw ptr buffer
          */
         template<typename T>
-        const T *get_buffer() const{
+        T *get_buffer() const{
             const Dtype current{this->get_dtype()};
             if (constexpr Dtype given = get_dtype_from_type<T>::type; given != current) {
                 throw std::runtime_error(
@@ -131,6 +159,7 @@ namespace cobraml::core {
                                                          shape,
                                                          data.data())) {}
 
+        // Start of the Friend API
         template<typename T>
         friend void gemv(
             Brarray &result,
@@ -146,7 +175,28 @@ namespace cobraml::core {
             T alpha,
             T beta);
 
+        friend Brarray mult(const Brarray &input, const Brarray &other, bool track_gradients);
+        friend Brarray add(const Brarray &input, const Brarray &other, bool track_gradients);
+
+        template<typename Dtype>
+        friend void imult(Brarray &input, Dtype other);
+        friend void imult(Brarray &input, const Brarray &other);
+
+        template<typename Dtype>
+        friend void iadd(Brarray &input, Dtype other);
+        friend void iadd(Brarray &input, const Brarray &other);
+
+        friend Brarray pow(const Brarray &brarray, const Brarray &exponent, bool track_gradients);
+        friend void ipow(const Brarray &brarray, const Brarray &exponent);
+
+        friend void iadd(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
+
+        friend Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
+        friend void isub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
+
         friend std::ostream &operator<<(std::ostream &outs, const Brarray &b);
+
+        // End of the Friend API
 
         /**
          * Gets the tensor present at that specific dimension shares data with the original tensor
@@ -228,6 +278,20 @@ namespace cobraml::core {
         gemv(result, matrix, vector, alpha, beta);
         return result;
     }
+
+    Brarray mult(const Brarray &input, const Brarray &other, bool track_gradients=true);
+    void imult(Brarray &input, const Brarray &other);
+    template<typename Dtype>
+    void imult(Brarray &input, Dtype other);
+
+    Brarray add(const Brarray &input, const Brarray &other, bool track_gradients);
+    void iadd(Brarray &input, const Brarray &other);
+    template<typename Dtype>
+    void iadd(Brarray &input, Dtype other);
+
+    // Brarray pow(const Brarray &brarray, const Brarray &exponent, bool track_gradients=true);
+    // Brarray add(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);
+    // Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);
 }
 
 #endif //BARRAY_H

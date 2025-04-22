@@ -120,7 +120,7 @@ namespace cobraml::core {
         //                                             Dtype dtype);
     };
 
-    extern std::array<std::unique_ptr<Math>, 3> global_math_kernels;
+    extern std::array<std::unique_ptr<Math>, 4> global_math_kernels;
 
     Math *get_math_kernels(Device device);
 }

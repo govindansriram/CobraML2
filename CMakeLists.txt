@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.22)
-project(cobraml VERSION 0.0.0)
+set(CMAKE_CUDA_ARCHITECTURES 89) # reduce build times to incorporate more archs add 52 60 75
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+project(cobraml VERSION 0.0.0 LANGUAGES CXX CUDA)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
 
 ####################### libs #######################
 find_package(OpenMP REQUIRED)
 find_package(benchmark REQUIRED)
+find_package(CUDAToolkit REQUIRED)
 
 # releases can be found here https://github.com/google/googletest/releases always pick the link with zip
 include(FetchContent)
@@ -35,6 +37,10 @@ set(SOURCES
         src/autograd/computation_graph.h
         src/autograd/layers/element_wise.cpp
         src/autograd/layers/element_wise.h
+        src/cuda_standard_kernel/cuda_allocator.cpp
+        src/cuda_standard_kernel/cuda_allocator.h
+        src/cuda_standard_kernel/cuda_helpers.h
+        include/context.h
 )
 
 add_library(cobraml SHARED ${SOURCES})
@@ -43,7 +49,13 @@ add_library(cobraml SHARED ${SOURCES})
 target_include_directories(cobraml PUBLIC include)
 
 # Include directory for private headers
-target_include_directories(cobraml PRIVATE src/standard_kernel src/autograd srd/autograd/layers)
+target_include_directories(cobraml PRIVATE src/standard_kernel src/autograd src/autograd/layers src/cuda_standard_kernel ${CUDA_INCLUDE_DIRS})
+target_link_libraries(cobraml PRIVATE CUDA::cudart)
+
+set_target_properties(cobraml PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        CUDA_SEPARABLE_COMPILATION ON
+)
 
 # Define install rules
 install(TARGETS cobraml
@@ -112,6 +124,24 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(cobraml PRIVATE ${TEST_COMPILE_OPTIONS})
 elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(cobraml PRIVATE ${BENCH_COMPILE_OPTIONS})
+endif ()
+
+
+############################### ADD cuda compilation flags ###############################################
+set(CUDA_COMPILE_OPTIONS_DEBUG
+        -O0
+        -G
+        --ptxas-options=-v
+)
+
+set(CUDA_COMPILE_OPTIONS_RELEASE
+        -O3
+)
+
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(cobraml PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_COMPILE_OPTIONS_DEBUG}>)
+elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(cobraml PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_COMPILE_OPTIONS_RELEASE}>)
 endif ()
 
 ####################### test settings #######################

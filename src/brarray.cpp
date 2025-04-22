@@ -11,9 +11,19 @@
 #include "layers/element_wise.h"
 
 namespace cobraml::core {
+    /**
+     * calculate the stride of the brarray
+     * @param shape the shape of the brarray
+     * @param stride the stride that will be overwritten must be prefilled with the same amount of dims as shape
+     * @param column_count the stride of the 2nd dimension in the brarray which is the amount of columns. This value
+     * may not be the same as the shape value, if padding is added by the allocator
+     */
     void init_stride(std::vector<size_t> const &shape,
                      std::vector<size_t> &stride,
                      size_t const column_count) {
+
+        if (shape.size() != stride.size()) throw std::runtime_error("shape and stride need to be the same length");
+
         stride[stride.size() - 1] = 1;
 
         if (shape.size() == 1)
@@ -30,47 +40,73 @@ namespace cobraml::core {
     struct BufferContainer {
         void *buffer{nullptr};
         Allocator *allocator{nullptr};
-        size_t columns{0};
-        size_t rows{0};
-        size_t dtype_size{0};
+        std::unique_ptr<BufferContext> ctx{nullptr};
+        Device device{CPU};
+        Dtype dtype{INVALID};
+        size_t true_column_len{0};
 
-        BufferContainer() = default;
-
-        BufferContainer(size_t const rows, size_t const columns, Allocator *p_alloc,
-                        size_t const dtype_size): allocator(p_alloc), rows(rows), dtype_size(dtype_size) {
-            this->columns = allocator->calloc(&buffer, rows, columns, dtype_size) / dtype_size;
+        BufferContainer(const std::vector<size_t> &shape, Device const device, Dtype const dtype):
+            allocator(get_allocator(device)), device(device), dtype(dtype) {
+            auto[b_ctx, allocated_bytes] = allocator->calloc(&buffer, shape, dtype);
+            const size_t rows{calculate_total_rows(shape)};
+            true_column_len = allocated_bytes / rows / dtype_to_bytes(dtype);
+            ctx = std::move(b_ctx);
         }
 
         ~BufferContainer() {
-            allocator->free(buffer);
+            allocator->free(buffer, ctx.get());
         }
 
-        BufferContainer(const BufferContainer &other): allocator(other.allocator), columns(other.columns),
-                                                       rows(other.rows), dtype_size(other.dtype_size) {
-            allocator->calloc(&buffer, rows, columns, dtype_size);
-            allocator->mem_copy(buffer, other.buffer, rows * columns * dtype_size);
+        [[nodiscard]] size_t get_true_column_len() const {
+            return true_column_len;
         }
 
-        BufferContainer &operator=(const BufferContainer &other) {
-            if (this == &other) return *this;
-            if (other.rows * other.columns * other.dtype_size != rows * columns * dtype_size) {
-                allocator->free(buffer);
-                other.allocator->calloc(&buffer, other.rows, other.columns, other.dtype_size);
-            }
+        /**
+         * use this constructor for deep copies where the stride for the new buffer is the same
+         * @param other
+         * @param offset_bytes
+         * @param new_shape
+         */
+        BufferContainer(
+            BufferContainer * other,
+            const size_t offset_bytes,
+            const std::vector<size_t> &new_shape):
+                allocator(other->allocator),
+                device(other->device),
+                dtype(other->dtype),
+                true_column_len(other->true_column_len){
 
-            allocator = other.allocator;
-            columns = other.columns;
-            rows = other.rows;
-            dtype_size = other.dtype_size;
+            if (other->buffer == nullptr) throw std::runtime_error("cannot deepcopy invalid buffer");
 
-            allocator->mem_copy(buffer, other.buffer, rows * columns * dtype_size);
 
-            return *this;
+            const auto data_ptr{static_cast<char *>(other->buffer) + offset_bytes};
+            auto[b_ctx, allocated_bytes] = allocator->malloc(&buffer, new_shape, dtype);
+
+            ctx = std::move(b_ctx);
+            auto new_ctx = allocator->mem_copy(
+                    data_ptr,
+                    other->buffer,
+                    allocated_bytes,
+                    DEVICE_TO_DEVICE,
+                    ctx.get(),
+                    other->ctx.get());
+
+            ctx = std::move(new_ctx.first);
+            other->ctx = std::move(new_ctx.second);
         }
+
+        BufferContainer(const BufferContainer &other) = delete;
+        BufferContainer &operator=(const BufferContainer &other) = delete;
+        BufferContainer() = delete;
+    };
+
+    struct DummyContext final : BufferContext {
+        void flush() override {};
+        bool is_compute() override {return false;};
     };
 
     struct Brarray::ArrayImpl {
-        size_t offset = 0;
+        size_t offset{0};
         std::vector<size_t> shape{};
         std::vector<size_t> stride{};
         Device device = CPU;
@@ -78,32 +114,43 @@ namespace cobraml::core {
         Math *m_dispatcher = nullptr;
         std::shared_ptr<BufferContainer> buffer_container = nullptr;
         std::shared_ptr<ActivationNode> node = nullptr;
+        size_t total_rows{0};
 
         ArrayImpl(Device const device, Dtype const dtype, std::vector<size_t> const &shape): shape(shape),
             stride(shape.size(), 0),
             device(device),
             dtype(dtype),
-            m_dispatcher(get_math_kernels(device)) {
+            m_dispatcher(get_math_kernels(device)),
+            total_rows(calculate_total_rows(shape)){
+
             is_invalid(dtype);
-            if (shape.empty()) throw std::runtime_error("cannot initialize Brarray with an empty shape");
 
-            size_t rows{1};
-            if (shape[0] == 0) throw std::runtime_error("dimensions in shape cannot be zero");
-            size_t columns = shape[shape.size() - 1];
+            buffer_container = std::make_shared<BufferContainer>(shape, device, dtype);
+            init_stride(shape, stride, buffer_container->get_true_column_len());
+        }
 
-            if (shape.size() > 1) {
-                for (size_t i{0}; i < shape.size() - 1; ++i) {
-                    if (shape[i] == 0) throw std::runtime_error("dimensions in shape cannot be zero");
+        ArrayImpl(const Device device, const Dtype dtype, const MemoryDirection direction,
+            const std::vector<size_t> &shape, const size_t source_stride, const void *ptr)
+                : ArrayImpl(device, dtype, shape){
 
-                    rows *= shape[i];
-                }
-            }
+            DummyContext ctx;
+            const size_t column_count{shape[shape.size() - 1]};
+            const size_t elements{total_rows(shape) * column_count};
 
-            buffer_container = std::make_shared<BufferContainer>(
-                rows, columns, get_allocator(device), dtype_to_bytes(dtype));
+            auto new_ctx = buffer_container->allocator->strided_mem_copy(
+                get_raw_buffer(),
+                ptr,
+                elements * dtype_to_bytes(dtype),
+                direction,
+                buffer_container->ctx.get(),
+                &ctx,
+                column_count * dtype_to_bytes(dtype),
+                (buffer_container->get_true_column_len() - column_count) * dtype_to_bytes(dtype),
+                (source_stride - column_count) * dtype_to_bytes(dtype));
 
-            columns = buffer_container->columns;
-            init_stride(shape, stride, columns);
+            buffer_container->ctx = std::move(new_ctx.first);
+            buffer_container->ctx->flush();
+            new_ctx.second->flush();
         }
 
         [[nodiscard]] void *buffer() const {
@@ -121,6 +168,10 @@ namespace cobraml::core {
             return static_cast<char *>(buffer()) + offset;
         }
 
+        [[nodiscard]] size_t get_column_stride() const {
+            if (buffer_container == nullptr) throw std::runtime_error("data buffer is null");
+            return buffer_container->get_true_column_len();
+        }
 
         void multiply(const ArrayImpl *other,
                       ArrayImpl *dest,
@@ -136,7 +187,7 @@ namespace cobraml::core {
                 common_shape.size(),
                 this_stride.data(),
                 other_stride.data(),
-                dest->buffer_container->columns,
+                dest->get_column_stride(),
                 dtype);
         }
 
@@ -154,7 +205,7 @@ namespace cobraml::core {
                 common_shape.size(),
                 this_stride.data(),
                 other_stride.data(),
-                dest->buffer_container->columns,
+                dest->get_column_stride(),
                 dtype);
         }
 
@@ -189,10 +240,7 @@ namespace cobraml::core {
         }
     };
 
-    Brarray::Brarray(Device const device, Dtype const dtype, std::vector<size_t> const &shape): impl(
-        std::make_unique<ArrayImpl>(device, dtype, shape)) {
-        is_invalid(dtype);
-    }
+    Brarray::Brarray(Device const device, Dtype const dtype, std::vector<size_t> const &shape): impl(std::make_unique<ArrayImpl>(device, dtype, shape)) {}
 
     void Brarray::requires_grad(const bool state) {
         if (state && !requires_grad()) {
@@ -230,23 +278,29 @@ namespace cobraml::core {
         back_propagate(this->impl->node);
     }
 
-    Brarray::Brarray(const Device device, const Dtype dtype, std::vector<size_t> const &shape, const void *ptr): impl(
-        std::make_unique<ArrayImpl>(device, dtype, shape)) {
-        const size_t &total_cols{impl->buffer_container->columns}; // includes padding
-        const size_t &total_rows{impl->buffer_container->rows};
-        const size_t &requested_cols{shape[shape.size() - 1]};
-        const size_t &dtype_size{impl->buffer_container->dtype_size};
+    template<typename Dtype>
+    const void * get_vector_ptr(Dtype dtype, std::vector<size_t> const &shape, const std::vector<Dtype> &data) {
+        is_invalid(dtype);
 
-        auto *buff{static_cast<char *>(get_raw_buffer())};
-        auto *char_ptr{static_cast<const char *>(ptr)};
+        Dtype provided{get_dtype_from_type<Dtype>::type};
 
-        for (size_t i{0}; i < total_rows; ++i) {
-            impl->buffer_container->allocator->mem_copy(
-                &buff[i * total_cols * dtype_size],
-                &char_ptr[i * requested_cols * dtype_size],
-                dtype_size * requested_cols);
-        }
+        if (dtype != provided)
+            throw std::runtime_error(
+                "Template dtype T does not match brarray dtypes");
+
+        if (shape.empty()) throw std::runtime_error("an empty shape was provided");
+        if (data.empty()) throw std::runtime_error("an empty vector was provided");
+
+        const size_t total_elements{shape[shape.size() - 1] * calculate_total_rows(shape)};
+        if (total_elements != data.size()) throw std::runtime_error("given shape cannot compensate provided data");
+
+        return data.data();
     }
+
+    template<typename Type>
+    Brarray::Brarray(Device device, Dtype dtype, std::vector<size_t> const &shape, const std::vector<Type> &data):
+        impl(std::make_unique<ArrayImpl>(device, dtype, device_is_host(device) ? HOST_TO_HOST : HOST_TO_DEVICE,
+            shape, shape[shape.size() - 1], get_vector_ptr<Dtype>(dtype, shape, data))){}
 
     Brarray::Brarray(Brarray &&other) noexcept: impl(std::move(other.impl)) {
         other.impl = nullptr;
@@ -275,36 +329,37 @@ namespace cobraml::core {
         return impl->stride;
     }
 
-    void *Brarray::get_raw_buffer() const {
-        return impl->get_raw_buffer();
-    }
-
     Brarray::~Brarray() = default;
 
-    Brarray::Brarray(): impl(std::make_unique<ArrayImpl>()) {
-    }
+    Brarray::Brarray(): impl(std::make_unique<ArrayImpl>()) {}
 
     Brarray::Brarray(const Brarray &other) : impl(std::make_unique<ArrayImpl>()) {
-        impl->offset = other.impl->offset;
         impl->shape = other.impl->shape;
         impl->stride = other.impl->stride;
         impl->device = other.impl->device;
         impl->dtype = other.impl->dtype;
         impl->m_dispatcher = other.impl->m_dispatcher;
-        impl->buffer_container = std::make_shared<BufferContainer>(*other.impl->buffer_container);
+        impl->total_rows = other.impl->total_rows;
+        impl->buffer_container = std::make_shared<BufferContainer>(
+            other.impl->buffer_container.get(),
+            other.impl->offset,
+            other.impl->shape);
     }
 
     Brarray &Brarray::operator=(const Brarray &other) {
         if (this == &other)
             return *this;
 
-        impl->offset = other.impl->offset;
         impl->shape = other.impl->shape;
         impl->stride = other.impl->stride;
         impl->device = other.impl->device;
         impl->dtype = other.impl->dtype;
         impl->m_dispatcher = other.impl->m_dispatcher;
-        impl->buffer_container = std::make_shared<BufferContainer>(*other.impl->buffer_container);
+        impl->total_rows = other.impl->total_rows;
+        impl->buffer_container = std::make_shared<BufferContainer>(
+            other.impl->buffer_container.get(),
+            other.impl->offset,
+            other.impl->shape);
 
         return *this;
     }
@@ -496,8 +551,8 @@ namespace cobraml::core {
             validate_element_wise(
                 input,
                 other,
-                input.impl->buffer_container->columns,
-                other.impl->buffer_container->columns)};
+                input.impl->buffer_container->get_true_column_len(),
+                other.impl->buffer_container->get_true_column_len())};
 
         Brarray result(input.get_device(), input.get_dtype(), shape);
 
@@ -525,8 +580,8 @@ namespace cobraml::core {
             validate_element_wise(
                 input,
                 other,
-                input.impl->buffer_container->columns,
-                other.impl->buffer_container->columns)};
+                input.impl->buffer_container->get_true_column_len(),
+                other.impl->buffer_container->get_true_column_len())};
 
         Brarray result(input.get_device(), input.get_dtype(), shape);
 
@@ -547,7 +602,7 @@ namespace cobraml::core {
             ivalidate_element_wise(
                 input,
                 other,
-                other.impl->buffer_container->columns)};
+                other.impl->buffer_container->get_true_column_len())};
 
         input.impl->multiply(
             other.impl.get(),
@@ -563,7 +618,7 @@ namespace cobraml::core {
             ivalidate_element_wise(
                 input,
                 other,
-                other.impl->buffer_container->columns)};
+                other.impl->buffer_container->get_true_column_len())};
 
         input.impl->add(
             other.impl.get(),
@@ -664,30 +719,6 @@ namespace cobraml::core {
         return false;
     }
 
-    const void *Brarray::validated_get_data(
-        Dtype const dtype_vec,
-        Dtype const provided,
-        size_t const shape,
-        std::vector<size_t> const &provided_shape,
-        const void *data) {
-        is_invalid(provided);
-        if (dtype_vec != provided)
-            throw std::runtime_error(
-                "Template dtype T does not match brarray dtypes");
-
-        if (provided_shape.empty()) throw std::runtime_error("an empty shape was provided");
-
-        size_t prod{1};
-        for (const auto &dim: provided_shape) prod *= dim;
-
-        if (shape == 0) throw std::runtime_error("provided data is empty");
-
-        if (prod != shape) throw std::runtime_error("given shape cannot compensate provided data");
-
-        return data;
-    }
-
-
     void Brarray::gemv(
         const Brarray &matrix,
         const Brarray &vector,
@@ -713,26 +744,15 @@ namespace cobraml::core {
         }
 
         this->impl->m_dispatcher->gemv(
-            matrix.get_raw_buffer(),
-            vector.get_raw_buffer(),
-            this->get_raw_buffer(),
+            matrix.impl->get_raw_buffer(),
+            vector.impl->get_raw_buffer(),
+            impl->get_raw_buffer(),
             alpha,
             beta,
             matrix.get_shape()[0],
             matrix.get_shape()[1],
             matrix.get_stride()[0],
             this->get_dtype());
-    }
-
-    void Brarray::reassign_vector(const void *source) {
-        if (!is_vector()) {
-            throw std::runtime_error("can only reassign values for valid vectors");
-        }
-
-        this->impl->buffer_container->allocator->mem_copy(
-            this->get_raw_buffer(),
-            source,
-            this->get_shape()[0] * dtype_to_bytes(this->get_dtype()));
     }
 
     Brarray Brarray::operator[](size_t const index) const {
@@ -745,12 +765,17 @@ namespace cobraml::core {
             // sadly deep copy is required to maintain alignment
             // std::cout << "deep copy" << std::endl;
             Brarray scalar(impl->device, impl->dtype, {1});
-            scalar.impl->buffer_container->allocator->mem_copy(
-                scalar.get_raw_buffer(),
-                static_cast<char *>(this->get_raw_buffer()) + index * dtype_to_bytes(this->impl->dtype),
-                dtype_to_bytes(this->impl->dtype)
-            );
 
+            auto ctx{scalar.impl->buffer_container->allocator->mem_copy(
+                scalar.impl->get_raw_buffer(),
+                static_cast<char *>(impl->get_raw_buffer()) + index * dtype_to_bytes(this->impl->dtype),
+                dtype_to_bytes(this->impl->dtype),
+                device_is_host(get_device()) ? HOST_TO_HOST : DEVICE_TO_DEVICE,
+                scalar.impl->buffer_container->ctx.get(),
+                impl->buffer_container->ctx.get())};
+
+            scalar.impl->buffer_container->ctx = std::move(ctx.first);
+            impl->buffer_container->ctx = std::move(ctx.second);
             return scalar;
         }
 
@@ -766,8 +791,34 @@ namespace cobraml::core {
         ret.impl->offset = impl->offset;
         ret.impl->offset += impl->stride[0] * index * dtype_to_bytes(this->impl->dtype);
         ret.impl->device = impl->device;
+        ret.impl->total_rows = calculate_total_rows(ret.get_shape());
 
         return ret;
+    }
+
+    /**
+     * provides access to the underlying buffer
+     * @tparam T the type that the ptr should be cast too, it must match the Dtype
+     * @return the raw ptr buffer
+     */
+    template<typename T>
+    T * Brarray::get_buffer() const{
+        const Dtype current{this->get_dtype()};
+        if (constexpr Dtype given = get_dtype_from_type<T>::type; given != current) {
+            throw std::runtime_error(
+                "provided buffer type does not match array type: " + dtype_to_string(current));
+        }
+
+        return static_cast<T *>(impl->get_raw_buffer());
+    }
+
+    template<typename T>
+    void Brarray::set_item(T value) {
+        if (!this->is_scalar_equivalent()) {
+            throw std::out_of_range("cannot set singular value to non scalar");
+        }
+
+        get_buffer<T>()[0] = value;
     }
 
     void shape_to_str(std::vector<size_t> const &shp, std::stringstream &ss) {
@@ -799,27 +850,27 @@ namespace cobraml::core {
             ss << gap;
             switch (br.get_dtype()) {
                 case INT8: {
-                    print_vector<int8_t>(br.get_raw_buffer(), br.get_shape()[0], ss);
+                    print_vector<int8_t>(br.impl->get_raw_buffer(), br.get_shape()[0], ss);
                     break;
                 }
                 case INT16: {
-                    print_vector<int16_t>(br.get_raw_buffer(), br.get_shape()[0], ss);
+                    print_vector<int16_t>(br.impl->get_raw_buffer(), br.get_shape()[0], ss);
                     break;
                 }
                 case INT32: {
-                    print_vector<int32_t>(br.get_raw_buffer(), br.get_shape()[0], ss);
+                    print_vector<int32_t>(br.impl->get_raw_buffer(), br.get_shape()[0], ss);
                     break;
                 }
                 case INT64: {
-                    print_vector<int64_t>(br.get_raw_buffer(), br.get_shape()[0], ss);
+                    print_vector<int64_t>(br.impl->get_raw_buffer(), br.get_shape()[0], ss);
                     break;
                 }
                 case FLOAT32: {
-                    print_vector<float>(br.get_raw_buffer(), br.get_shape()[0], ss);
+                    print_vector<float>(br.impl->get_raw_buffer(), br.get_shape()[0], ss);
                     break;
                 }
                 case FLOAT64: {
-                    print_vector<double>(br.get_raw_buffer(), br.get_shape()[0], ss);
+                    print_vector<double>(br.impl->get_raw_buffer(), br.get_shape()[0], ss);
                     break;
                 }
                 case INVALID:
@@ -854,4 +905,7 @@ namespace cobraml::core {
     INSTANTIATE_OPERATOR(Brarray::operator+);
     INSTANTIATE_INPLACE_OPERATOR(imult);
     INSTANTIATE_INPLACE_OPERATOR(iadd);
+    INSTANTIATE_VECTOR_CONSTRUCTOR();
+    INSTANTIATE_GET_BUFFER();
+    INSTANTIATE_SET_ITEM();
 }

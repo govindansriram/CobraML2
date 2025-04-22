@@ -36,8 +36,8 @@ TEST(ArrayTestFunctionals, test_device) {
     arr = cobraml::core::Brarray(cobraml::core::Device::CPU_X, cobraml::core::Dtype::INT8, {10});
     ASSERT_EQ(arr.get_device(), cobraml::core::Device::CPU_X);
 
-    arr = cobraml::core::Brarray(cobraml::core::Device::GPU, cobraml::core::Dtype::INT8, {10});
-    ASSERT_EQ(arr.get_device(), cobraml::core::Device::GPU);
+    arr = cobraml::core::Brarray(cobraml::core::Device::CUDA, cobraml::core::Dtype::INT8, {10});
+    ASSERT_EQ(arr.get_device(), cobraml::core::Device::CUDA);
 }
 
 
@@ -193,15 +193,15 @@ TEST(ArrayTestFunctionals, test_indexing) {
     ASSERT_EQ(scal_arr[0].item<int>(), 100);
     ASSERT_NE(arr[0][0][0].item<int>(), 100);
 
-    cobraml::core::Brarray gpu_tensor(cobraml::core::GPU, cobraml::core::FLOAT32, {10, 10});
+    cobraml::core::Brarray gpu_tensor(cobraml::core::CUDA, cobraml::core::FLOAT32, {10, 10});
 
     gpu_tensor = gpu_tensor[4];
     ASSERT_EQ(gpu_tensor.get_dtype(), cobraml::core::FLOAT32);
-    ASSERT_EQ(gpu_tensor.get_device(), cobraml::core::GPU);
+    ASSERT_EQ(gpu_tensor.get_device(), cobraml::core::CUDA);
 
     gpu_tensor = gpu_tensor[0];
     ASSERT_EQ(gpu_tensor.get_dtype(), cobraml::core::FLOAT32);
-    ASSERT_EQ(gpu_tensor.get_device(), cobraml::core::GPU);
+    ASSERT_EQ(gpu_tensor.get_device(), cobraml::core::CUDA);
 }
 
 TEST(ArrayTestFunctionals, default_constructor) {

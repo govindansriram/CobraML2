@@ -26,7 +26,7 @@ namespace cobraml::core {
     std::string device_to_string(const Device device) {
         switch (device) {
             case CPU: return "CPU";
-            case GPU: return "GPU";
+            case CUDA: return "GPU";
             case CPU_X: return "CPU Accelerated";
         }
 

@@ -20,19 +20,6 @@ namespace cobraml::core {
         struct ArrayImpl;
         std::unique_ptr<ArrayImpl> impl;
 
-        /**
-         * get the raw pointer backing an array, do not free this pointer
-         *
-         * @return a raw void pointer to the buffer data
-         */
-        [[nodiscard]] void *get_raw_buffer() const;
-
-        /**
-         * updates the array buffer of a vector with the reassigned values
-         * @param source the replacement data
-         */
-        void reassign_vector(const void *source);
-
         [[nodiscard]] bool is_vector() const;
 
         [[nodiscard]] bool is_scalar_equivalent() const;
@@ -57,15 +44,6 @@ namespace cobraml::core {
             const void *beta);
 
         [[nodiscard]] virtual std::string generate_description() const;
-
-        Brarray(Device device, Dtype dtype, std::vector<size_t> const &shape, const void *ptr);
-
-        static const void *validated_get_data(
-            Dtype dtype_vec,
-            Dtype provided,
-            size_t shape,
-            std::vector<size_t> const &provided_shape,
-            const void * data);
 
         void to_string_helper(std::stringstream & ss, const Brarray & br, const std::string & gap) const;
 
@@ -116,7 +94,7 @@ namespace cobraml::core {
 
 
         [[nodiscard]] Brarray shared_copy() const;
-        Brarray permute(const std::vector<size_t>& dims, bool requires_grad=true) const;
+        [[nodiscard]] Brarray permute(const std::vector<size_t>& dims, bool requires_grad=true) const;
 
         /**
          * Hadamard Product (Element WIse Multiplication)
@@ -140,24 +118,10 @@ namespace cobraml::core {
          * @return the raw ptr buffer
          */
         template<typename T>
-        T *get_buffer() const{
-            const Dtype current{this->get_dtype()};
-            if (constexpr Dtype given = get_dtype_from_type<T>::type; given != current) {
-                throw std::runtime_error(
-                    "provided buffer type does not match array type: " + dtype_to_string(current));
-            }
+        T *get_buffer() const;
 
-            return static_cast<T *>(this->get_raw_buffer());
-        }
-
-        template<typename T, std::enable_if<std::is_arithmetic_v<T> >* = nullptr>
-        Brarray(const Device device, const Dtype dtype, std::vector<size_t> const &shape,
-                const std::vector<T> &data): Brarray(device, dtype, shape, validated_get_data(
-                                                         get_dtype_from_type<T>::type,
-                                                         dtype,
-                                                         data.size(),
-                                                         shape,
-                                                         data.data())) {}
+        template<typename Type>
+        Brarray(Device device, Dtype dtype, std::vector<size_t> const &shape, const std::vector<Type> &data);
 
         // Start of the Friend API
         template<typename T>
@@ -221,19 +185,7 @@ namespace cobraml::core {
         }
 
         template<typename T>
-        void set_item(T value) {
-            const Dtype current{this->get_dtype()};
-            if (constexpr Dtype given = get_dtype_from_type<T>::type; given != current) {
-                throw std::runtime_error(
-                    "provided buffer type does not match array type: " + dtype_to_string(current));
-            }
-
-            if (!this->is_scalar_equivalent()) {
-                throw std::out_of_range("cannot set singular value to non scalar");
-            }
-
-            reassign_vector(&value);
-        }
+        void set_item(T value);
     };
 
     template<typename T, std::enable_if_t<!std::is_same_v<int8_t, T> && std::is_arithmetic_v<T>>* = nullptr>
@@ -290,7 +242,6 @@ namespace cobraml::core {
     void iadd(Brarray &input, Dtype other);
 
     // Brarray pow(const Brarray &brarray, const Brarray &exponent, bool track_gradients=true);
-    // Brarray add(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);
     // Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);
 }
 

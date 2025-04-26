@@ -8,7 +8,6 @@
 #include <cstddef>
 #include <memory>
 #include <vector>
-#include "context.h"
 #include "enums.h"
 
 namespace cobraml::core {
@@ -54,7 +53,7 @@ namespace cobraml::core {
         if (shape.empty()) throw std::runtime_error("shape cannot be empty");
         if (shape[0] == 0) throw std::runtime_error("dimensions in shape cannot be zero");
         size_t rows{1};
-        for (size_t i{1}; i < shape.size(); ++i){
+        for (size_t i{0}; i < shape.size() - 1; ++i){
             if (shape[i] == 0) throw std::runtime_error("dimensions in shape cannot be zero");
             rows *= shape[i];
         }
@@ -78,7 +77,7 @@ namespace cobraml::core {
          * the total elements, divide by dtype size. To determine the stride flatten the shape to 2 dimensions
          * divide total bytes by the value of the first dimension then divide by dtype size
          */
-        virtual std::pair<std::unique_ptr<BufferContext>, size_t> malloc(
+        virtual size_t malloc(
             void **dest,
             const std::vector<size_t>& shape,
             Dtype dtype) = 0;
@@ -96,36 +95,31 @@ namespace cobraml::core {
          * the total elements, divide by dtype size. To determine the stride flatten the shape to 2 dimensions
          * divide total bytes by the value of the first dimension then divide by dtype size
          */
-        virtual std::pair<std::unique_ptr<BufferContext>, size_t> calloc(
+        virtual size_t calloc(
             void **dest,
             const std::vector<size_t>& shape,
             Dtype dtype) = 0;
 
-        virtual std::pair<std::unique_ptr<BufferContext>, std::unique_ptr<BufferContext>> mem_copy(
+        virtual void mem_copy(
             void *dest,
             const void *source,
             std::size_t bytes,
-            MemoryDirection direction,
-            BufferContext * dest_ctx,
-            BufferContext * source_ctx) = 0;
+            MemoryDirection direction) = 0;
 
-        virtual std::pair<std::unique_ptr<BufferContext>, std::unique_ptr<BufferContext>> strided_mem_copy(
+        virtual void strided_mem_copy(
             void *dest,
             const void *source,
             size_t bytes,
             MemoryDirection direction,
-            BufferContext * dest_ctx,
-            BufferContext * source_ctx,
             size_t column_count,
             size_t padding_dest,
-            size_t padding_source);
+            size_t padding_source) = 0;
 
         virtual void free(
-            void *ptr,
-            BufferContext * ctx) = 0;
+            void *ptr) = 0;
     };
 
-    extern std::array<std::unique_ptr<Allocator>, 4> global_allocators;
+    extern std::array<std::unique_ptr<Allocator>, 3> global_allocators;
     Allocator * get_allocator(Device device);
 }
 

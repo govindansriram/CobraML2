@@ -7,8 +7,7 @@
 #include <array>
 
 namespace cobraml::core {
-    std::array<std::unique_ptr<Math>, 4> global_math_kernels = {
-        std::make_unique<StandardMath>(),
+    std::array<std::unique_ptr<Math>, 3> global_math_kernels = {
         std::make_unique<StandardMath>(),
         std::make_unique<StandardMath>(),
         std::make_unique<StandardMath>(),

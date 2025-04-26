@@ -9,6 +9,7 @@
 #include "allocator.h"
 #include "computation_graph.h"
 #include "layers/element_wise.h"
+#include "instantiate.h"
 
 namespace cobraml::core {
     /**
@@ -37,24 +38,33 @@ namespace cobraml::core {
         }
     }
 
+    void shape_to_str(std::vector<size_t> const &shp, std::stringstream &ss) {
+        ss << "[";
+
+        for (size_t i{0}; i < shp.size() - 1; ++i) {
+            ss << std::to_string(shp[i]) << ", ";
+        }
+
+        if (!shp.empty()) ss << std::to_string(shp[shp.size() - 1]);
+        ss << "]";
+    }
+
     struct BufferContainer {
         void *buffer{nullptr};
         Allocator *allocator{nullptr};
-        std::unique_ptr<BufferContext> ctx{nullptr};
         Device device{CPU};
         Dtype dtype{INVALID};
         size_t true_column_len{0};
 
         BufferContainer(const std::vector<size_t> &shape, Device const device, Dtype const dtype):
             allocator(get_allocator(device)), device(device), dtype(dtype) {
-            auto[b_ctx, allocated_bytes] = allocator->calloc(&buffer, shape, dtype);
+            const size_t allocated_bytes{allocator->calloc(&buffer, shape, dtype)};
             const size_t rows{calculate_total_rows(shape)};
             true_column_len = allocated_bytes / rows / dtype_to_bytes(dtype);
-            ctx = std::move(b_ctx);
         }
 
         ~BufferContainer() {
-            allocator->free(buffer, ctx.get());
+            allocator->free(buffer);
         }
 
         [[nodiscard]] size_t get_true_column_len() const {
@@ -68,7 +78,7 @@ namespace cobraml::core {
          * @param new_shape
          */
         BufferContainer(
-            BufferContainer * other,
+            const BufferContainer * other,
             const size_t offset_bytes,
             const std::vector<size_t> &new_shape):
                 allocator(other->allocator),
@@ -77,32 +87,19 @@ namespace cobraml::core {
                 true_column_len(other->true_column_len){
 
             if (other->buffer == nullptr) throw std::runtime_error("cannot deepcopy invalid buffer");
-
-
             const auto data_ptr{static_cast<char *>(other->buffer) + offset_bytes};
-            auto[b_ctx, allocated_bytes] = allocator->malloc(&buffer, new_shape, dtype);
+            const size_t allocated_bytes{allocator->malloc(&buffer, new_shape, dtype)};
 
-            ctx = std::move(b_ctx);
-            auto new_ctx = allocator->mem_copy(
+            allocator->mem_copy(
+                    buffer,
                     data_ptr,
-                    other->buffer,
                     allocated_bytes,
-                    DEVICE_TO_DEVICE,
-                    ctx.get(),
-                    other->ctx.get());
-
-            ctx = std::move(new_ctx.first);
-            other->ctx = std::move(new_ctx.second);
+                    DEVICE_TO_DEVICE);
         }
 
         BufferContainer(const BufferContainer &other) = delete;
         BufferContainer &operator=(const BufferContainer &other) = delete;
         BufferContainer() = delete;
-    };
-
-    struct DummyContext final : BufferContext {
-        void flush() override {};
-        bool is_compute() override {return false;};
     };
 
     struct Brarray::ArrayImpl {
@@ -133,24 +130,17 @@ namespace cobraml::core {
             const std::vector<size_t> &shape, const size_t source_stride, const void *ptr)
                 : ArrayImpl(device, dtype, shape){
 
-            DummyContext ctx;
             const size_t column_count{shape[shape.size() - 1]};
-            const size_t elements{total_rows(shape) * column_count};
+            const size_t elements{calculate_total_rows(shape) * column_count};
 
-            auto new_ctx = buffer_container->allocator->strided_mem_copy(
+            buffer_container->allocator->strided_mem_copy(
                 get_raw_buffer(),
                 ptr,
                 elements * dtype_to_bytes(dtype),
                 direction,
-                buffer_container->ctx.get(),
-                &ctx,
                 column_count * dtype_to_bytes(dtype),
                 (buffer_container->get_true_column_len() - column_count) * dtype_to_bytes(dtype),
                 (source_stride - column_count) * dtype_to_bytes(dtype));
-
-            buffer_container->ctx = std::move(new_ctx.first);
-            buffer_container->ctx->flush();
-            new_ctx.second->flush();
         }
 
         [[nodiscard]] void *buffer() const {
@@ -221,8 +211,40 @@ namespace cobraml::core {
                 dtype);
         }
 
+        void gemv(
+            const ArrayImpl *matrix,
+            const ArrayImpl *vector,
+            const void *alpha,
+            const void *beta) {
+
+            m_dispatcher->gemv(
+                matrix->get_raw_buffer(),
+                vector->get_raw_buffer(),
+                get_raw_buffer(),
+                alpha,
+                beta,
+                matrix->shape[0],
+                matrix->shape[1],
+                matrix->stride[0],
+                dtype);
+        }
+
+
         [[nodiscard]] bool requires_grad() const {
             return node != nullptr;
+        }
+
+        [[nodiscard]] std::string generate_description() const {
+            std::stringstream ss;
+            ss << "############## Details ##############\n";
+            ss << "Shape: ";
+            shape_to_str(shape, ss);
+            ss << "\n";
+            ss << "Device: " << device_to_string(device) << "\n";
+            ss << "Dtype: " << dtype_to_string(dtype) << "\n";
+            ss << "#####################################\n";
+
+            return ss.str();
         }
 
         void retain_grad(const bool state) {
@@ -278,11 +300,11 @@ namespace cobraml::core {
         back_propagate(this->impl->node);
     }
 
-    template<typename Dtype>
-    const void * get_vector_ptr(Dtype dtype, std::vector<size_t> const &shape, const std::vector<Dtype> &data) {
+    template<typename Type>
+    const void * get_vector_ptr(const Dtype dtype, std::vector<size_t> const &shape, const std::vector<Type> &data) {
         is_invalid(dtype);
 
-        Dtype provided{get_dtype_from_type<Dtype>::type};
+        const Dtype provided{get_dtype_from_type<Type>::type};
 
         if (dtype != provided)
             throw std::runtime_error(
@@ -300,7 +322,7 @@ namespace cobraml::core {
     template<typename Type>
     Brarray::Brarray(Device device, Dtype dtype, std::vector<size_t> const &shape, const std::vector<Type> &data):
         impl(std::make_unique<ArrayImpl>(device, dtype, device_is_host(device) ? HOST_TO_HOST : HOST_TO_DEVICE,
-            shape, shape[shape.size() - 1], get_vector_ptr<Dtype>(dtype, shape, data))){}
+            shape, shape[shape.size() - 1], get_vector_ptr<Type>(dtype, shape, data))){}
 
     Brarray::Brarray(Brarray &&other) noexcept: impl(std::move(other.impl)) {
         other.impl = nullptr;
@@ -628,6 +650,53 @@ namespace cobraml::core {
             stride_two);
     }
 
+    template<typename T>
+    void gemv(
+    Brarray &result,
+    const Brarray &matrix,
+    const Brarray &vector,
+    T alpha,
+    T beta) {
+        constexpr Dtype dtype{get_dtype_from_type<T>::type};
+        is_invalid(dtype);
+
+        if (dtype != matrix.get_dtype() || dtype != result.get_dtype() || dtype != vector.get_dtype())
+            throw std::runtime_error("Template dtype T does not match brarray dtypes");
+
+        if (!vector.is_vector()) throw std::runtime_error("supplied 'vector' is not a vector");
+        if (!result.is_vector()) throw std::runtime_error("the current brarray is not a vector");
+        if (!matrix.is_matrix()) throw std::runtime_error("supplied 'matrix' is not a matrix");
+
+        if (matrix.get_shape()[1] != vector.get_shape()[0])
+            throw std::runtime_error(
+                "vector and matrix have different columns lengths");
+
+        if (matrix.get_shape()[0] != result.get_shape()[0])
+            throw std::runtime_error(
+                "the current brarray must be of shape (matrix.get_shape()[0])");
+
+        if (matrix.get_device() != vector.get_device() || result.get_device() != matrix.get_device()) {
+            throw std::runtime_error("vector, matrix and the current brarray are not on the same device");
+        }
+
+        if (matrix.get_dtype() != vector.get_dtype() || matrix.get_dtype() != result.get_dtype()) {
+            throw std::runtime_error("vector, matrix and current brarray have different dtypes");
+        }
+
+        result.impl->gemv(matrix.impl.get(), vector.impl.get(), &alpha, &beta);
+    }
+
+    template<typename T>
+    Brarray gemv(
+        const Brarray &matrix,
+        const Brarray &vector,
+        T alpha,
+        T beta) {
+        Brarray result(matrix.get_device(), matrix.get_dtype(), {matrix.get_shape()[0]});
+        gemv<T>(result, matrix, vector, alpha, beta);
+        return result;
+    }
+
     template<typename Dtype>
     Brarray scalar_to_brarray(const Brarray &arr, Dtype value) {
         const core::Dtype current_dtype{arr.get_dtype()};
@@ -711,48 +780,12 @@ namespace cobraml::core {
     }
 
     bool Brarray::is_vector() const {
-        return get_shape().size() == 1;
+        return impl->total_rows == 1;
     }
 
     bool Brarray::is_scalar_equivalent() const {
         if (is_vector()) return get_shape()[0] == 1;
         return false;
-    }
-
-    void Brarray::gemv(
-        const Brarray &matrix,
-        const Brarray &vector,
-        const void *alpha,
-        const void *beta) {
-        if (!vector.is_vector()) throw std::runtime_error("supplied 'vector' is not a vector");
-        if (!this->is_vector()) throw std::runtime_error("the current brarray is not a vector");
-        if (!matrix.is_matrix()) throw std::runtime_error("supplied 'matrix' is not a matrix");
-        if (matrix.get_shape()[1] != vector.get_shape()[0])
-            throw std::runtime_error(
-                "vector and matrix have different columns lengths");
-        if (matrix.get_shape()[0] != this->get_shape()[0])
-            throw std::runtime_error(
-                "the current brarray must be of shape (matrix.get_shape()[0])");
-
-
-        if (matrix.get_device() != vector.get_device() || this->get_device() != matrix.get_device()) {
-            throw std::runtime_error("vector, matrix and the current brarray are not on the same device");
-        }
-
-        if (matrix.get_dtype() != vector.get_dtype() || matrix.get_dtype() != this->get_dtype()) {
-            throw std::runtime_error("vector, matrix and current brarray have different dtypes");
-        }
-
-        this->impl->m_dispatcher->gemv(
-            matrix.impl->get_raw_buffer(),
-            vector.impl->get_raw_buffer(),
-            impl->get_raw_buffer(),
-            alpha,
-            beta,
-            matrix.get_shape()[0],
-            matrix.get_shape()[1],
-            matrix.get_stride()[0],
-            this->get_dtype());
     }
 
     Brarray Brarray::operator[](size_t const index) const {
@@ -766,16 +799,12 @@ namespace cobraml::core {
             // std::cout << "deep copy" << std::endl;
             Brarray scalar(impl->device, impl->dtype, {1});
 
-            auto ctx{scalar.impl->buffer_container->allocator->mem_copy(
+            scalar.impl->buffer_container->allocator->mem_copy(
                 scalar.impl->get_raw_buffer(),
                 static_cast<char *>(impl->get_raw_buffer()) + index * dtype_to_bytes(this->impl->dtype),
                 dtype_to_bytes(this->impl->dtype),
-                device_is_host(get_device()) ? HOST_TO_HOST : DEVICE_TO_DEVICE,
-                scalar.impl->buffer_container->ctx.get(),
-                impl->buffer_container->ctx.get())};
+                device_is_host(get_device()) ? HOST_TO_HOST : DEVICE_TO_DEVICE);
 
-            scalar.impl->buffer_container->ctx = std::move(ctx.first);
-            impl->buffer_container->ctx = std::move(ctx.second);
             return scalar;
         }
 
@@ -812,6 +841,21 @@ namespace cobraml::core {
         return static_cast<T *>(impl->get_raw_buffer());
     }
 
+    template<typename Type>
+    Type Brarray::item() const{
+        const Dtype current{this->get_dtype()};
+        if (constexpr Dtype given = get_dtype_from_type<Type>::type; given != current) {
+            throw std::runtime_error(
+                "provided type does not match array type: " + dtype_to_string(current));
+        }
+
+        if (!this->is_scalar_equivalent()) {
+            throw std::out_of_range("array can only return item if it contains a single element");
+        }
+
+        return *get_buffer<Type>();
+    }
+
     template<typename T>
     void Brarray::set_item(T value) {
         if (!this->is_scalar_equivalent()) {
@@ -821,56 +865,45 @@ namespace cobraml::core {
         get_buffer<T>()[0] = value;
     }
 
-    void shape_to_str(std::vector<size_t> const &shp, std::stringstream &ss) {
+    template<typename Type>
+    void print_vector(const Type *data_ptr, const size_t length, std::stringstream &ss) {
         ss << "[";
-
-        for (size_t i{0}; i < shp.size() - 1; ++i) {
-            ss << std::to_string(shp[i]) << ", ";
-        }
-
-        if (!shp.empty()) ss << std::to_string(shp[shp.size() - 1]);
-        ss << "]";
+        for (size_t i{0}; i < length - 1; ++i) ss << data_ptr[i] << ", ";
+        ss << data_ptr[length - 1] << "]";
     }
 
-    std::string Brarray::generate_description() const {
-        std::stringstream ss;
-        ss << "############## Details ##############\n";
-        ss << "Shape: ";
-        shape_to_str(this->get_shape(), ss);
-        ss << "\n";
-        ss << "Device: " << device_to_string(this->get_device()) << "\n";
-        ss << "Dtype: " << dtype_to_string(this->get_dtype()) << "\n";
-        ss << "#####################################\n";
-
-        return ss.str();
+    void print_vector(const int8_t *data_ptr, const size_t length, std::stringstream &ss) {
+        ss << "[";
+        for (size_t i{0}; i < length - 1; ++i) ss << static_cast<int>(data_ptr[i]) << ", ";
+        ss << static_cast<int>(data_ptr[length - 1]) << "]";
     }
 
-    void Brarray::to_string_helper(std::stringstream &ss, const Brarray &br, const std::string &gap) const {
+    void to_string_helper(std::stringstream &ss, const Brarray &br, const std::string &gap) {
         if (br.is_vector()) {
             ss << gap;
             switch (br.get_dtype()) {
                 case INT8: {
-                    print_vector<int8_t>(br.impl->get_raw_buffer(), br.get_shape()[0], ss);
+                    print_vector(br.get_buffer<int8_t>(), br.get_shape()[0], ss);
                     break;
                 }
                 case INT16: {
-                    print_vector<int16_t>(br.impl->get_raw_buffer(), br.get_shape()[0], ss);
+                    print_vector(br.get_buffer<int16_t>(), br.get_shape()[0], ss);
                     break;
                 }
                 case INT32: {
-                    print_vector<int32_t>(br.impl->get_raw_buffer(), br.get_shape()[0], ss);
+                    print_vector(br.get_buffer<int32_t>(), br.get_shape()[0], ss);
                     break;
                 }
                 case INT64: {
-                    print_vector<int64_t>(br.impl->get_raw_buffer(), br.get_shape()[0], ss);
+                    print_vector(br.get_buffer<int64_t>(), br.get_shape()[0], ss);
                     break;
                 }
                 case FLOAT32: {
-                    print_vector<float>(br.impl->get_raw_buffer(), br.get_shape()[0], ss);
+                    print_vector(br.get_buffer<float>(), br.get_shape()[0], ss);
                     break;
                 }
                 case FLOAT64: {
-                    print_vector<double>(br.impl->get_raw_buffer(), br.get_shape()[0], ss);
+                    print_vector(br.get_buffer<double>(), br.get_shape()[0], ss);
                     break;
                 }
                 case INVALID:
@@ -896,7 +929,7 @@ namespace cobraml::core {
     std::ostream &operator<<(std::ostream &outs, const Brarray &b) {
         is_invalid(b.get_dtype());
         const std::string str = b.to_string();
-        outs << b.generate_description();
+        outs << b.impl->generate_description();
         outs << str;
         return outs;
     }
@@ -908,4 +941,7 @@ namespace cobraml::core {
     INSTANTIATE_VECTOR_CONSTRUCTOR();
     INSTANTIATE_GET_BUFFER();
     INSTANTIATE_SET_ITEM();
+    INSTANTIATE_GET_ITEM();
+    INSTANTIATE_GEMV_WHOLE();
+    INSTANTIATE_GEMV_PARTIAL();
 }

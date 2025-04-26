@@ -10,15 +10,12 @@ namespace cobraml::core {
     enum Device {
         CPU,          // standard naive implementations
         CUDA,         // GPU implementations
-        CPU_X,        // Accelerated CPU implementation
-        PINNED_CPU,   // CPU with pinned memory still requires cuda
+        CPU_X         // Accelerated CPU implementation
     };
 
     inline bool device_is_host(const Device device) {
         if (device == CPU) return true;
         if (device == CPU_X) return true;
-        if (device == PINNED_CPU) return true;
-
         return false;
     }
 
@@ -30,6 +27,13 @@ namespace cobraml::core {
         FLOAT32,
         FLOAT64,
         INVALID
+    };
+
+    enum MemoryDirection {
+        HOST_TO_HOST,
+        HOST_TO_DEVICE,
+        DEVICE_TO_HOST,
+        DEVICE_TO_DEVICE,
     };
 
     bool operator<(Dtype lhs, Dtype rhs);
@@ -92,54 +96,6 @@ namespace cobraml::core {
     struct get_dtype_from_type<double> {
         static constexpr Dtype type = FLOAT64;
     };
-
-#define INSTANTIATE_OPERATOR(operation)\
-    template Brarray operation<float>(float other) const;      \
-    template Brarray operation<double>(double other) const;    \
-    template Brarray operation<int64_t>(int64_t other) const;  \
-    template Brarray operation<int32_t>(int32_t other) const;  \
-    template Brarray operation<int16_t>(int16_t other) const;  \
-    template Brarray operation<int8_t>(int8_t other) const;    \
-
-
-#define INSTANTIATE_INPLACE_OPERATOR(operation)\
-    template void operation<float>(Brarray &input, const float other);     \
-    template void operation<double>(Brarray &input, const double other);   \
-    template void operation<int64_t>(Brarray &input, const int64_t other); \
-    template void operation<int32_t>(Brarray &input, const int32_t other); \
-    template void operation<int16_t>(Brarray &input, const int16_t other); \
-    template void operation<int8_t>(Brarray &input, const int8_t other);   \
-
-
-#define INSTANTIATE_VECTOR_CONSTRUCTOR()                                                                                                    \
-    template Brarray::Brarray<float>(Device device, Dtype dtype, std::vector<size_t> const &shape, const std::vector<float> &data);         \
-    template Brarray::Brarray<double>(Device device, Dtype dtype, std::vector<size_t> const &shape, const std::vector<double> &data);       \
-    template Brarray::Brarray<int64_t>(Device device, Dtype dtype, std::vector<size_t> const &shape, const std::vector<int64_t> &data);     \
-    template Brarray::Brarray<int32_t>(Device device, Dtype dtype, std::vector<size_t> const &shape, const std::vector<int32_t> &data);     \
-    template Brarray::Brarray<int16_t>(Device device, Dtype dtype, std::vector<size_t> const &shape, const std::vector<int16_t> &data);     \
-    template Brarray::Brarray<int8_t>(Device device, Dtype dtype, std::vector<size_t> const &shape, const std::vector<int8_t> &data);       \
-
-
-#define INSTANTIATE_GET_BUFFER()                                  \
-    template float * Brarray::get_buffer<float>() const;          \
-    template double * Brarray::get_buffer<double>() const;        \
-    template int64_t * Brarray::get_buffer<int64_t>() const;      \
-    template int32_t * Brarray::get_buffer<int32_t>() const;      \
-    template int16_t * Brarray::get_buffer<int16_t>() const;      \
-    template int8_t * Brarray::get_buffer<int8_t>() const;        \
-
-
-#define INSTANTIATE_SET_ITEM()                                        \
-    template void Brarray::set_item<float>(float value);              \
-    template void Brarray::set_item<double>(double value);            \
-    template void Brarray::set_item<int64_t>(int64_t value);          \
-    template void Brarray::set_item<int32_t>(int32_t value);          \
-    template void Brarray::set_item<int16_t>(int16_t value);          \
-    template void Brarray::set_item<int8_t>(int8_t value);            \
-
-
-
-
 }
 
 #endif //ENUMS_H

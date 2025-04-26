@@ -35,9 +35,6 @@ TEST(ArrayTestFunctionals, test_device) {
 
     arr = cobraml::core::Brarray(cobraml::core::Device::CPU_X, cobraml::core::Dtype::INT8, {10});
     ASSERT_EQ(arr.get_device(), cobraml::core::Device::CPU_X);
-
-    arr = cobraml::core::Brarray(cobraml::core::Device::CUDA, cobraml::core::Dtype::INT8, {10});
-    ASSERT_EQ(arr.get_device(), cobraml::core::Device::CUDA);
 }
 
 
@@ -193,15 +190,15 @@ TEST(ArrayTestFunctionals, test_indexing) {
     ASSERT_EQ(scal_arr[0].item<int>(), 100);
     ASSERT_NE(arr[0][0][0].item<int>(), 100);
 
-    cobraml::core::Brarray gpu_tensor(cobraml::core::CUDA, cobraml::core::FLOAT32, {10, 10});
+    cobraml::core::Brarray gpu_tensor(cobraml::core::CPU_X, cobraml::core::FLOAT32, {10, 10});
 
     gpu_tensor = gpu_tensor[4];
     ASSERT_EQ(gpu_tensor.get_dtype(), cobraml::core::FLOAT32);
-    ASSERT_EQ(gpu_tensor.get_device(), cobraml::core::CUDA);
+    ASSERT_EQ(gpu_tensor.get_device(), cobraml::core::CPU_X);
 
     gpu_tensor = gpu_tensor[0];
     ASSERT_EQ(gpu_tensor.get_dtype(), cobraml::core::FLOAT32);
-    ASSERT_EQ(gpu_tensor.get_device(), cobraml::core::CUDA);
+    ASSERT_EQ(gpu_tensor.get_device(), cobraml::core::CPU_X);
 }
 
 TEST(ArrayTestFunctionals, default_constructor) {
@@ -322,44 +319,6 @@ TEST(ArrayTestFunctionals, requires_grad) {
     ASSERT_FALSE(base.retain_grad());
 
     ASSERT_THROW(std::cout << base.get_gradient(), std::runtime_error);
-}
-
-TEST(ArrayTestFunctionals, backward) {
-    cobraml::core::Brarray base1(cobraml::core::CPU, cobraml::core::FLOAT32, {1});
-
-    iadd(base1, 5);
-
-
-    base1.requires_grad(true);
-
-    cobraml::core::Brarray z;
-
-    {
-        z = base1 * base1; // 4
-        z  = z * 10; // 2
-    }
-
-    ASSERT_TRUE(z.requires_grad());
-    z.backwards();
-
-    std::cout << z << std::endl;
-    std::cout << base1.get_gradient();
-    // std::cout << base2.get_gradient();
-    // cobraml::core::Brarray vec(cobraml::core::CPU, cobraml::core::INT32, {3, 1, 1}, std::vector{1, 2, 3});
-    // cobraml::core::iadd(base, 1);
-    // cobraml::core::Brarray ref = base[1];
-    // cobraml::core::imult(base, vec);
-
-    // std::cout << base;
-    // ref = base[9];
-    // cobraml::core::iadd(ref, 11);
-    // ref = base[0];
-    // cobraml::core::iadd(ref, 12);
-    // cobraml::core::imult(base, -8);
-
-    // auto base_0 = base[0][0];
-    // base_0.requires_grad(true);
-    // base_0.backwards();
 }
 
 //modify and test gemv

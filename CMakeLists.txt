@@ -40,7 +40,7 @@ set(SOURCES
         src/cuda_standard_kernel/cuda_allocator.cpp
         src/cuda_standard_kernel/cuda_allocator.h
         src/cuda_standard_kernel/cuda_helpers.h
-        include/context.h
+        src/instantiate.h
 )
 
 add_library(cobraml SHARED ${SOURCES})
@@ -49,7 +49,7 @@ add_library(cobraml SHARED ${SOURCES})
 target_include_directories(cobraml PUBLIC include)
 
 # Include directory for private headers
-target_include_directories(cobraml PRIVATE src/standard_kernel src/autograd src/autograd/layers src/cuda_standard_kernel ${CUDA_INCLUDE_DIRS})
+target_include_directories(cobraml PRIVATE src/standard_kernel src/autograd src/autograd/layers src/cuda_standard_kernel CUDA::toolkit)
 target_link_libraries(cobraml PRIVATE CUDA::cudart)
 
 set_target_properties(cobraml PROPERTIES
@@ -148,6 +148,7 @@ endif ()
 add_executable(test_cpu_math tests/test_cpu_math.cpp)
 add_executable(test_array tests/test_brarray.cpp)
 add_executable(test_enums tests/test_enums.cpp)
+add_executable(test_array_gpu tests/test_brarray_gpu.cpp)
 
 if (TEST_THREAD)
     list(APPEND TEST_COMPILE_OPTIONS -fsanitize=thread)
@@ -159,17 +160,24 @@ if (TEST_ADDR)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address -fno-omit-frame-pointer -g")
 endif ()
 
+# CPU
 target_compile_options(test_enums PRIVATE ${TEST_COMPILE_OPTIONS})
 target_compile_options(test_array PRIVATE ${TEST_COMPILE_OPTIONS})
 target_compile_options(test_cpu_math PRIVATE ${TEST_COMPILE_OPTIONS})
+
+# GPU
+target_compile_options(test_array_gpu PRIVATE ${TEST_COMPILE_OPTIONS})
+target_compile_options(test_array_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_COMPILE_OPTIONS_DEBUG}>)
+
 target_link_libraries(test_array gtest GTest::gtest_main cobraml)
 target_link_libraries(test_enums gtest GTest::gtest_main cobraml)
 target_link_libraries(test_cpu_math gtest GTest::gtest_main cobraml)
+target_link_libraries(test_array_gpu gtest GTest::gtest_main cobraml)
 
 
 enable_testing()
 include(GoogleTest)
-gtest_discover_tests(test_enums test_array, test_cpu_math)
+gtest_discover_tests(test_enums test_array, test_cpu_math, test_array_gpu)
 #########################################################
 
 

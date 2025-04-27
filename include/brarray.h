@@ -41,6 +41,8 @@ namespace cobraml::core {
 
         [[nodiscard]] bool is_matrix() const;
 
+        [[nodiscard]] Brarray to(Device device) const;
+
         /**
          * @return the dtype of the brarray
          */

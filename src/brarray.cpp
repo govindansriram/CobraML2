@@ -132,7 +132,6 @@ namespace cobraml::core {
 
             const size_t column_count{shape[shape.size() - 1]};
             const size_t elements{calculate_total_rows(shape) * column_count};
-
             buffer_container->allocator->strided_mem_copy(
                 get_raw_buffer(),
                 ptr,
@@ -259,6 +258,34 @@ namespace cobraml::core {
             if (other->requires_grad()) other->node->add_next_node(node, 1);
             this->node->prev_nodes.push_back(node);
             node->add_next_node(this->node, 0);
+        }
+
+        void to(ArrayImpl * other) const {
+            MemoryDirection dir;
+            Allocator * alloc{other->buffer_container->allocator};
+
+            if (device == other->device && device_is_host(other->device)) dir = HOST_TO_HOST;
+            else if (device == other->device) dir = DEVICE_TO_DEVICE;
+            else if (!device_is_host(other->device) && !device_is_host(device))
+                throw std::runtime_error("devices need to be the same or one needs to be CPU");
+            else if (device_is_host(other->device)) {
+                dir = DEVICE_TO_HOST;
+                // we always want the gpu if present to be the allocator
+                alloc = buffer_container->allocator;
+            }
+            else dir = HOST_TO_DEVICE;
+
+            const size_t column_amt{shape[shape.size() - 1]};
+            const size_t cpy_amt{total_rows * column_amt};
+
+            alloc->strided_mem_copy(
+                other->get_raw_buffer(),
+                get_raw_buffer(),
+                cpy_amt * dtype_to_bytes(dtype),
+                dir,
+                column_amt * dtype_to_bytes(dtype),
+                (other->buffer_container->get_true_column_len() - column_amt) * dtype_to_bytes(dtype),
+                (buffer_container->get_true_column_len() - column_amt) * dtype_to_bytes(dtype));
         }
     };
 
@@ -651,12 +678,11 @@ namespace cobraml::core {
     }
 
     template<typename T>
-    void gemv(
-    Brarray &result,
-    const Brarray &matrix,
-    const Brarray &vector,
-    T alpha,
-    T beta) {
+    void gemv(Brarray &result,
+        const Brarray &matrix,
+        const Brarray &vector,
+        T alpha,
+        T beta) {
         constexpr Dtype dtype{get_dtype_from_type<T>::type};
         is_invalid(dtype);
 
@@ -780,7 +806,7 @@ namespace cobraml::core {
     }
 
     bool Brarray::is_vector() const {
-        return impl->total_rows == 1;
+        return impl->total_rows == 1 && get_shape().size() == 1;
     }
 
     bool Brarray::is_scalar_equivalent() const {
@@ -853,6 +879,10 @@ namespace cobraml::core {
             throw std::out_of_range("array can only return item if it contains a single element");
         }
 
+        if (!device_is_host(get_device())) {
+            return this->to(CPU).get_buffer<Type>()[0];
+        }
+
         return *get_buffer<Type>();
     }
 
@@ -862,7 +892,13 @@ namespace cobraml::core {
             throw std::out_of_range("cannot set singular value to non scalar");
         }
 
-        get_buffer<T>()[0] = value;
+        const Dtype current{this->get_dtype()};
+
+        impl->buffer_container->allocator->mem_copy(
+            impl->get_raw_buffer(),
+            &value,
+            dtype_to_bytes(current),
+            device_is_host(get_device()) ? HOST_TO_HOST : HOST_TO_DEVICE);
     }
 
     template<typename Type>
@@ -926,9 +962,20 @@ namespace cobraml::core {
         return ss.str();
     }
 
+    Brarray Brarray::to(Device const device) const{
+        Brarray ret(device, this->get_dtype(), this->get_shape());
+        this->impl->to(ret.impl.get());
+        return ret;
+    }
+
     std::ostream &operator<<(std::ostream &outs, const Brarray &b) {
         is_invalid(b.get_dtype());
-        const std::string str = b.to_string();
+        std::string str;
+        if (!device_is_host(b.get_device())) {
+            const Brarray temp{b.to(CPU)}; // NOTE expensive copy
+            str = temp.to_string();
+        }else str = b.to_string();
+
         outs << b.impl->generate_description();
         outs << str;
         return outs;

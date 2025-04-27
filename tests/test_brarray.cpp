@@ -28,7 +28,6 @@ TEST(ArrayTestFunctionals, test_dtype) {
         std::runtime_error);
 }
 
-
 TEST(ArrayTestFunctionals, test_device) {
     cobraml::core::Brarray arr(cobraml::core::Device::CPU, cobraml::core::Dtype::INT8, {10});
     ASSERT_EQ(arr.get_device(), cobraml::core::Device::CPU);
@@ -36,7 +35,6 @@ TEST(ArrayTestFunctionals, test_device) {
     arr = cobraml::core::Brarray(cobraml::core::Device::CPU_X, cobraml::core::Dtype::INT8, {10});
     ASSERT_EQ(arr.get_device(), cobraml::core::Device::CPU_X);
 }
-
 
 TEST(ArrayTestFunctionals, test_shape) {
     cobraml::core::Brarray arr(cobraml::core::Device::CPU, cobraml::core::Dtype::INT32, {10});
@@ -59,6 +57,7 @@ TEST(ArrayTestFunctionals, test_shape) {
 }
 
 TEST(ArrayTestFunctionals, test_stride) {
+#ifdef AVX2
     cobraml::core::Brarray arr(cobraml::core::Device::CPU, cobraml::core::Dtype::INT32, {10});
     ASSERT_EQ(arr.get_stride(), std::vector<size_t>{1});
 
@@ -85,6 +84,9 @@ TEST(ArrayTestFunctionals, test_stride) {
 
     arr = cobraml::core::Brarray(cobraml::core::Device::CPU, cobraml::core::Dtype::FLOAT64, {10, 10, 10});
     ASSERT_EQ(arr.get_stride(), std::vector<size_t>({120, 12, 1}));
+#elif
+//TODO add generic test
+#endif
 }
 
 TEST(ArrayTestFunctionals, from_vector) {
@@ -93,6 +95,14 @@ TEST(ArrayTestFunctionals, from_vector) {
     std::vector<size_t> shape{6};
     cobraml::core::Brarray arr(cobraml::core::CPU, cobraml::core::INT32, shape, vec);
     ASSERT_EQ(arr.get_shape(), shape);
+
+#ifdef AVX2
+    std::vector<size_t> expected_stride{1};
+    ASSERT_EQ(arr.get_stride(), expected_stride);
+#elif
+    // TODO
+#endif
+
     for (size_t i{0}; i < 6; ++i)
         ASSERT_EQ(arr.get_buffer<int>()[i], vec[i]);
 
@@ -101,6 +111,14 @@ TEST(ArrayTestFunctionals, from_vector) {
     ASSERT_EQ(arr.get_shape(), shape);
     for (size_t i{0}; i < 6; ++i)
         ASSERT_EQ(arr.get_buffer<int>()[i * 8], vec[i]);
+
+#ifdef AVX2
+    expected_stride = {24, 8, 1};
+    ASSERT_EQ(arr.get_stride(), expected_stride);
+#elif
+    // TODO
+#endif
+
 
     ASSERT_THROW(
         cobraml::core::Brarray(cobraml::core::CPU, cobraml::core::INT32, {1, 3, 4}, vec),
@@ -127,6 +145,34 @@ TEST(ArrayTestFunctionals, from_vector) {
         std::runtime_error);
 }
 
+TEST(ArrayTestFunctionals, test_categories) {
+    const std::vector vec{1, 2, 3, 4, 5, 6};
+    cobraml::core::Brarray arr(cobraml::core::CPU, cobraml::core::INT32, {6}, vec);
+    ASSERT_TRUE(arr.is_vector());
+    ASSERT_FALSE(arr.is_matrix());
+    ASSERT_FALSE(arr.is_scalar_equivalent());
+
+    arr = cobraml::core::Brarray(cobraml::core::CPU, cobraml::core::INT32, {2, 3}, vec);
+    ASSERT_TRUE(arr.is_matrix());
+    ASSERT_FALSE(arr.is_vector());
+    ASSERT_FALSE(arr.is_scalar_equivalent());
+
+    arr = cobraml::core::Brarray(cobraml::core::CPU, cobraml::core::INT32, {1, 2, 3}, vec);
+    ASSERT_FALSE(arr.is_matrix());
+    ASSERT_FALSE(arr.is_vector());
+    ASSERT_FALSE(arr.is_scalar_equivalent());
+
+    arr = cobraml::core::Brarray(cobraml::core::CPU, cobraml::core::INT32, {1}, std::vector{1});
+    ASSERT_TRUE(arr.is_scalar_equivalent());
+    ASSERT_TRUE(arr.is_vector());
+    ASSERT_FALSE(arr.is_matrix());
+
+    arr = cobraml::core::Brarray(cobraml::core::CPU, cobraml::core::INT32, {1, 1}, std::vector{1});
+    ASSERT_FALSE(arr.is_scalar_equivalent());
+    ASSERT_FALSE(arr.is_vector());
+    ASSERT_TRUE(arr.is_matrix());
+}
+
 bool check_alignment(const void * ptr) {
 #ifdef AVX2
     return reinterpret_cast<uintptr_t>(ptr) % 32 == 0;
@@ -151,22 +197,42 @@ TEST(ArrayTestFunctionals, test_indexing) {
     const std::vector<size_t> shape_vec{4};
     const std::vector<size_t> shape_scalar{1};
 
+#ifdef AVX2
+    const std::vector<size_t> stride_mat{8, 1};
+    const std::vector<size_t> stride_vec{1};
+    const std::vector<size_t> stride_scalar{1};
+#else
+    //TODO
+#endif
+
     const cobraml::core::Brarray arr(cobraml::core::CPU, cobraml::core::INT32, shape_ten, vec);
     ASSERT_TRUE(check_alignment(arr.get_buffer<int>()));
 
     for (size_t i{0}; i < shape_ten[0]; ++i) {
         cobraml::core::Brarray matrix{arr[i]};
         ASSERT_TRUE(check_alignment(arr.get_buffer<int>()));
+        ASSERT_TRUE(matrix.is_matrix());
         ASSERT_EQ(shape_mat, matrix.get_shape());
+#ifdef AVX2
+        ASSERT_EQ(stride_mat, matrix.get_stride());
+#endif
         for (size_t j{0}; j < shape_ten[1]; ++j) {
             cobraml::core::Brarray vector{matrix[j]};
             ASSERT_TRUE(check_alignment(vector.get_buffer<int>()));
             ASSERT_EQ(shape_vec, vector.get_shape());
+            ASSERT_TRUE(vector.is_vector());
+#ifdef AVX2
+            ASSERT_EQ(stride_vec, vector.get_stride());
+#endif
             for (size_t k{0}; k < shape_ten[2]; ++k) {
                 cobraml::core::Brarray scalar{vector[k]};
                 ASSERT_EQ(shape_scalar, scalar.get_shape());
                 ASSERT_EQ(scalar.item<int>(), vec[i * 12 + j * 4 + k]);
                 ASSERT_TRUE(check_alignment(scalar.get_buffer<int>()));
+                ASSERT_TRUE(scalar.is_scalar_equivalent());
+#ifdef AVX2
+                ASSERT_EQ(stride_scalar, scalar.get_stride());
+#endif
             }
         }
     }
@@ -190,15 +256,15 @@ TEST(ArrayTestFunctionals, test_indexing) {
     ASSERT_EQ(scal_arr[0].item<int>(), 100);
     ASSERT_NE(arr[0][0][0].item<int>(), 100);
 
-    cobraml::core::Brarray gpu_tensor(cobraml::core::CPU_X, cobraml::core::FLOAT32, {10, 10});
+    cobraml::core::Brarray other_tensor(cobraml::core::CPU_X, cobraml::core::FLOAT32, {10, 10});
 
-    gpu_tensor = gpu_tensor[4];
-    ASSERT_EQ(gpu_tensor.get_dtype(), cobraml::core::FLOAT32);
-    ASSERT_EQ(gpu_tensor.get_device(), cobraml::core::CPU_X);
+    other_tensor = other_tensor[4];
+    ASSERT_EQ(other_tensor.get_dtype(), cobraml::core::FLOAT32);
+    ASSERT_EQ(other_tensor.get_device(), cobraml::core::CPU_X);
 
-    gpu_tensor = gpu_tensor[0];
-    ASSERT_EQ(gpu_tensor.get_dtype(), cobraml::core::FLOAT32);
-    ASSERT_EQ(gpu_tensor.get_device(), cobraml::core::CPU_X);
+    other_tensor = other_tensor[0];
+    ASSERT_EQ(other_tensor.get_dtype(), cobraml::core::FLOAT32);
+    ASSERT_EQ(other_tensor.get_device(), cobraml::core::CPU_X);
 }
 
 TEST(ArrayTestFunctionals, default_constructor) {

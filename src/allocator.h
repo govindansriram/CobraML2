@@ -111,9 +111,9 @@ namespace cobraml::core {
             const void *source,
             size_t bytes,
             MemoryDirection direction,
-            size_t column_count,
-            size_t padding_dest,
-            size_t padding_source) = 0;
+            size_t column_amt_bytes,
+            size_t padding_dest_bytes,
+            size_t padding_source_bytes) = 0;
 
         virtual void free(
             void *ptr) = 0;

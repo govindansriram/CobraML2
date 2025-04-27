@@ -41,9 +41,17 @@ set(SOURCES
         src/cuda_standard_kernel/cuda_allocator.h
         src/cuda_standard_kernel/cuda_helpers.h
         src/instantiate.h
+        src/cuda_standard_kernel/gemv.cu
+        src/cuda_standard_kernel/cuda_math.h
+        src/cuda_standard_kernel/cuda_math.cpp
+)
+
+set(CUDA_SOURCES
+        src/cuda_standard_kernel/gemv.cu
 )
 
 add_library(cobraml SHARED ${SOURCES})
+target_sources(cobraml PRIVATE ${CUDA_SOURCES})
 
 # Include directories for public headers
 target_include_directories(cobraml PUBLIC include)
@@ -118,15 +126,6 @@ if (PROFILER)
     endif ()
 endif ()
 
-################################################################
-
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(cobraml PRIVATE ${TEST_COMPILE_OPTIONS})
-elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
-    target_compile_options(cobraml PRIVATE ${BENCH_COMPILE_OPTIONS})
-endif ()
-
-
 ############################### ADD cuda compilation flags ###############################################
 set(CUDA_COMPILE_OPTIONS_DEBUG
         -O0
@@ -138,10 +137,17 @@ set(CUDA_COMPILE_OPTIONS_RELEASE
         -O3
 )
 
+# Apply different flags based on build type
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(cobraml PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_COMPILE_OPTIONS_DEBUG}>)
+    target_compile_options(cobraml PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:${TEST_COMPILE_OPTIONS}>  # Apply to C++ files only
+            $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_COMPILE_OPTIONS_DEBUG}>  # Apply to CUDA files
+    )
 elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
-    target_compile_options(cobraml PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_COMPILE_OPTIONS_RELEASE}>)
+    target_compile_options(cobraml PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:${BENCH_COMPILE_OPTIONS}>  # Apply to C++ files only
+            $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_COMPILE_OPTIONS_RELEASE}>  # Apply to CUDA files
+    )
 endif ()
 
 ####################### test settings #######################
@@ -149,6 +155,8 @@ add_executable(test_cpu_math tests/test_cpu_math.cpp)
 add_executable(test_array tests/test_brarray.cpp)
 add_executable(test_enums tests/test_enums.cpp)
 add_executable(test_array_gpu tests/test_brarray_gpu.cpp)
+
+target_include_directories(test_array PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 if (TEST_THREAD)
     list(APPEND TEST_COMPILE_OPTIONS -fsanitize=thread)
@@ -165,9 +173,9 @@ target_compile_options(test_enums PRIVATE ${TEST_COMPILE_OPTIONS})
 target_compile_options(test_array PRIVATE ${TEST_COMPILE_OPTIONS})
 target_compile_options(test_cpu_math PRIVATE ${TEST_COMPILE_OPTIONS})
 
-# GPU
-target_compile_options(test_array_gpu PRIVATE ${TEST_COMPILE_OPTIONS})
-target_compile_options(test_array_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_COMPILE_OPTIONS_DEBUG}>)
+## GPU
+#target_compile_options(test_array_gpu PRIVATE ${TEST_COMPILE_OPTIONS})
+#target_compile_options(test_array_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_COMPILE_OPTIONS_DEBUG}>)
 
 target_link_libraries(test_array gtest GTest::gtest_main cobraml)
 target_link_libraries(test_enums gtest GTest::gtest_main cobraml)

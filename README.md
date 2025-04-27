@@ -37,3 +37,5 @@ make same code for neon but possibly use inline asm
 - BUILTIN Quantization aware training
 - Builtin lora support
 - builtin autograd engine
+
+compute-sanitizer --tool memcheck --leak-check full --padding 64 ./cmake-build-debuggpu/test_array_gpu

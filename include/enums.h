@@ -4,15 +4,20 @@
 
 #ifndef ENUMS_H
 #define ENUMS_H
-#include <cstdint>
 #include <stdexcept>
 
 namespace cobraml::core {
     enum Device {
-        CPU,    // standard naive implementations
-        GPU,    // GPU implementations
-        CPU_X   // Accelerated CPU implementation
+        CPU,          // standard naive implementations
+        CUDA,         // GPU implementations
+        CPU_X         // Accelerated CPU implementation
     };
+
+    inline bool device_is_host(const Device device) {
+        if (device == CPU) return true;
+        if (device == CPU_X) return true;
+        return false;
+    }
 
     enum Dtype {
         INT8,
@@ -22,6 +27,13 @@ namespace cobraml::core {
         FLOAT32,
         FLOAT64,
         INVALID
+    };
+
+    enum MemoryDirection {
+        HOST_TO_HOST,
+        HOST_TO_DEVICE,
+        DEVICE_TO_HOST,
+        DEVICE_TO_DEVICE,
     };
 
     bool operator<(Dtype lhs, Dtype rhs);
@@ -84,24 +96,6 @@ namespace cobraml::core {
     struct get_dtype_from_type<double> {
         static constexpr Dtype type = FLOAT64;
     };
-
-#define INSTANTIATE_OPERATOR(operation)\
-    template Brarray operation<float>(float other) const;\
-    template Brarray operation<double>(double other) const;\
-    template Brarray operation<int64_t>(int64_t other) const;\
-    template Brarray operation<int32_t>(int32_t other) const;\
-    template Brarray operation<int16_t>(int16_t other) const;\
-    template Brarray operation<int8_t>(int8_t other) const;\
-
-
-#define INSTANTIATE_INPLACE_OPERATOR(operation)\
-    template void operation<float>(Brarray &input, const float other);\
-    template void operation<double>(Brarray &input, const double other);\
-    template void operation<int64_t>(Brarray &input, const int64_t other);\
-    template void operation<int32_t>(Brarray &input, const int32_t other);\
-    template void operation<int16_t>(Brarray &input, const int16_t other);\
-    template void operation<int8_t>(Brarray &input, const int8_t other);\
-
 }
 
 #endif //ENUMS_H

@@ -4,69 +4,123 @@
 
 #ifndef ALLOCATOR_H
 #define ALLOCATOR_H
+#include <cmath>
 #include <cstddef>
 #include <memory>
+#include <vector>
 #include "enums.h"
 
 namespace cobraml::core {
+
+    /**
+     * Computes the aligned size in bytes, for this method to work
+     * all shapes must be flattened to a 2 dim tensor (matrix)
+     * @param total_rows
+     * @param total_columns
+     * @param dtype_size
+     * @param alignment_size
+     * @return
+     */
+    inline size_t compute_aligned_size(
+        size_t const total_rows,
+        size_t const total_columns,
+        size_t const dtype_size,
+        size_t const alignment_size) {
+
+        if (alignment_size % dtype_size) {
+            // TODO: Add the alignment value into the error
+            throw std::runtime_error("dtype is not a factor of the required alignment");
+        }
+
+        const auto requested{total_columns * dtype_size};
+
+        if (requested < alignment_size)
+            return alignment_size * total_rows;
+
+        if (!(requested % alignment_size)) {
+            // requested is a direct multiple of ALIGNMENT
+            return requested * total_rows;
+        }
+
+        // round to the closest multiple
+        size_t const multiplier{static_cast<size_t>(
+            std::ceil(static_cast<float>(requested) / static_cast<float>(alignment_size)))};
+
+        return multiplier * alignment_size * total_rows;
+    }
+
+    inline size_t calculate_total_rows(std::vector<size_t> const &shape) {
+        if (shape.empty()) throw std::runtime_error("shape cannot be empty");
+        if (shape[0] == 0) throw std::runtime_error("dimensions in shape cannot be zero");
+        size_t rows{1};
+        for (size_t i{0}; i < shape.size() - 1; ++i){
+            if (shape[i] == 0) throw std::runtime_error("dimensions in shape cannot be zero");
+            rows *= shape[i];
+        }
+        return rows;
+    }
+
 
     class Allocator {
     public:
         virtual ~Allocator() = default;
 
         /**
-         * allocates data for a barray, matrix, or tensor. The amount of bytes allocated will be accordance to the
-         * cache alignment of the used architecture. This can only be more than requested never less.
+         * allocates a memory buffer for a brarray. The amount of bytes allocated may be padded for better
+         * cache alignment with respect to the architecture. This can only be more than requested, never less.
          *
          * @param dest a ptr to the ptr which will contain the data
-         * @param total_rows the total amount of rows in the data structure, to find the total amount of bytes allocated
-         * use total_rows * return
-         * @param total_columns the amount of columns requested in the data structure
-         * @param dtype_size size of the dtype in bytes, i.e. float is 4
-         * @return the amount of data allocated per row of the data structure
+         * @param shape these are the dimensions of the brarray, internally we flatten this to one dimension to compute
+         * the requested memory amount
+         * @param dtype the datatype of the buffer, lets us determine how many bytes are needed per element
+         * @return a unique ptr containing the context for the buffer, and the total bytes allocated. To determine
+         * the total elements, divide by dtype size. To determine the stride flatten the shape to 2 dimensions
+         * divide total bytes by the value of the first dimension then divide by dtype size
          */
-        virtual size_t malloc(void ** dest, size_t total_rows, size_t total_columns, size_t dtype_size) = 0;
+        virtual size_t malloc(
+            void **dest,
+            const std::vector<size_t>& shape,
+            Dtype dtype) = 0;
 
         /**
-         *  allocates data for a barray, matrix, or tensor, with default values set to 0. The amount of bytes allocated
-         *  will be accordance to the cache alignment of the used architecture. This can only be more than requested
-         *  never less.
+         * allocates a memory buffer for a brarray and sets all values to zero. The amount of bytes allocated may be
+         * padded for better cache alignment with respect to the architecture. This can only be more than requested,
+         * never less.
+         *
          * @param dest a ptr to the ptr which will contain the data
-        * @param total_rows the total amount of rows in the data structure, to find the total amount of bytes allocated
-         * use total_rows * return
-         * @param total_columns the amount of columns requested in the data structure
-         * @param dtype_size size of the dtype in bytes, i.e. float is 4
-         * @return the amount of data allocated per row of the data structure
+         * @param shape these are the dimensions of the brarray, internally we flatten this to one dimension to compute
+         * the requested memory amount
+         * @param dtype the datatype of the buffer, lets us determine how many bytes are needed per element
+         * @return a unique ptr containing the context for the buffer, and the total bytes allocated. To determine
+         * the total elements, divide by dtype size. To determine the stride flatten the shape to 2 dimensions
+         * divide total bytes by the value of the first dimension then divide by dtype size
          */
-        virtual size_t calloc(void ** dest, size_t total_rows, size_t total_columns, size_t dtype_size) = 0;
-        virtual void mem_copy(void *dest, const void *source, std::size_t bytes) = 0;
-        virtual void free(void *ptr) = 0;
+        virtual size_t calloc(
+            void **dest,
+            const std::vector<size_t>& shape,
+            Dtype dtype) = 0;
+
+        virtual void mem_copy(
+            void *dest,
+            const void *source,
+            std::size_t bytes,
+            MemoryDirection direction) = 0;
+
+        virtual void strided_mem_copy(
+            void *dest,
+            const void *source,
+            size_t bytes,
+            MemoryDirection direction,
+            size_t column_amt_bytes,
+            size_t padding_dest_bytes,
+            size_t padding_source_bytes) = 0;
+
+        virtual void free(
+            void *ptr) = 0;
     };
 
     extern std::array<std::unique_ptr<Allocator>, 3> global_allocators;
     Allocator * get_allocator(Device device);
-
-    // class Buffer {
-    //     void * p_buffer = nullptr;
-    //     Allocator * p_allocator;
-    //     Device device;
-    //
-    // public:
-    //     Buffer() = delete;
-    //     explicit Buffer(size_t bytes, Device device);
-    //     ~Buffer();
-    //     [[nodiscard]] void * get_p_buffer() const;
-    //     Buffer(Buffer&) = delete;
-    //     Buffer& operator=(Buffer&) = delete;
-    //
-    //     /**
-    //      * overwrite a segment of the buffer with new data
-    //      * @param source the new data
-    //      * @param byte_count how many bytes to replace
-    //      * @param offset the starting position to start overwriting in the original buffer
-    //      */
-    //     void overwrite(const void * source, size_t byte_count, size_t offset = 0) const;
-    // };
 }
 
 #endif //ALLOCATOR_H

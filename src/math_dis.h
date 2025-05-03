@@ -8,15 +8,21 @@
 #include <memory>
 
 namespace cobraml::core {
+
+    inline size_t calculate_total_elements(const size_t *tensor_shape, const size_t *tensor_stride) {
+        return tensor_shape[0] * tensor_stride[0];
+    }
+
     class Math {
     public:
         virtual ~Math() = default;
 
-        virtual bool equals(
-            const void * tensor_1,
-            void * tensor_2,
-            const size_t * tensor_shape,
-            const size_t * tensor_stride,
+        virtual void equals(
+            const void *tensor_1,
+            const void *tensor_2,
+            int *result,
+            const size_t *tensor_shape,
+            const size_t *tensor_stride,
             Dtype dtype) = 0;
 
         /**
@@ -33,13 +39,13 @@ namespace cobraml::core {
          * @param dtype the datatype
          */
         virtual void permute(
-            const void * tensor,
-            void * dest,
+            const void *tensor,
+            void *dest,
             size_t shape_len,
             const size_t *original_shape,
-            const size_t * permute_mask,
-            const size_t * original_stride,
-            const size_t * dest_stride,
+            const size_t *permute_mask,
+            const size_t *original_stride,
+            const size_t *dest_stride,
             Dtype dtype) = 0;
 
         /**
@@ -66,6 +72,20 @@ namespace cobraml::core {
                           size_t columns,
                           size_t row_stride,
                           Dtype dtype) = 0;
+
+        virtual void gemm(
+            const void *matrix_one,
+            const void *matrix_two,
+            void *matrix_dest,
+            const void *alpha,
+            const void *beta,
+            size_t mat_one_rows,
+            size_t mat_two_columns,
+            size_t shared,
+            size_t row_stride_one,
+            size_t row_stride_two,
+            size_t row_stride_dest,
+            Dtype dtype) = 0;
 
         virtual void hadamard_product(const void *tensor_one,
                                       const void *tensor_two,
@@ -94,6 +114,7 @@ namespace cobraml::core {
                                       const size_t *stride_two,
                                       size_t dest_row_stride,
                                       Dtype dtype) = 0;
+
         //
         // virtual void element_wise_sub(const void *tensor_one,
         //                               const void *tensor_two,

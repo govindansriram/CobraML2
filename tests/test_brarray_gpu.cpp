@@ -41,3 +41,36 @@ TEST(CudaArrayTestFunctionals, test_device) {
     std::cout << res;
     std::cout << tensor;
 }
+
+TEST(CudaArrayTestFunctionals, eq) {
+
+    std::vector vec(100000, 0);
+
+    int count{0};
+    for (auto &item: vec) {
+        item = count;
+        count += 1;
+    }
+
+    const cobraml::core::Brarray arr(
+        cobraml::core::CUDA,
+        cobraml::core::INT32,
+        {10, 100, 100},
+        vec);
+
+    ASSERT_FALSE(arr[1] == arr[0]);
+    ASSERT_TRUE(arr[0] == arr[0]);
+    ASSERT_TRUE(arr == arr);
+
+    vec[99999] = -1;
+
+    const cobraml::core::Brarray arr2(
+        cobraml::core::CUDA,
+        cobraml::core::INT32,
+        {10, 100, 100},
+        vec);
+
+    ASSERT_FALSE(arr == arr2);
+    ASSERT_TRUE(arr[0] == arr2[0]);
+}
+

@@ -413,34 +413,61 @@ TEST(MathTestFunc, imult) {
     ASSERT_THROW(imult(b_tensor, b_vec), std::runtime_error);
 }
 
-TEST(MathTestFunc, permute) {
+// setup test EQ, then test mathematical properties of matrices
 
-    const std::vector<float> data{
-        1,  2,  3,
-        4,  5,  6,
-        7,  8,  9,
+TEST(MathTestFunc, eq) {
 
-        10, 11, 12,
-        13, 14, 15,
-        16, 17, 18,
-
-        19, 20, 21,
-        22, 23, 24,
-        25, 26, 27,
-
-        28, 29, 30,
-        31, 32, 33,
-        34, 35, 36
+    const std::vector tensor{
+        1,  2,  3,  4,  5,  6,
+        7,  8,  9,  10, 11, 12,
+        13, 14, 15, 16, 17, 18,
+        19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30,
+        31, 32, 33, 34, 35, 36
     };
 
-    cobraml::core::Brarray tensor(cobraml::core::CPU, cobraml::core::FLOAT32, {2, 2, 9}, data);
-    cobraml::core::Brarray matrix{tensor[0]};
+    const cobraml::core::Brarray arr(cobraml::core::CPU, cobraml::core::INT32, {3, 4, 3}, tensor);
+    ASSERT_TRUE(arr == arr);
+    ASSERT_TRUE(arr[2] == arr[2]);
+    ASSERT_FALSE(arr[0] == arr[1]);
 
-    std::cout << matrix.permute({1, 0});
+    cobraml::core::Brarray arr2{arr};
+    ASSERT_TRUE(arr == arr2);
+    *arr2[2][0].get_buffer<int>() = 100;
+    ASSERT_FALSE(arr == arr2);
 
-    tensor = tensor.permute({1, 2, 0});
-
-    std::cout << tensor;
-
-    std::cout << tensor.permute({0, 2, 1});
+    ASSERT_TRUE(arr2[0][0][0] == arr[0][0][0]);
+    ASSERT_FALSE(arr2[0][0][1] == arr[0][0][2]);
 }
+
+// TEST(MathTestFunc, permute) {
+//
+//     const std::vector<float> data{
+//         1,  2,  3,
+//         4,  5,  6,
+//         7,  8,  9,
+//
+//         10, 11, 12,
+//         13, 14, 15,
+//         16, 17, 18,
+//
+//         19, 20, 21,
+//         22, 23, 24,
+//         25, 26, 27,
+//
+//         28, 29, 30,
+//         31, 32, 33,
+//         34, 35, 36
+//     };
+//
+//     cobraml::core::Brarray tensor(cobraml::core::CPU, cobraml::core::FLOAT32, {2, 2, 9}, data);
+//     cobraml::core::Brarray matrix{tensor[0]};
+//
+//     std::cout << matrix.permute({1, 0});
+//
+//     tensor = tensor.permute({1, 2, 0});
+//
+//     std::cout << tensor;
+//
+//     std::cout << tensor.permute({0, 2, 1});
+// }

@@ -28,6 +28,8 @@ set(SOURCES
         src/allocator.cpp
         src/standard_kernel/standard_math.h
         src/standard_kernel/standard_math.cpp
+        src/standard_kernel/gemm.cpp
+        src/standard_kernel/eq.cpp
         src/enums.cpp
         include/enums.h
         src/math_dis.cpp
@@ -48,6 +50,8 @@ set(SOURCES
 
 set(CUDA_SOURCES
         src/cuda_standard_kernel/gemv.cu
+        src/cuda_standard_kernel/gemm.cu
+        src/cuda_standard_kernel/eq.cu
 )
 
 add_library(cobraml SHARED ${SOURCES})
@@ -135,6 +139,7 @@ set(CUDA_COMPILE_OPTIONS_DEBUG
 
 set(CUDA_COMPILE_OPTIONS_RELEASE
         -O3
+        -DBENCHMARK=1
 )
 
 # Apply different flags based on build type
@@ -193,4 +198,8 @@ gtest_discover_tests(test_enums test_array, test_cpu_math, test_array_gpu)
 add_executable(benchmark_gemv benchmarks/benchmark_gemv.cpp)
 target_compile_options(benchmark_gemv PRIVATE ${BENCH_COMPILE_OPTIONS})
 target_link_libraries(benchmark_gemv benchmark::benchmark cobraml)
+
+add_executable(benchmark_eq benchmarks/eq_cuda.cpp)
+target_compile_options(benchmark_eq PRIVATE ${BENCH_COMPILE_OPTIONS})
+target_link_libraries(benchmark_eq benchmark::benchmark cobraml)
 #########################################################

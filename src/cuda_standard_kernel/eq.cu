@@ -2,21 +2,19 @@
 #include "cuda_math.h"
 
 namespace cobraml::core {
-
     // https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf
 
     __global__ void eq_reduce_naive(
-        int * data,
+        const int *in_data,
+        int *out_data,
         const size_t total_elements) {
-
         extern __shared__ int TILE[];
         const size_t pos = threadIdx.x + (blockDim.x * blockIdx.x);
         const size_t tid{threadIdx.x};
 
         if (pos < total_elements) {
-            TILE[tid] = data[pos];
-            data[pos] = 1;
-        }else TILE[tid] = 1;
+            TILE[tid] = in_data[pos];
+        } else TILE[tid] = 1;
 
         for (size_t jump{1}; jump < blockDim.x; jump *= 2) {
             __syncthreads();
@@ -24,63 +22,85 @@ namespace cobraml::core {
                 TILE[tid] = TILE[tid] & TILE[tid + jump];
         }
 
-        if (threadIdx.x == 0) data[blockIdx.x] = TILE[0];
+        if (threadIdx.x == 0) out_data[blockIdx.x] = TILE[0];
     }
 
 
     __global__ void eq_reduce_naive2(
-        int * data,
+        const int *in_data,
+        int *out_data,
         const size_t total_elements) {
-
         extern __shared__ int TILE[];
         const unsigned int pos = threadIdx.x + (blockDim.x * blockIdx.x);
         const unsigned int tid{threadIdx.x};
 
         if (pos < total_elements) {
-            TILE[tid] = data[pos];
-            data[pos] = 1;
-        }else TILE[tid] = 1;
+            TILE[tid] = in_data[pos];
+        } else TILE[tid] = 1;
 
         for (int jump{1}; jump < blockDim.x; jump *= 2) {
             __syncthreads();
 
             // most threads will now follow the same path, reducing warp divergence
-            const unsigned int index{2 * jump * tid}; // increases bank conflict after jump is 16 becasue 32 is added to the index which is the same bank in shared memory
+            const unsigned int index{2 * jump * tid};
+            // increases bank conflict after jump is 16 becasue 32 is added to the index which is the same bank in shared memory
             if (index < blockDim.x)
                 TILE[index] = TILE[index] & TILE[index + jump];
         }
 
-        if (threadIdx.x == 0) data[blockIdx.x] = TILE[0];
+        if (threadIdx.x == 0) out_data[blockIdx.x] = TILE[0];
     }
 
+    //coalesced with minimal bank conflicts
     __global__ void eq_reduce_naive3(
-    int * data,
-    const size_t total_elements) {
-
+        const int *in_data,
+        int *out_data,
+        const size_t total_elements) {
         extern __shared__ int TILE[];
         const unsigned int pos = threadIdx.x + (blockDim.x * blockIdx.x);
         const unsigned int tid{threadIdx.x};
 
         if (pos < total_elements) {
-            TILE[tid] = data[pos];
-            data[pos] = 1;
-        }else TILE[tid] = 1;
+            TILE[tid] = in_data[pos];
+        } else TILE[tid] = 1;
 
-        for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
-            if (tid < s) {
-                TILE[tid] &= TILE[tid + s];
-            }
+        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
             __syncthreads();
+            if (tid < s) TILE[tid] &= TILE[tid + s];
         }
 
-        if (threadIdx.x == 0) data[blockIdx.x] = TILE[0];
+        if (threadIdx.x == 0) out_data[blockIdx.x] = TILE[0];
+    }
+
+    // not coalesced
+    __global__ void eq_reduce_naive4(
+        const int *in_data,
+        int *out_data,
+        const size_t total_elements) {
+        extern __shared__ int TILE[];
+        const unsigned int pos = threadIdx.x + (blockDim.x * blockIdx.x);
+        const unsigned int tid{threadIdx.x};
+
+        if (pos < total_elements) {
+            TILE[tid] = in_data[pos];
+        } else TILE[tid] = 1;
+
+        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+            __syncthreads();
+            // add first and last element to avoid bank conflicts
+            if (tid < s) TILE[tid] &= TILE[(s * 2) - (tid + 1)];
+        }
+
+        if (threadIdx.x == 0) {
+            out_data[blockIdx.x] = TILE[0];
+        }
     }
 
     template<typename DataType>
     __global__ void eq_mask(
-        const DataType * arr_one,
-        const DataType * arr_two,
-        int * out,
+        const DataType *arr_one,
+        const DataType *arr_two,
+        int *out,
         const size_t total) {
         size_t pos = threadIdx.x + (blockDim.x * blockIdx.x);
         if (pos < total)
@@ -88,15 +108,17 @@ namespace cobraml::core {
     }
 
     void eq_dispatcher(
-        int * out,
-        const dim3 block_size,
-        const dim3 grid_size,
+        int *in,
+        int *out,
+        const size_t block_size,
+        const size_t grid_size,
         const size_t s_data_size,
         const size_t total_elements) {
 #ifdef BENCHMARK
         switch (func_pos) {
             case 0: {
                 eq_reduce_naive<<<grid_size, block_size, s_data_size>>>(
+                    in,
                     out,
                     total_elements);
 
@@ -105,16 +127,27 @@ namespace cobraml::core {
             }
             case 1: {
                 eq_reduce_naive2<<<grid_size, block_size, s_data_size>>>(
-                            out,
-                            total_elements);
+                    in,
+                    out,
+                    total_elements);
 
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
             case 2: {
                 eq_reduce_naive3<<<grid_size, block_size, s_data_size>>>(
-                            out,
-                            total_elements);
+                    in,
+                    out,
+                    total_elements);
+
+                CUDA_CHECK(cudaGetLastError());
+                return;
+            }
+            case 3: {
+                eq_reduce_naive4<<<grid_size, block_size, s_data_size>>>(
+                    in,
+                    out,
+                    total_elements);
 
                 CUDA_CHECK(cudaGetLastError());
                 return;
@@ -125,6 +158,7 @@ namespace cobraml::core {
         }
 #else
         eq_reduce_naive3<<<grid_size, block_size, s_data_size>>>(
+                            in,
                             out,
                             total_elements);
 
@@ -134,43 +168,53 @@ namespace cobraml::core {
 
     template<typename DataType>
     void eq_wrapper(
-        const DataType * arr_one,
-        const DataType * arr_two,
-        int * out,
-        const size_t total_elements) {
+        const DataType *arr_one,
+        const DataType *arr_two,
+        int *out,
+        size_t total_elements) {
+        constexpr unsigned int block_size{TILE_WIDTH * TILE_WIDTH};
 
-        constexpr unsigned int shared_memory_count{TILE_WIDTH * TILE_WIDTH};
-        dim3 block_size{shared_memory_count};
-
-        unsigned int sz{calculate_dim(total_elements, shared_memory_count)};
-        eq_mask<DataType><<<sz, block_size>>>(arr_one, arr_two, out, total_elements);
+        size_t blocks{calculate_dim(total_elements, block_size)};
+        eq_mask<DataType><<<blocks, block_size>>>(arr_one, arr_two, out, total_elements);
         CUDA_CHECK(cudaGetLastError());
 
-        while (sz > 1) {
-            const dim3 grid_size{sz};
+        int *in;
+        CUDA_CHECK(cudaMalloc(&in, blocks * 4));
+        int *d_in{out};
+        int *d_out{in};
+
+        while (total_elements > 1) {
+            blocks = calculate_dim(total_elements, block_size);
+
             eq_dispatcher(
-                out,
+                d_in,
+                d_out,
                 block_size,
-                grid_size,
-                shared_memory_count * 4,
+                blocks,
+                block_size * 4,
                 total_elements);
-            sz /= 2;
-            sz = static_cast<unsigned int>(std::pow(2,std::ceil(std::log(sz) / std::log(2))));
+
+            total_elements = blocks;
+            int *temp = d_in;
+            d_in = d_out;
+            d_out = temp;
         }
+
+        CUDA_CHECK(cudaMemcpy(out, d_in, 4, cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaFree(in));
     }
 
     void CudaMath::equals(
-            const void *tensor_1,
-            const void *tensor_2,
-            int *result,
-            const size_t *tensor_shape,
-            const size_t *tensor_stride,
-            const Dtype dtype) {
-
+        const void *tensor_1,
+        const void *tensor_2,
+        int *result,
+        const size_t *tensor_shape,
+        const size_t *tensor_stride,
+        const Dtype dtype) {
         const size_t total_elements{calculate_total_elements(tensor_shape, tensor_stride)};
 
         switch (dtype) {
-            case INT8:{
+            case INT8: {
                 const auto a1{static_cast<const int8_t *>(tensor_1)};
                 const auto a2{static_cast<const int8_t *>(tensor_2)};
                 eq_wrapper<int8_t>(a1, a2, result, total_elements);

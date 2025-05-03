@@ -59,6 +59,7 @@ TEST(CudaArrayTestFunctionals, eq) {
         vec);
 
     ASSERT_FALSE(arr[1] == arr[0]);
+    // std::cout << "her brub" << std::endl;
     ASSERT_TRUE(arr[0] == arr[0]);
     ASSERT_TRUE(arr == arr);
 

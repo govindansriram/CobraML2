@@ -16,6 +16,7 @@ namespace cobraml::core {
         const size_t row_stride_one,
         const size_t row_stride_two,
         const size_t row_stride_dest) {
+
         const size_t row{blockDim.y * blockIdx.y + threadIdx.y};
         const size_t column{blockDim.x * blockIdx.x + threadIdx.x};
 
@@ -24,7 +25,7 @@ namespace cobraml::core {
 
             T accum{0};
             for (size_t i{0}; i < shared; ++i)
-                accum += matrix_one[row_stride_one * row + i] + matrix_two[row_stride_two * i + column];
+                accum += matrix_one[row_stride_one * row + i] * matrix_two[row_stride_two * i + column];
 
             accum *= alpha;
             matrix_dest[row * row_stride_dest + column] += accum;
@@ -44,12 +45,14 @@ namespace cobraml::core {
         const size_t row_stride_one,
         const size_t row_stride_two,
         const size_t row_stride_dest) {
+
         __shared__ T TILE_BLOCK_ONE[TILE_WIDTH][TILE_WIDTH]; // shared amongst all threads (in block)
         __shared__ T TILE_BLOCK_TWO[TILE_WIDTH][TILE_WIDTH]; // shared amongst all threads (in block)
 
-        const size_t row_block{blockDim.y};
+        const size_t row_block{blockIdx.y};
         const size_t row_thread{threadIdx.y};
-        const size_t column_block{blockDim.x};
+
+        const size_t column_block{blockIdx.x};
         const size_t column_thread{threadIdx.x};
 
         const size_t row{row_block * blockDim.y + row_thread};
@@ -64,15 +67,17 @@ namespace cobraml::core {
 
         T accumulation{0};
 
-        const size_t limit{static_cast<size_t>(std::ceil(static_cast<float>(shared) / static_cast<float>(TILE_WIDTH)))};
-
+        const size_t limit{(shared + (TILE_WIDTH - 1)) / TILE_WIDTH};
         for (size_t i{0}; i < limit; ++i) {
+
+            // shift right
             // boundary mask for tiles over matrix boundaries
             TILE_BLOCK_ONE[row_thread][column_thread] =
                     (TILE_WIDTH * i + column_thread < shared && row < mat_one_rows)
                         ? matrix_one[row_stride_one * row + (TILE_WIDTH * i + column_thread)]
                         : static_cast<T>(0);
 
+            // shift down
             // boundary mask for tiles over matrix boundaries
             TILE_BLOCK_TWO[row_thread][column_thread] =
                     (TILE_WIDTH * i + row_thread < shared && column < mat_two_columns)
@@ -81,8 +86,9 @@ namespace cobraml::core {
 
             __syncthreads();
 
-            for (size_t j{0}; j < TILE_WIDTH; ++j)
+            for (size_t j{0}; j < TILE_WIDTH; ++j) {
                 accumulation += TILE_BLOCK_ONE[row_thread][j] * TILE_BLOCK_TWO[j][column_thread];
+            }
 
             __syncthreads();
         }
@@ -153,18 +159,17 @@ namespace cobraml::core {
         }
 #else
         constexpr dim3 block_dim(TILE_WIDTH, TILE_WIDTH);
+
         const dim3 grid_dim(
-            static_cast<size_t>(
-                std::ceil(static_cast<float>(mat_two_columns) / static_cast<float>(TILE_WIDTH))),
-            static_cast<size_t>(std::ceil(static_cast<float>(mat_one_rows) / static_cast<float>(TILE_WIDTH)))
+            calculate_dim(mat_two_columns, TILE_WIDTH),
+            calculate_dim(mat_one_rows, TILE_WIDTH)
         );
 
         gemm_tiled<T><<<grid_dim, block_dim>>>(
             matrix_one,
             matrix_two,
             matrix_dest,
-            alpha,
-            beta,
+            alpha, beta,
             mat_one_rows,
             mat_two_columns,
             shared,

@@ -42,4 +42,12 @@ BENCHMARK(cuda_eq)
 ->Args({22, 3})
 ->Threads(1);
 
+BENCHMARK(cuda_eq)
+->Args({22, 4})
+->Threads(1);
+
+BENCHMARK(cuda_eq)
+->Args({22, 5})
+->Threads(1);
+
 BENCHMARK_MAIN();

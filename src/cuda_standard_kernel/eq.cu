@@ -9,20 +9,22 @@ namespace cobraml::core {
         int *out_data,
         const size_t total_elements) {
         extern __shared__ int TILE[];
-        const size_t pos = threadIdx.x + (blockDim.x * blockIdx.x);
+        const size_t current_pos = threadIdx.x + (blockDim.x * blockIdx.x * 2);
+        const size_t next_pos = threadIdx.x + blockDim.x * (blockIdx.x * 2 + 1);
         const size_t tid{threadIdx.x};
 
-        if (pos < total_elements) {
-            TILE[tid] = in_data[pos];
-        } else TILE[tid] = 1;
+        TILE[tid] = current_pos < total_elements ? in_data[current_pos] : 1;
+        TILE[tid] &= next_pos < total_elements ? in_data[next_pos] : 1;
 
         for (size_t jump{1}; jump < blockDim.x; jump *= 2) {
             __syncthreads();
-            if (pos % (2 * jump) == 0)
+            if (current_pos % (2 * jump) == 0)
                 TILE[tid] = TILE[tid] & TILE[tid + jump];
         }
 
-        if (threadIdx.x == 0) out_data[blockIdx.x] = TILE[0];
+        if (threadIdx.x == 0) {
+            out_data[blockIdx.x] = TILE[0];
+        }
     }
 
 
@@ -31,18 +33,19 @@ namespace cobraml::core {
         int *out_data,
         const size_t total_elements) {
         extern __shared__ int TILE[];
-        const unsigned int pos = threadIdx.x + (blockDim.x * blockIdx.x);
-        const unsigned int tid{threadIdx.x};
 
-        if (pos < total_elements) {
-            TILE[tid] = in_data[pos];
-        } else TILE[tid] = 1;
+        const size_t current_pos = threadIdx.x + (blockDim.x * blockIdx.x * 2);
+        const size_t next_pos = threadIdx.x + blockDim.x * (blockIdx.x * 2 + 1);
+        const size_t tid{threadIdx.x};
+
+        TILE[tid] = current_pos < total_elements ? in_data[current_pos] : 1;
+        TILE[tid] &= next_pos < total_elements ? in_data[next_pos] : 1;
 
         for (int jump{1}; jump < blockDim.x; jump *= 2) {
             __syncthreads();
 
             // most threads will now follow the same path, reducing warp divergence
-            const unsigned int index{2 * jump * tid};
+            const size_t index{2 * jump * tid};
             // increases bank conflict after jump is 16 becasue 32 is added to the index which is the same bank in shared memory
             if (index < blockDim.x)
                 TILE[index] = TILE[index] & TILE[index + jump];
@@ -57,12 +60,12 @@ namespace cobraml::core {
         int *out_data,
         const size_t total_elements) {
         extern __shared__ int TILE[];
-        const unsigned int pos = threadIdx.x + (blockDim.x * blockIdx.x);
-        const unsigned int tid{threadIdx.x};
+        const size_t current_pos = threadIdx.x + (blockDim.x * blockIdx.x * 2);
+        const size_t next_pos = threadIdx.x + blockDim.x * (blockIdx.x * 2 + 1);
+        const size_t tid{threadIdx.x};
 
-        if (pos < total_elements) {
-            TILE[tid] = in_data[pos];
-        } else TILE[tid] = 1;
+        TILE[tid] = current_pos < total_elements ? in_data[current_pos] : 1;
+        TILE[tid] &= next_pos < total_elements ? in_data[next_pos] : 1;
 
         for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
             __syncthreads();
@@ -72,28 +75,161 @@ namespace cobraml::core {
         if (threadIdx.x == 0) out_data[blockIdx.x] = TILE[0];
     }
 
-    // not coalesced
+    // // not coalesced
+    // __global__ void eq_reduce_naive4(
+    //     const int *in_data,
+    //     int *out_data,
+    //     const size_t total_elements) {
+    //     extern __shared__ int TILE[];
+    //     const unsigned int pos = threadIdx.x + (blockDim.x * blockIdx.x);
+    //     const unsigned int tid{threadIdx.x};
+    //
+    //     if (pos < total_elements) {
+    //         TILE[tid] = in_data[pos];
+    //     } else TILE[tid] = 1;
+    //
+    //     for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    //         __syncthreads();
+    //         // add first and last element to avoid bank conflicts
+    //         if (tid < s) TILE[tid] &= TILE[(s * 2) - (tid + 1)];
+    //     }
+    //
+    //     if (threadIdx.x == 0) {
+    //         out_data[blockIdx.x] = TILE[0];
+    //     }
+    // }
+
+    // volatile is required this removes the need for syncs since the last warp does not need syncs
+    __device__ void warp_reduce(volatile int* sdata, const size_t tid) {
+        sdata[tid] &= sdata[tid + 32];
+        sdata[tid] &= sdata[tid + 16];
+        sdata[tid] &= sdata[tid + 8];
+        sdata[tid] &= sdata[tid + 4];
+        sdata[tid] &= sdata[tid + 2];
+        sdata[tid] &= sdata[tid + 1];
+    }
+
+    //coalesced with minimal bank conflicts
     __global__ void eq_reduce_naive4(
         const int *in_data,
         int *out_data,
         const size_t total_elements) {
         extern __shared__ int TILE[];
-        const unsigned int pos = threadIdx.x + (blockDim.x * blockIdx.x);
-        const unsigned int tid{threadIdx.x};
+        const size_t current_pos = threadIdx.x + (blockDim.x * blockIdx.x * 2);
+        const size_t next_pos = threadIdx.x + blockDim.x * (blockIdx.x * 2 + 1);
+        const size_t tid{threadIdx.x};
 
-        if (pos < total_elements) {
-            TILE[tid] = in_data[pos];
-        } else TILE[tid] = 1;
+        TILE[tid] = current_pos < total_elements ? in_data[current_pos] : 1;
+        TILE[tid] &= next_pos < total_elements ? in_data[next_pos] : 1;
+        __syncthreads();
 
-        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {
+            if (tid < s) TILE[tid] &= TILE[tid + s];
             __syncthreads();
-            // add first and last element to avoid bank conflicts
-            if (tid < s) TILE[tid] &= TILE[(s * 2) - (tid + 1)];
         }
 
-        if (threadIdx.x == 0) {
-            out_data[blockIdx.x] = TILE[0];
+        if (tid < 32) warp_reduce(TILE, tid);
+
+        if (threadIdx.x == 0) out_data[blockIdx.x] = TILE[0];
+    }
+
+    // Adding this function to help with unrolling and adding the Template
+    template <size_t block_size>
+    __device__ void bsf_warp_reduce(volatile int* sdata, const size_t tid){
+        // block size friendly
+        if(block_size >= 64) sdata[tid] &= sdata[tid + 32];
+        if(block_size >= 32) sdata[tid] &= sdata[tid + 16];
+        if(block_size >= 16) sdata[tid] &= sdata[tid + 8];
+        if(block_size >= 8) sdata[tid] &= sdata[tid + 4];
+        if(block_size >= 4) sdata[tid] &= sdata[tid + 2];
+        if(block_size >= 2) sdata[tid] &= sdata[tid + 1];
+    }
+
+    //coalesced with minimal bank conflicts
+    template<size_t block_size>
+    __global__ void eq_reduce_naive5(
+        const int *in_data,
+        int *out_data,
+        const size_t total_elements) {
+
+        extern __shared__ int TILE[];
+        const size_t current_pos = threadIdx.x + (blockDim.x * blockIdx.x * 2);
+        const size_t next_pos = threadIdx.x + blockDim.x * (blockIdx.x * 2 + 1);
+        const size_t tid{threadIdx.x};
+
+        TILE[tid] = current_pos < total_elements ? in_data[current_pos] : 1;
+        TILE[tid] &= next_pos < total_elements ? in_data[next_pos] : 1;
+        __syncthreads();
+
+        if (block_size >= 512) {
+            if (tid < 256) {
+                TILE[tid] &= TILE[tid + 256];
+            }
+            __syncthreads();
         }
+
+        if (block_size >= 256) {
+            if (tid < 128) {
+                TILE[tid] &= TILE[tid + 128];
+            }
+            __syncthreads();
+        }
+
+        if (block_size >= 128) {
+            if (tid < 64) {
+                TILE[tid] &= TILE[tid + 64];
+            }
+            __syncthreads();
+        }
+
+        if (tid < 32) bsf_warp_reduce<block_size>(TILE, tid);
+        if (tid == 0) out_data[blockIdx.x] = TILE[0];
+    }
+
+    // coalesced with minimal bank conflicts
+    // cascaded over grid size
+    // TODO: test shortening blocks by larger factors that are multiple of 2 maybe 4 or 6 etc
+    template<size_t block_size>
+    __global__ void eq_reduce_naive6(
+        const int *in_data,
+        int *out_data,
+        const size_t total_elements) {
+
+        extern __shared__ int TILE[];
+        size_t current_pos{threadIdx.x + (blockDim.x * blockIdx.x * 2)};
+        const size_t grid_size{threadIdx.x + (blockDim.x * 2) * gridDim.x};
+        const size_t tid{threadIdx.x};
+
+        TILE[tid] = 1;
+        while (current_pos < total_elements) {
+            TILE[tid] &= in_data[current_pos];
+            current_pos += grid_size;
+        }
+        __syncthreads();
+
+        if (block_size >= 512) {
+            if (tid < 256) {
+                TILE[tid] &= TILE[tid + 256];
+            }
+            __syncthreads();
+        }
+
+        if (block_size >= 256) {
+            if (tid < 128) {
+                TILE[tid] &= TILE[tid + 128];
+            }
+            __syncthreads();
+        }
+
+        if (block_size >= 128) {
+            if (tid < 64) {
+                TILE[tid] &= TILE[tid + 64];
+            }
+            __syncthreads();
+        }
+
+        if (tid < 32) bsf_warp_reduce<block_size>(TILE, tid);
+        if (tid == 0) out_data[blockIdx.x] = TILE[0];
     }
 
     template<typename DataType>
@@ -152,15 +288,31 @@ namespace cobraml::core {
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
+            case 4: {
+                eq_reduce_naive5<256><<<grid_size, block_size, s_data_size>>>(
+                    in,
+                    out,
+                    total_elements);
+                CUDA_CHECK(cudaGetLastError());
+                return;
+            }
+            case 5: {
+                eq_reduce_naive6<256><<<grid_size, block_size, s_data_size>>>(
+                    in,
+                    out,
+                    total_elements);
+                CUDA_CHECK(cudaGetLastError());
+                return;
+            }
             default: {
                 throw std::runtime_error("invalid function requested for eq operator");
             }
         }
 #else
-        eq_reduce_naive3<<<grid_size, block_size, s_data_size>>>(
-                            in,
-                            out,
-                            total_elements);
+        eq_reduce_naive6<256><<<grid_size, block_size, s_data_size>>>(
+            in,
+            out,
+            total_elements);
 
         CUDA_CHECK(cudaGetLastError());
 #endif
@@ -184,7 +336,7 @@ namespace cobraml::core {
         int *d_out{in};
 
         while (total_elements > 1) {
-            blocks = calculate_dim(total_elements, block_size);
+            blocks = (blocks + 1) / 2;
 
             eq_dispatcher(
                 d_in,
@@ -195,6 +347,8 @@ namespace cobraml::core {
                 total_elements);
 
             total_elements = blocks;
+            blocks = calculate_dim(total_elements, block_size);
+
             int *temp = d_in;
             d_in = d_out;
             d_out = temp;

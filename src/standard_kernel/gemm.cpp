@@ -4,7 +4,7 @@
 namespace cobraml::core {
 
     template<typename T>
-    void gemm_naive(
+    static void gemm_naive(
         const T *matrix_one,
         const T *matrix_two,
         T *matrix_dest,

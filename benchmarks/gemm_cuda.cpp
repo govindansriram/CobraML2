@@ -2,6 +2,7 @@
 // Created by sriram on 5/3/25.
 //
 
+#include <iostream>
 #include <benchmark/benchmark.h>
 #include <random>
 #include "enums.h"
@@ -35,8 +36,8 @@ BENCHMARK(cuda_gemm)
 ->Threads(1);
 
 BENCHMARK(cuda_gemm)
-->Args({12, 1})
-->Threads(2);
+->Args({12, 2})
+->Threads(1);
 
 // BENCHMARK(cuda_eq)
 // ->Args({13, 2})

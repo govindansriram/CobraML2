@@ -2,7 +2,6 @@
 #include "cuda_helpers.h"
 
 namespace cobraml::core {
-
     template<typename T>
     __global__ void gemm_naive(
         const T *matrix_one,
@@ -45,7 +44,6 @@ namespace cobraml::core {
         const size_t row_stride_one,
         const size_t row_stride_two,
         const size_t row_stride_dest) {
-
         __shared__ T TILE_BLOCK_ONE[TILE_WIDTH][TILE_WIDTH]; // shared amongst all threads (in block)
         __shared__ T TILE_BLOCK_TWO[TILE_WIDTH][TILE_WIDTH]; // shared amongst all threads (in block)
 
@@ -69,7 +67,6 @@ namespace cobraml::core {
 
         const size_t limit{(shared + (TILE_WIDTH - 1)) / TILE_WIDTH};
         for (size_t i{0}; i < limit; ++i) {
-
             // shift right
             // boundary mask for tiles over matrix boundaries
             TILE_BLOCK_ONE[row_thread][column_thread] =
@@ -97,6 +94,111 @@ namespace cobraml::core {
         *dest += alpha * accumulation;
     }
 
+    __device__ __forceinline__ uint ceil_div(const uint a, const uint b) {
+        return (a + b - 1) / b;
+    }
+
+    template<typename T, uint BLOCK_TILE_SIZE_X, uint BLOCK_TILE_SIZE_Y, uint BLOCK_TILE_SIZE_K,
+             uint THREADS_PER_BLOCK>
+    __device__ void load_data_to_shared_memory(
+        const T * matrix_one,
+        const T * matrix_two,
+        const size_t stride_one,
+        const size_t stride_two,
+        T one_shared[BLOCK_TILE_SIZE_Y][BLOCK_TILE_SIZE_K],
+        T two_shared[BLOCK_TILE_SIZE_K][BLOCK_TILE_SIZE_X],
+        const size_t mat_one_rows,
+        const size_t mat_two_columns,
+        const size_t shared,
+        const uint iteration,
+        const uint linear_idx) {
+
+        /**
+           we divide the size of the shared matrix by the amount of threads per block, this tells us how
+           many pieces of data each thread has to fetch from the global matrices to fill out the shared
+           block
+        */
+        const uint shared_one_iters{ceil_div(BLOCK_TILE_SIZE_Y * BLOCK_TILE_SIZE_K, THREADS_PER_BLOCK)};
+
+        for (uint load_idx{0}; load_idx < shared_one_iters; ++load_idx) {
+            const size_t shared_block_one_row{
+                (linear_idx + load_idx * THREADS_PER_BLOCK) / BLOCK_TILE_SIZE_K};
+
+            const size_t shared_block_one_column{
+                (linear_idx + load_idx * THREADS_PER_BLOCK) % BLOCK_TILE_SIZE_K};
+
+            const size_t matrix_one_row{shared_block_one_row + blockIdx.y * BLOCK_TILE_SIZE_Y};
+            const size_t matrix_one_column{iteration * BLOCK_TILE_SIZE_K + shared_block_one_column};
+
+            T val{static_cast<T>(0)};
+            if (matrix_one_row < mat_one_rows && matrix_one_column < shared)
+                val = matrix_one[matrix_one_row * stride_one + matrix_one_column];
+
+            one_shared[shared_block_one_row][shared_block_one_column] = val;
+        }
+
+        const uint shared_two_iters{ceil_div(BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_K, THREADS_PER_BLOCK)};
+
+        for (uint load_idx{0}; load_idx < shared_two_iters; ++load_idx) {
+            const size_t shared_block_two_row{
+                (linear_idx + load_idx * THREADS_PER_BLOCK) / BLOCK_TILE_SIZE_X};
+
+            const size_t shared_block_two_column{
+                (linear_idx + load_idx * THREADS_PER_BLOCK) % BLOCK_TILE_SIZE_X};
+
+            const size_t matrix_two_row{iteration * BLOCK_TILE_SIZE_K + shared_block_two_row};
+            const size_t matrix_two_column{blockIdx.x * BLOCK_TILE_SIZE_X + shared_block_two_column};
+
+            T val{static_cast<T>(0)};
+            if (matrix_two_row < shared && matrix_two_column < mat_two_columns)
+                val = matrix_two[matrix_two_row * stride_two + matrix_two_column];
+
+            two_shared[shared_block_two_row][shared_block_two_column] = val;
+        }
+
+    }
+
+    template <typename T, uint BLOCK_TILE_SIZE_X, uint BLOCK_TILE_SIZE_Y, uint BLOCK_TILE_SIZE_K>
+    __global__ void gemm_tiled_2(
+        const T *matrix_one,
+        const T *matrix_two,
+        T *matrix_dest,
+        const T alpha,
+        const T beta,
+        const size_t mat_one_rows,
+        const size_t mat_two_columns,
+        const size_t shared,
+        const size_t row_stride_one,
+        const size_t row_stride_two,
+        const size_t row_stride_dest) {
+
+        // Cache a tile of A and B in shared memory for data reuse.
+        __shared__ T mat_one_thread_block_tile[BLOCK_TILE_SIZE_Y][BLOCK_TILE_SIZE_K];
+        __shared__ T mat_two_thread_block_tile[BLOCK_TILE_SIZE_K][BLOCK_TILE_SIZE_X];
+
+        // Compute the row and column of dest that this thread is responsible for.
+
+        const uint dest_column{threadIdx.x + blockDim.x * blockIdx.x};
+        const uint dest_row{threadIdx.y + blockDim.y * blockIdx.y};
+
+        const uint total_iters{ceil_div(shared, BLOCK_TILE_SIZE_K)};
+
+        constexpr uint threads_per_block{BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y};
+
+        T running_sum{static_cast<T>(0)};
+
+        for (uint iter{0}; iter < total_iters; ++iter) {
+            // load into shared memory
+
+            __syncthreads();
+        }
+
+    }
+
+    // Used implementation by https://leimao.github.io/article/CUDA-Matrix-Multiplication-Optimization/
+    // double buffering cuda
+    // undestand cache management
+
     template<typename T>
     static void gemm_dispatch(
         const T *matrix_one,
@@ -111,15 +213,15 @@ namespace cobraml::core {
         const size_t row_stride_two,
         const size_t row_stride_dest) {
 #ifdef BENCHMARK
-        constexpr dim3 block_dim(TILE_WIDTH, TILE_WIDTH);
-        const dim3 grid_dim(
-            static_cast<size_t>(
-                std::ceil(static_cast<float>(mat_two_columns) / static_cast<float>(TILE_WIDTH))),
-            static_cast<size_t>(std::ceil(static_cast<float>(mat_one_rows) / static_cast<float>(TILE_WIDTH)))
-        );
 
         switch (func_pos) {
             case 0: {
+                constexpr dim3 block_dim(TILE_WIDTH, TILE_WIDTH);
+                const dim3 grid_dim(
+                    static_cast<size_t>(
+                        std::ceil(static_cast<float>(mat_two_columns) / static_cast<float>(TILE_WIDTH))),
+                    static_cast<size_t>(std::ceil(static_cast<float>(mat_one_rows) / static_cast<float>(TILE_WIDTH)))
+                );
                 gemm_naive<T><<<grid_dim, block_dim>>>(
                     matrix_one,
                     matrix_two,
@@ -137,6 +239,13 @@ namespace cobraml::core {
                 return;
             }
             case 1: {
+                constexpr dim3 block_dim(TILE_WIDTH, TILE_WIDTH);
+                const dim3 grid_dim(
+                    static_cast<size_t>(
+                        std::ceil(static_cast<float>(mat_two_columns) / static_cast<float>(TILE_WIDTH))),
+                    static_cast<size_t>(std::ceil(static_cast<float>(mat_one_rows) / static_cast<float>(TILE_WIDTH)))
+                );
+
                 gemm_tiled<T><<<grid_dim, block_dim>>>(
                     matrix_one,
                     matrix_two,
@@ -152,6 +261,28 @@ namespace cobraml::core {
 
                 CUDA_CHECK(cudaGetLastError());
                 return;
+            }
+            case 2: {
+                constexpr uint BLOCK_TILE_SIZE_X{32};
+                constexpr uint BLOCK_TILE_SIZE_Y{32};
+                constexpr uint BLOCK_TILE_SIZE_K{32};
+
+                constexpr uint TOTAL_THREADS{BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y};
+
+                // ensure shared x and y block are divisible by total threads
+                static_assert(BLOCK_TILE_SIZE_K * BLOCK_TILE_SIZE_Y % TOTAL_THREADS == 0);
+                static_assert(BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_K % TOTAL_THREADS == 0);
+
+                constexpr dim3 block_dim{BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, 1};
+
+                const dim3 grid_dim{
+                    ceil_div(static_cast<uint>(mat_two_columns), BLOCK_TILE_SIZE_X),
+                    ceil_div(static_cast<uint>(mat_one_rows), BLOCK_TILE_SIZE_Y)
+                };
+
+
+
+                CUDA_CHECK(cudaGetLastError());
             }
             default: {
                 throw std::runtime_error("invalid function provided");

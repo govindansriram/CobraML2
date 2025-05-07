@@ -30,5 +30,11 @@ unsigned int calculate_dim(t1 first, t2 second) {
 }
 
 
+constexpr uint ceil_div(const uint dividend, const uint divisor) {
+    return (dividend + (divisor - 1)) / divisor;
+}
+
+
+
 
 #endif //CUDA_HELPERS_H

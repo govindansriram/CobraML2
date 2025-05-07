@@ -135,29 +135,29 @@ TEST(CudaArrayTestFunctionals, gemm) {
 
     // test on matrix larger than 16 x 16
 
-    std::vector<int> large(24 * 10, 0);
-    std::vector<int> med(10 * 27, 0);
+    std::vector<int> large(24 * 49, 0);
+    std::vector<int> med(49 * 27, 0);
     std::vector<int> fin(24 * 27, 0);
 
 
-    for (int i = 0; i < 24 * 10; ++i)
+    for (int i = 0; i < 24 * 49; ++i)
         large[i] = 1;
 
-    for (int i = 0; i < 10 * 27; ++i)
+    for (int i = 0; i < 49 * 27; ++i)
         med[i] = i % 27;
 
     for (int i = 0; i < 24 * 27; ++i)
-        fin[i] = (i % 27) * 10;
+        fin[i] = (i % 27) * 49;
 
     const cobraml::core::Brarray large_ten(
         cobraml::core::CUDA,
         cobraml::core::INT32,
-        {24, 10}, large);
+        {24, 49}, large);
 
     const cobraml::core::Brarray med_ten(
         cobraml::core::CUDA,
         cobraml::core::INT32,
-        {10, 27}, med);
+        {49, 27}, med);
 
     const cobraml::core::Brarray final_ten(
         cobraml::core::CUDA,
@@ -165,5 +165,6 @@ TEST(CudaArrayTestFunctionals, gemm) {
         {24, 27}, fin);
 
     res = cobraml::core::gemm(large_ten, med_ten, 1, 1);
-    ASSERT_EQ(res, final_ten);
+
+    ASSERT_TRUE(res == final_ten);
 }

@@ -216,6 +216,8 @@ namespace cobraml::core {
             const void *alpha,
             const void *beta) {
 
+            // TODO check for pointer overlap
+
             m_dispatcher->gemv(
                 matrix->get_raw_buffer(),
                 vector->get_raw_buffer(),
@@ -226,6 +228,38 @@ namespace cobraml::core {
                 matrix->shape[1],
                 matrix->stride[0],
                 dtype);
+        }
+
+        void gemm(
+            const ArrayImpl *matrix,
+            const ArrayImpl *other,
+            const void *alpha,
+            const void *beta) {
+
+            m_dispatcher->gemm(
+                        matrix->get_raw_buffer(),
+                        other->get_raw_buffer(),
+                        get_raw_buffer(),
+                        alpha,
+                        beta,
+                        matrix->shape[0],
+                        other->shape[1],
+                        matrix->shape[1],
+                        matrix->buffer_container->get_true_column_len(),
+                        other->buffer_container->get_true_column_len(),
+                        buffer_container->get_true_column_len(),
+                        dtype);
+        }
+
+        void eq(const ArrayImpl *other, ArrayImpl *result) const {
+            this->m_dispatcher->equals(
+                this->get_raw_buffer(),
+                other->get_raw_buffer(),
+                static_cast<int32_t *>(result->get_raw_buffer()),
+                this->shape.data(),
+                this->stride.data(),
+                dtype
+            );
         }
 
 
@@ -723,6 +757,51 @@ namespace cobraml::core {
         return result;
     }
 
+    template<typename T>
+    void gemm(
+        Brarray &result,
+        const Brarray &matrix,
+        const Brarray &other_matrix,
+        T alpha,
+        T beta) {
+
+        constexpr Dtype dtype{get_dtype_from_type<T>::type};
+        is_invalid(dtype);
+
+        if (dtype != matrix.get_dtype() || dtype != result.get_dtype() || dtype != other_matrix.get_dtype())
+            throw std::runtime_error("Template dtype T does not match brarray dtypes");
+
+        if (!result.is_matrix()) throw std::runtime_error("the result brarray is not a matrix");
+        if (!matrix.is_matrix()) throw std::runtime_error("the 'matrix' brarray is not a matrix");
+        if (!other_matrix.is_matrix()) throw std::runtime_error("the 'other_matrix' brarry is not a matrix");
+
+        if (matrix.get_shape()[1] != other_matrix.get_shape()[0])
+            throw std::runtime_error(
+                "'matrix' brarray and 'other_matrix' brarray have incompatible shapes");
+
+        if (matrix.get_shape()[0] != result.get_shape()[0] && result.get_shape()[1] != other_matrix.get_shape()[1])
+            throw std::runtime_error(
+                "the 'result' brarray is the incorrect shape for gemm)");
+
+        if (matrix.get_device() != other_matrix.get_device() || result.get_device() != matrix.get_device()) {
+            throw std::runtime_error("'other_matrix', 'matrix' and the 'result' brarray are not on the same device");
+        }
+
+        result.impl->gemm(matrix.impl.get(), other_matrix.impl.get(), &alpha, &beta);
+    }
+
+    template<typename T>
+    Brarray gemm(
+        const Brarray &matrix,
+        const Brarray &other_matrix,
+        T alpha,
+        T beta) {
+        const std::vector shp{matrix.get_shape()[0], other_matrix.get_shape()[1]};
+        Brarray result(matrix.get_device(), matrix.get_dtype(), shp);
+        gemm<T>(result, matrix,other_matrix, alpha, beta);
+        return result;
+    }
+
     template<typename Dtype>
     Brarray scalar_to_brarray(const Brarray &arr, Dtype value) {
         const core::Dtype current_dtype{arr.get_dtype()};
@@ -799,6 +878,29 @@ namespace cobraml::core {
         impl->permute(ret.impl.get(), dims);
         return ret;
     }
+
+    bool Brarray::operator==(const Brarray &other) const {
+
+        if (this == &other) return true;
+
+        if (get_shape() != other.get_shape())
+            throw std::runtime_error("brarray have different shapes and are not comparable");
+
+        if (get_dtype() != other.get_dtype())
+            throw std::runtime_error("brarray have different dtypes and are not comparable");
+
+        if (get_device() != other.get_device())
+            throw std::runtime_error("brarray are on different devices and are not comparable");
+
+        Brarray ret(get_device(), get_dtype(), get_shape());
+        impl->eq(other.impl.get(), ret.impl.get());
+
+        while (!ret.is_scalar_equivalent())
+            ret = ret[0];
+
+        return *ret.to(CPU).get_buffer<int>();
+    }
+
 
 
     bool Brarray::is_matrix() const {
@@ -991,4 +1093,6 @@ namespace cobraml::core {
     INSTANTIATE_GET_ITEM();
     INSTANTIATE_GEMV_WHOLE();
     INSTANTIATE_GEMV_PARTIAL();
+    INSTANTIATE_GEMM_WHOLE();
+    INSTANTIATE_GEMM_PARTIAL();
 }

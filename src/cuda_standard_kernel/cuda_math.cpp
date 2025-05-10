@@ -19,14 +19,6 @@ void CudaMath::element_wise_add([[maybe_unused]] const void *tensor_one,
     throw std::runtime_error("coming soon");
 }
 
-bool CudaMath::equals([[maybe_unused]] const void *tensor_1,
-                      [[maybe_unused]] void *tensor_2,
-                      [[maybe_unused]] const size_t *tensor_shape,
-                      [[maybe_unused]] const size_t *tensor_stride,
-                      [[maybe_unused]] Dtype dtype) {
-    throw std::runtime_error("coming soon");
-}
-
 void CudaMath::hadamard_product([[maybe_unused]] const void *tensor_one,
                                  [[maybe_unused]] const void *tensor_two,
                                  [[maybe_unused]] void *tensor_dest,

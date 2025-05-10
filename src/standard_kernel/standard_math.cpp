@@ -46,11 +46,6 @@ namespace cobraml::core {
         return thread_count;
     }
 
-    inline size_t calculate_total_elements(const size_t *tensor_shape, const size_t *tensor_stride) {
-        return tensor_shape[0] * tensor_stride[0];
-    }
-
-
     TensorIter::TensorIter(const size_t *shape, const size_t *stride_one, const size_t *stride_two,
                            const size_t shape_len): shape(shape), stride_one(stride_one), stride_two(stride_two),
                                                     shape_len(shape_len) {
@@ -96,69 +91,6 @@ namespace cobraml::core {
             index_buffer_2[i] = compute_index(idx, computed_stride, stride_two);
         }
     }
-
-    // TODO test equals and permute ensure gradient accumulation is possible by using these to run the reducion algorithm
-    template<typename Dtype>
-    bool eq_kernel(
-        const void *tensor_1,
-        const void *tensor_2,
-        const size_t total_len) {
-
-        const auto t1 = static_cast<const Dtype *>(tensor_1);
-        const auto t2 = static_cast<const Dtype *>(tensor_2);
-
-        size_t i;
-        bool resp{true};
-#pragma omp parallel for default(none) shared(t1, t2, total_len, resp) private(i)
-        for (i = 0; i < total_len; ++i) {
-            if (!resp) continue;
-            if (t1[i] != t2[i]) resp = false;
-        }
-
-        return resp;
-    }
-
-    bool StandardMath::equals(const void *tensor_1, void *tensor_2, const size_t *tensor_shape, const size_t *tensor_stride, Dtype dtype) {
-        const size_t total_len{calculate_total_elements(tensor_shape, tensor_stride)};
-        switch (dtype) {
-            case FLOAT64: {
-                const auto casted_t1 = static_cast<const double *>(tensor_1);
-                const auto casted_t2 = static_cast<const double *>(tensor_2);
-                return eq_kernel<double>(casted_t1, casted_t2, total_len);
-            }
-            case FLOAT32: {
-                const auto casted_t1 = static_cast<const float *>(tensor_1);
-                const auto casted_t2 = static_cast<const float *>(tensor_2);
-                return eq_kernel<float>(casted_t1, casted_t2, total_len);
-            }
-            case INT8: {
-                const auto casted_t1 = static_cast<const int8_t *>(tensor_1);
-                const auto casted_t2 = static_cast<const int8_t *>(tensor_2);
-                return eq_kernel<int8_t>(casted_t1, casted_t2, total_len);
-            }
-            case INT16: {
-                const auto casted_t1 = static_cast<const int16_t *>(tensor_1);
-                const auto casted_t2 = static_cast<const int16_t *>(tensor_2);
-                return eq_kernel<int16_t>(casted_t1, casted_t2, total_len);
-            }
-            case INT32: {
-                const auto casted_t1 = static_cast<const int32_t *>(tensor_1);
-                const auto casted_t2 = static_cast<const int32_t *>(tensor_2);
-                return eq_kernel<int32_t>(casted_t1, casted_t2, total_len);
-            }
-            case INT64: {
-                const auto casted_t1 = static_cast<const int64_t *>(tensor_1);
-                const auto casted_t2 = static_cast<const int64_t *>(tensor_2);
-                return eq_kernel<int64_t>(casted_t1, casted_t2, total_len);
-            }
-            default:
-                throw std::runtime_error("cannot calculate gemv on invalid type");
-        }
-        throw std::runtime_error("cannot calculate gemv on invalid type");
-    }
-
-
-
 
     void StandardMath::gemv(
         const void *matrix,

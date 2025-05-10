@@ -12,9 +12,10 @@
 namespace cobraml::core {
     class CudaMath final : public Math {
     public:
-        bool equals(
+        void equals(
             const void *tensor_1,
-            void *tensor_2,
+            const void *tensor_2,
+            int *result,
             const size_t *tensor_shape,
             const size_t *tensor_stride,
             Dtype dtype) override;
@@ -88,6 +89,20 @@ namespace cobraml::core {
         //     size_t columns,
         //     size_t row_stride,
         //     Dtype dtype) override;
+
+        void gemm(
+            const void *matrix_one,
+            const void *matrix_two,
+            void *matrix_dest,
+            const void *alpha,
+            const void *beta,
+            size_t mat_one_rows,
+            size_t mat_two_columns,
+            size_t shared,
+            size_t row_stride_one,
+            size_t row_stride_two,
+            size_t row_stride_dest,
+            Dtype dtype) override;
     };
 }
 

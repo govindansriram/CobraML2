@@ -4,7 +4,6 @@
 
 
 #include <iostream>
-
 #include "cuda_helpers.h"
 #include "cuda_math.h"
 

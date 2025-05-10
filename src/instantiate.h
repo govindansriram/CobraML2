@@ -76,4 +76,21 @@
     template Brarray gemv<int32_t>(const Brarray &matrix, const Brarray &vector, int32_t alpha, int32_t beta);    \
     template Brarray gemv<int64_t>(const Brarray &matrix, const Brarray &vector, int64_t alpha, int64_t beta);    \
 
+#define INSTANTIATE_GEMM_WHOLE()                                                                                                      \
+    template void gemm<float>(Brarray &result, const Brarray &matrix, const Brarray &other_matrix, float alpha, float beta);          \
+    template void gemm<double>(Brarray &result, const Brarray &matrix, const Brarray &other_matrix, double alpha, double beta);       \
+    template void gemm<int8_t>(Brarray &result, const Brarray &matrix, const Brarray &other_matrix, int8_t alpha, int8_t beta);       \
+    template void gemm<int16_t>(Brarray &result, const Brarray &matrix, const Brarray &other_matrix, int16_t alpha, int16_t beta);    \
+    template void gemm<int32_t>(Brarray &result, const Brarray &matrix, const Brarray &other_matrix, int32_t alpha, int32_t beta);    \
+    template void gemm<int64_t>(Brarray &result, const Brarray &matrix, const Brarray &other_matrix, int64_t alpha, int64_t beta);    \
+
+
+#define INSTANTIATE_GEMM_PARTIAL()                                                                                   \
+    template Brarray gemm<float>(const Brarray &matrix, const Brarray &other_matrix, float alpha, float beta);          \
+    template Brarray gemm<double>(const Brarray &matrix, const Brarray &other_matrix, double alpha, double beta);       \
+    template Brarray gemm<int8_t>(const Brarray &matrix, const Brarray &other_matrix, int8_t alpha, int8_t beta);       \
+    template Brarray gemm<int16_t>(const Brarray &matrix, const Brarray &other_matrix, int16_t alpha, int16_t beta);    \
+    template Brarray gemm<int32_t>(const Brarray &matrix, const Brarray &other_matrix, int32_t alpha, int32_t beta);    \
+    template Brarray gemm<int64_t>(const Brarray &matrix, const Brarray &other_matrix, int64_t alpha, int64_t beta);    \
+
 #endif //INSTANTIATE_H

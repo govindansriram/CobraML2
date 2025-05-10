@@ -91,6 +91,8 @@ namespace cobraml::core {
         Brarray operator+(Dtype other) const;
         // Brarray operator-(const Brarray & other) const;
 
+        bool operator==(const Brarray& other) const;
+
 
         /**
          * provides access to the underlying buffer
@@ -116,6 +118,22 @@ namespace cobraml::core {
         friend Brarray gemv(
             const Brarray &matrix,
             const Brarray &vector,
+            T alpha,
+            T beta);
+
+        // Start of the Friend API
+        template<typename T>
+        friend void gemm(
+            Brarray &result,
+            const Brarray &matrix,
+            const Brarray &other_matrix,
+            T alpha,
+            T beta);
+
+        template<typename T>
+        friend Brarray gemm(
+            const Brarray &matrix,
+            const Brarray &other_matrix,
             T alpha,
             T beta);
 
@@ -168,6 +186,21 @@ namespace cobraml::core {
     Brarray gemv(
         const Brarray &matrix,
         const Brarray &vector,
+        T alpha,
+        T beta);
+
+    template<typename T>
+    void gemm(
+    Brarray &result,
+    const Brarray &matrix,
+    const Brarray &other_matrix,
+    T alpha,
+    T beta);
+
+    template<typename T>
+    Brarray gemm(
+        const Brarray &matrix,
+        const Brarray &other_matrix,
         T alpha,
         T beta);
 

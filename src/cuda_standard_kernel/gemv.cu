@@ -6,20 +6,19 @@
 #include <iostream>
 #include "cuda_helpers.h"
 #include "cuda_math.h"
+#include "cuda_device_helpers.cuh"
 
 namespace cobraml::core {
-
-    template <typename T>
+    template<typename T>
     __global__ void gemv_naive(
         const T *matrix,
         const T *vector,
-        T * dest,
+        T *dest,
         const T alpha,
         const T beta,
         const size_t rows,
         const size_t columns,
         const size_t row_stride) {
-
         unsigned int column{blockIdx.x * blockDim.x + threadIdx.x};
 
         if (column < rows) {
@@ -32,17 +31,62 @@ namespace cobraml::core {
         }
     }
 
-    template<typename T>
-    void gemv_dispatch(
-        const T * matrix,
-        const T * vector,
-        T * dest,
+    template<typename T, size_t BLOCK_TILE_SIZE_X>
+    __global__ void gemv_1d_thread_tile(
+        const T *matrix,
+        const T *vector,
+        T *dest,
         const T alpha,
         const T beta,
         const size_t rows,
         const size_t columns,
         const size_t row_stride) {
 
+        __shared__ T VECTOR_TILE[BLOCK_TILE_SIZE_X];
+
+        const uint iters{ceil_div(columns, BLOCK_TILE_SIZE_X)};
+        const size_t global_row{threadIdx.x + blockIdx.x * BLOCK_TILE_SIZE_X};
+
+        T running_sum{0};
+
+        for (size_t iter{0}; iter < iters; ++iter) {
+
+            // load to shared memory with coalesced memory access
+            const size_t load_pos_v{iter * BLOCK_TILE_SIZE_X + threadIdx.x};
+            if (load_pos_v < columns)
+                VECTOR_TILE[threadIdx.x] = vector[load_pos_v];
+            else
+                VECTOR_TILE[threadIdx.x] = static_cast<T>(0);
+            __syncthreads();
+
+            for (size_t k{0}; k < BLOCK_TILE_SIZE_X; ++k) {
+                const size_t load_pos_m{row_stride * global_row + iter * BLOCK_TILE_SIZE_X + k};
+                running_sum += ((global_row < rows) && (iter * BLOCK_TILE_SIZE_X + k < columns) ? matrix[load_pos_m] : static_cast<T>(0)) * VECTOR_TILE[k];
+            }
+            __syncthreads();
+        }
+
+        running_sum *= alpha;
+
+        if (global_row < rows)
+            dest[global_row] = dest[global_row] * beta + running_sum;
+
+        // if (threadIdx.x == 0 && blockIdx.x == 0) {
+        //     printf("done \n");
+        // }
+    }
+
+
+    template<typename T>
+    void gemv_dispatch(
+        const T *matrix,
+        const T *vector,
+        T *dest,
+        const T alpha,
+        const T beta,
+        const size_t rows,
+        const size_t columns,
+        const size_t row_stride) {
 #ifdef BENCHMARK
 
         switch (func_pos) {
@@ -62,15 +106,35 @@ namespace cobraml::core {
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
+            case 1: {
+                constexpr uint BLOCK_TILE_SIZE_X{16 * 16};
+                constexpr dim3 block_dim{BLOCK_TILE_SIZE_X};
+                const dim3 grid_dim{ceil_div(rows, block_dim.x)};
+
+                gemv_1d_thread_tile<T, BLOCK_TILE_SIZE_X><<<grid_dim, block_dim>>>(
+                    matrix,
+                    vector,
+                    dest,
+                    alpha,
+                    beta,
+                    rows,
+                    columns,
+                    row_stride);
+                CUDA_CHECK(cudaGetLastError());
+                return;
+            }
             default: {
                 throw std::runtime_error("invalid function provided to gemv");
             }
         }
 #else
-        constexpr dim3 block_dim{16 * 16};
+        constexpr uint BLOCK_TILE_SIZE_X{16 * 16};
+        constexpr dim3 block_dim{BLOCK_TILE_SIZE_X};
         const dim3 grid_dim{ceil_div(rows, block_dim.x)};
 
-        gemv_naive<T><<<grid_dim, block_dim>>>(
+        // std::cout << grid_dim.x << std::endl;
+
+        gemv_1d_thread_tile<T, BLOCK_TILE_SIZE_X><<<grid_dim, block_dim>>>(
             matrix,
             vector,
             dest,
@@ -93,9 +157,7 @@ namespace cobraml::core {
         const size_t columns,
         const size_t row_stride,
         Dtype dtype) {
-
         switch (dtype) {
-
             case (INT8): {
                 const auto c_mat{static_cast<const int8_t *>(matrix)};
                 const auto c_vec{static_cast<const int8_t *>(vector)};
@@ -167,7 +229,4 @@ namespace cobraml::core {
             }
         }
     }
-
 }
-
-

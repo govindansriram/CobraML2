@@ -1,5 +1,6 @@
 #include "cuda_math.h"
 #include "cuda_helpers.h"
+#include "cuda_device_helpers.cuh"
 
 namespace cobraml::core {
     template<typename T>
@@ -93,9 +94,9 @@ namespace cobraml::core {
         *dest += alpha * accumulation;
     }
 
-    __device__ __forceinline__ uint d_ceil_div(const uint a, const uint b) {
-        return (a + b - 1) / b;
-    }
+    // __device__ __forceinline__ uint d_ceil_div(const uint a, const uint b) {
+    //     return (a + b - 1) / b;
+    // }
 
     template<typename T, uint BLOCK_TILE_SIZE_X, uint BLOCK_TILE_SIZE_Y, uint BLOCK_TILE_SIZE_K,
         uint THREADS_PER_BLOCK>
@@ -123,7 +124,7 @@ namespace cobraml::core {
          */
 
         // required to be perfectly divisible
-        const uint shared_one_iters{d_ceil_div(BLOCK_TILE_SIZE_Y * BLOCK_TILE_SIZE_K, THREADS_PER_BLOCK)};
+        const uint shared_one_iters{ceil_div(BLOCK_TILE_SIZE_Y * BLOCK_TILE_SIZE_K, THREADS_PER_BLOCK)};
         /**
          *we can do unrolling here since realistically the amount of load iterations should be quite small
          */
@@ -157,7 +158,7 @@ namespace cobraml::core {
             one_shared[shared_block_one_row][shared_block_one_column] = val;
         }
 
-        const uint shared_two_iters{d_ceil_div(BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_K, THREADS_PER_BLOCK)};
+        const uint shared_two_iters{ceil_div(BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_K, THREADS_PER_BLOCK)};
 
 #pragma unroll
         for (uint load_idx{0}; load_idx < shared_two_iters; ++load_idx) {
@@ -234,7 +235,7 @@ namespace cobraml::core {
          * across columns and we slide matrix two down by rows. total_iters calculates how many slides we need
          * to do
          */
-        const uint total_iters{d_ceil_div(shared, BLOCK_TILE_SIZE_K)};
+        const uint total_iters{ceil_div(shared, BLOCK_TILE_SIZE_K)};
 
         // the partial value after every slide
         T running_sum{static_cast<T>(0)};
@@ -329,7 +330,7 @@ namespace cobraml::core {
         constexpr uint threads_per_block{BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y / THREAD_TILE_SIZE_Y};
         const uint thread_linear_idx{threadIdx.x}; // since block dim is 1 dimensional
 
-        const uint total_iters{d_ceil_div(shared, BLOCK_TILE_SIZE_K)};
+        const uint total_iters{ceil_div(shared, BLOCK_TILE_SIZE_K)};
 
         T intermediates[THREAD_TILE_SIZE_Y] = {static_cast<T>(0)};
 
@@ -422,7 +423,7 @@ namespace cobraml::core {
         __shared__ T mat_one_thread_block_tile[BLOCK_TILE_SIZE_Y][BLOCK_TILE_SIZE_K];
         __shared__ T mat_two_thread_block_tile[BLOCK_TILE_SIZE_K][BLOCK_TILE_SIZE_X];
 
-        const uint total_iters{d_ceil_div(shared, BLOCK_TILE_SIZE_K)};
+        const uint total_iters{ceil_div(shared, BLOCK_TILE_SIZE_K)};
 
         // the intermediate results of each computation
         T intermediates[THREAD_TILE_SIZE_Y][THREAD_TILE_SIZE_X] = {static_cast<T>(0)};

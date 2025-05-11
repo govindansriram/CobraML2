@@ -31,6 +31,11 @@ BENCHMARK(cuda_gemv)
 ->Args({12, 0})
 ->Threads(1);
 
+BENCHMARK(cuda_gemv)
+->Args({12, 1})
+->Threads(1);
+
+
 // BENCHMARK(cuda_gemm)
 // ->Args({12, 1})
 // ->Threads(1);

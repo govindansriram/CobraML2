@@ -49,6 +49,7 @@ set(SOURCES
 )
 
 set(CUDA_SOURCES
+        src/cuda_standard_kernel/cuda_device_helpers.cuh
         src/cuda_standard_kernel/gemv.cu
         src/cuda_standard_kernel/gemm.cu
         src/cuda_standard_kernel/eq.cu

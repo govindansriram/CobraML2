@@ -352,6 +352,7 @@ namespace cobraml::core {
             );
             __syncthreads();
 
+#pragma unroll
             for (size_t k_i{0}; k_i < BLOCK_TILE_SIZE_K; ++k_i) {
                 // save temporary value in a register and reuse it across thread tile
                 // remember mat_two shared is of size BLOCK_TILE_SIZE_K x BLOCK_TILE_SIZE_X
@@ -363,9 +364,11 @@ namespace cobraml::core {
 
                 // sequential access by threads in warp no bank conflicts if BLOCK_TILE_SIZE_X is a multiple of 32
                 T two_val{mat_two_thread_block_tile[k_i][thread_linear_idx % BLOCK_TILE_SIZE_X]};
-
+#pragma unroll
                 for (size_t ij{0}; ij < THREAD_TILE_SIZE_Y; ++ij) {
-                    // broadcast all threads in the same BLOCK_TILE_SIZE_X block use the same row values
+                    // broadcast all threads in the same BLOCK_TILE_SIZE_X block use the same row values, ensure
+                    // BLOCK_TILE_SIZE_X is at least 32 otherwise bank conflicts will appear since multiple rows will
+                    // be accessed in the same warp
                     size_t row{thread_linear_idx / BLOCK_TILE_SIZE_X * THREAD_TILE_SIZE_Y + ij};
                     intermediates[ij] += mat_one_thread_block_tile[row][k_i] * two_val;
                 }
@@ -375,7 +378,6 @@ namespace cobraml::core {
 
 #pragma unroll
         for (size_t tile_row{0}; tile_row < THREAD_TILE_SIZE_Y; ++tile_row) {
-
             // commpute the sequential rows
             const size_t dest_row{
                 blockIdx.y * BLOCK_TILE_SIZE_Y + thread_linear_idx / BLOCK_TILE_SIZE_X * THREAD_TILE_SIZE_Y + tile_row
@@ -387,6 +389,124 @@ namespace cobraml::core {
             if (dest_row < mat_one_rows && dest_col < mat_two_columns) {
                 matrix_dest[dest_row * row_stride_dest + dest_col] =
                         matrix_dest[dest_row * row_stride_dest + dest_col] * beta + intermediates[tile_row] * alpha;
+            }
+        }
+    }
+
+    template<typename T, size_t BLOCK_TILE_SIZE_X, size_t BLOCK_TILE_SIZE_Y,
+        size_t BLOCK_TILE_SIZE_K, size_t THREAD_TILE_SIZE_Y, size_t THREAD_TILE_SIZE_X>
+    __global__ void gemm_2DBT_2DTT(
+        const T *matrix_one,
+        const T *matrix_two,
+        T *matrix_dest,
+        const T alpha,
+        const T beta,
+        const size_t mat_one_rows,
+        const size_t mat_two_columns,
+        const size_t shared,
+        const size_t row_stride_one,
+        const size_t row_stride_two,
+        const size_t row_stride_dest) {
+        /**
+         * in the previous iteration the only values cached were values from the mat two block, that too
+         * only one singular value, in this case we will cache values from both matrices thus each thread
+         * will be responsible for computing a matrix of elements, and will be responsible for loading a
+         * matrix as well.
+         */
+
+        // each thread computes a matrix of element so we divide by the same amount
+        constexpr uint threads_per_block{
+            BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y / (THREAD_TILE_SIZE_Y * THREAD_TILE_SIZE_X)
+        };
+
+        __shared__ T mat_one_thread_block_tile[BLOCK_TILE_SIZE_Y][BLOCK_TILE_SIZE_K];
+        __shared__ T mat_two_thread_block_tile[BLOCK_TILE_SIZE_K][BLOCK_TILE_SIZE_X];
+
+        const uint total_iters{d_ceil_div(shared, BLOCK_TILE_SIZE_K)};
+
+        // the intermediate results of each computation
+        T intermediates[THREAD_TILE_SIZE_Y][THREAD_TILE_SIZE_X] = {static_cast<T>(0)};
+
+        // register cached values of matrix one
+        T one_cache[THREAD_TILE_SIZE_Y] = {static_cast<T>(0)};
+
+        // register cached values of matrix two
+        T two_cache[THREAD_TILE_SIZE_X] = {static_cast<T>(0)};
+
+        const uint thread_linear_idx{threadIdx.x}; // since block dim is 1 dimensional
+
+        for (uint iter{0}; iter < total_iters; ++iter) {
+            load_data_to_shared_memory<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, threads_per_block>(
+                matrix_one,
+                matrix_two,
+                row_stride_one,
+                row_stride_two,
+                mat_one_thread_block_tile,
+                mat_two_thread_block_tile,
+                mat_one_rows,
+                mat_two_columns,
+                shared,
+                iter,
+                thread_linear_idx
+            );
+            __syncthreads();
+
+// add unrolling if less gpu pressure on 4070 my gpu theres too much register pressure for it be worth it
+// #pragma unroll
+            for (size_t k_i{0}; k_i < BLOCK_TILE_SIZE_K; ++k_i) {
+                // the starting row of mat one, used to load various elements
+                const size_t mat_one_row{
+                    thread_linear_idx / (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) * THREAD_TILE_SIZE_Y
+                };
+
+// #pragma unroll
+                for (size_t i{0}; i < THREAD_TILE_SIZE_Y; ++i) {
+                    // because we divide the row by THREAD_TILE_SIZE_X the amount of threads per warp that represent
+                    // multiple roes goes up, this leads to bank conflicts, to fix this one could load the mat_one
+                    // shared block in a transposed manner.
+                    one_cache[i] = mat_one_thread_block_tile[mat_one_row + i][k_i];
+                }
+
+                const size_t mat_two_col{
+                    thread_linear_idx % (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) * THREAD_TILE_SIZE_X
+                };
+
+// #pragma unroll
+                for (size_t j{0}; j < THREAD_TILE_SIZE_X; ++j) {
+                    // no bank conflicts since all threads regardless of which row in the A matrix
+                    // will start at the same row in the b matrix because of k_i
+                    two_cache[j] = mat_two_thread_block_tile[k_i][mat_two_col + j];
+                }
+
+                for (size_t ki{0}; ki < THREAD_TILE_SIZE_Y; ++ki)
+                    for (size_t kj{0}; kj < THREAD_TILE_SIZE_X; ++kj)
+                        intermediates[ki][kj] += one_cache[ki] * two_cache[kj];
+            }
+
+            __syncthreads();
+        }
+
+        for (size_t thread_tile_y_idx{0}; thread_tile_y_idx < THREAD_TILE_SIZE_Y; ++thread_tile_y_idx) {
+
+            const size_t dest_row{
+                blockIdx.y * BLOCK_TILE_SIZE_Y +
+                thread_linear_idx / (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) *
+                THREAD_TILE_SIZE_Y + thread_tile_y_idx
+            };
+
+            for (size_t thread_tile_x_idx{0}; thread_tile_x_idx < THREAD_TILE_SIZE_X; ++thread_tile_x_idx) {
+
+                const size_t dest_col{
+                    BLOCK_TILE_SIZE_X * blockIdx.x +
+                    thread_linear_idx % (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) *
+                    THREAD_TILE_SIZE_X + thread_tile_x_idx
+                };
+
+                if (dest_row < mat_one_rows && dest_col < mat_two_columns) {
+                    matrix_dest[dest_row * row_stride_dest + dest_col] =
+                            alpha * intermediates[thread_tile_y_idx][thread_tile_x_idx] +
+                            beta * matrix_dest[dest_row * row_stride_dest + dest_col];
+                }
             }
         }
     }
@@ -544,21 +664,73 @@ namespace cobraml::core {
 
                 return;
             }
+            case 4: {
+
+                constexpr uint BLOCK_TILE_SIZE_X{128};
+                constexpr uint BLOCK_TILE_SIZE_Y{128};
+                constexpr uint BLOCK_TILE_SIZE_K{16};
+
+                constexpr uint THREAD_TILE_SIZE_Y{8};
+                constexpr uint THREAD_TILE_SIZE_X{8};
+
+                constexpr uint NUM_THREADS_PER_BLOCK{
+                    BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y / (THREAD_TILE_SIZE_Y * THREAD_TILE_SIZE_X)};
+
+                static_assert(BLOCK_TILE_SIZE_X % THREAD_TILE_SIZE_X == 0);
+                static_assert(BLOCK_TILE_SIZE_Y % THREAD_TILE_SIZE_Y == 0);
+
+                static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_K == 0);
+                static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_X == 0);
+
+                static_assert(BLOCK_TILE_SIZE_K * BLOCK_TILE_SIZE_Y % NUM_THREADS_PER_BLOCK == 0);
+                static_assert(BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_K % NUM_THREADS_PER_BLOCK == 0);
+
+                constexpr dim3 block_dim(NUM_THREADS_PER_BLOCK);
+                const dim3 grid_dim{
+                    ceil_div(static_cast<uint>(mat_two_columns), BLOCK_TILE_SIZE_X),
+                    ceil_div(static_cast<uint>(mat_one_rows), BLOCK_TILE_SIZE_Y)
+                };
+
+                gemm_2DBT_2DTT<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_Y, THREAD_TILE_SIZE_X><<<grid_dim, block_dim>>>(
+                                    matrix_one,
+                                    matrix_two,
+                                    matrix_dest,
+                                    alpha,
+                                    beta,
+                                    mat_one_rows,
+                                    mat_two_columns,
+                                    shared,
+                                    row_stride_one,
+                                    row_stride_two,
+                                    row_stride_dest);
+
+                CUDA_CHECK(cudaGetLastError());
+                return;
+            }
             default: {
                 throw std::runtime_error("invalid function provided");
             }
         }
 #else
-        constexpr uint BLOCK_TILE_SIZE_X{64};
-        constexpr uint BLOCK_TILE_SIZE_Y{64};
-        constexpr uint BLOCK_TILE_SIZE_K{8};
+        constexpr uint BLOCK_TILE_SIZE_X{128};
+        constexpr uint BLOCK_TILE_SIZE_Y{128};
+        constexpr uint BLOCK_TILE_SIZE_K{16};
 
         constexpr uint THREAD_TILE_SIZE_Y{8};
-        constexpr uint NUM_THREADS_PER_BLOCK{BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y / THREAD_TILE_SIZE_Y};
+        constexpr uint THREAD_TILE_SIZE_X{8};
 
+        constexpr uint NUM_THREADS_PER_BLOCK{
+            BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y / (THREAD_TILE_SIZE_Y * THREAD_TILE_SIZE_X)
+        };
+
+        static_assert(BLOCK_TILE_SIZE_X % THREAD_TILE_SIZE_X == 0);
         static_assert(BLOCK_TILE_SIZE_Y % THREAD_TILE_SIZE_Y == 0);
+
         static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_K == 0);
         static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_X == 0);
+
+        static_assert(BLOCK_TILE_SIZE_K * BLOCK_TILE_SIZE_Y % NUM_THREADS_PER_BLOCK == 0);
+        static_assert(BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_K % NUM_THREADS_PER_BLOCK == 0);
 
         constexpr dim3 block_dim(NUM_THREADS_PER_BLOCK);
         const dim3 grid_dim{
@@ -566,7 +738,8 @@ namespace cobraml::core {
             ceil_div(static_cast<uint>(mat_one_rows), BLOCK_TILE_SIZE_Y)
         };
 
-        gemm_2DBT_1DTT<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_Y><<<grid_dim, block_dim>>>(
+        gemm_2DBT_2DTT<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_Y,
+            THREAD_TILE_SIZE_X><<<grid_dim, block_dim>>>(
             matrix_one,
             matrix_two,
             matrix_dest,
@@ -578,6 +751,7 @@ namespace cobraml::core {
             row_stride_one,
             row_stride_two,
             row_stride_dest);
+
         CUDA_CHECK(cudaGetLastError());
 #endif
     }

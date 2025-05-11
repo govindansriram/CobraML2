@@ -206,4 +206,8 @@ target_link_libraries(benchmark_eq benchmark::benchmark cobraml)
 add_executable(benchmark_cuda_matrix benchmarks/gemm_cuda.cpp)
 target_compile_options(benchmark_cuda_matrix PRIVATE ${BENCH_COMPILE_OPTIONS})
 target_link_libraries(benchmark_cuda_matrix benchmark::benchmark cobraml)
+
+add_executable(benchmark_cuda_gemv benchmarks/gemv_cuda.cpp)
+target_compile_options(benchmark_cuda_gemv PRIVATE ${BENCH_COMPILE_OPTIONS})
+target_link_libraries(benchmark_cuda_gemv benchmark::benchmark cobraml)
 #########################################################

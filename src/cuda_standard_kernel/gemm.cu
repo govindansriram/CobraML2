@@ -451,6 +451,7 @@ namespace cobraml::core {
             );
             __syncthreads();
 
+// add unrolling if less gpu pressure on 4070 my gpu theres too much register pressure for it be worth it
 // #pragma unroll
             for (size_t k_i{0}; k_i < BLOCK_TILE_SIZE_K; ++k_i) {
                 // the starting row of mat one, used to load various elements
@@ -466,14 +467,6 @@ namespace cobraml::core {
                     one_cache[i] = mat_one_thread_block_tile[mat_one_row + i][k_i];
                 }
 
-                // if (blockIdx.x == 0 && blockIdx.y == 0 && thread_linear_idx == 0) {
-                //     for (size_t i{0}; i < THREAD_TILE_SIZE_Y; ++i) {
-                //         printf("%d ", one_cache[i]);
-                //     }
-                //     printf("\n");
-                // }
-
-
                 const size_t mat_two_col{
                     thread_linear_idx % (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) * THREAD_TILE_SIZE_X
                 };
@@ -484,13 +477,6 @@ namespace cobraml::core {
                     // will start at the same row in the b matrix because of k_i
                     two_cache[j] = mat_two_thread_block_tile[k_i][mat_two_col + j];
                 }
-
-                // if (blockIdx.x == 0 && blockIdx.y == 0 && thread_linear_idx == 0) {
-                //     for (size_t i{0}; i < THREAD_TILE_SIZE_X; ++i) {
-                //         printf("%d ", two_cache[i]);
-                //     }
-                //     printf("\n");
-                // }
 
                 for (size_t ki{0}; ki < THREAD_TILE_SIZE_Y; ++ki)
                     for (size_t kj{0}; kj < THREAD_TILE_SIZE_X; ++kj)

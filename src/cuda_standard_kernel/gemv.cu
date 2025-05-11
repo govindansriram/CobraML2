@@ -4,6 +4,8 @@
 
 
 #include <iostream>
+#include <numeric>
+
 #include "cuda_helpers.h"
 #include "cuda_math.h"
 #include "cuda_device_helpers.cuh"
@@ -41,7 +43,6 @@ namespace cobraml::core {
         const size_t rows,
         const size_t columns,
         const size_t row_stride) {
-
         __shared__ T VECTOR_TILE[BLOCK_TILE_SIZE_X];
 
         const uint iters{ceil_div(columns, BLOCK_TILE_SIZE_X)};
@@ -50,7 +51,6 @@ namespace cobraml::core {
         T running_sum{0};
 
         for (size_t iter{0}; iter < iters; ++iter) {
-
             // load to shared memory with coalesced memory access
             const size_t load_pos_v{iter * BLOCK_TILE_SIZE_X + threadIdx.x};
             if (load_pos_v < columns)
@@ -60,8 +60,13 @@ namespace cobraml::core {
             __syncthreads();
 
             for (size_t k{0}; k < BLOCK_TILE_SIZE_X; ++k) {
+                // every thread would be accessing the same segment of the VECTOR_TILE which leads to a broadcast
+
+                // however when accessing the matrix memory accesses wont be coalesced
                 const size_t load_pos_m{row_stride * global_row + iter * BLOCK_TILE_SIZE_X + k};
-                running_sum += ((global_row < rows) && (iter * BLOCK_TILE_SIZE_X + k < columns) ? matrix[load_pos_m] : static_cast<T>(0)) * VECTOR_TILE[k];
+                running_sum += ((global_row < rows) && (iter * BLOCK_TILE_SIZE_X + k < columns)
+                                    ? matrix[load_pos_m]
+                                    : static_cast<T>(0)) * VECTOR_TILE[k];
             }
             __syncthreads();
         }
@@ -70,10 +75,45 @@ namespace cobraml::core {
 
         if (global_row < rows)
             dest[global_row] = dest[global_row] * beta + running_sum;
+    }
 
-        // if (threadIdx.x == 0 && blockIdx.x == 0) {
-        //     printf("done \n");
-        // }
+    template<typename T, size_t WARP_SIZE = 32>
+    __global__ void gemv_memory_coalescing(
+        const T *matrix,
+        const T *vector,
+        T *dest,
+        const T alpha,
+        const T beta,
+        const size_t columns,
+        const size_t row_stride) {
+
+        __shared__ T VECTOR_TILE[WARP_SIZE];
+        const size_t global_row{blockIdx.x};
+        const size_t iters{ceil_div(columns, WARP_SIZE)};
+
+        T partial{0};
+
+        // coalesced memory access every thread accesses data in iterations of 32 allowing access to be
+        // coalesced
+        for (size_t iter{0}; iter < iters; ++iter) {
+            // load to shared memory with coalesced memory access
+            const size_t load_pos_v{iter * WARP_SIZE + threadIdx.x};
+            const size_t load_pos_m{row_stride * global_row + WARP_SIZE * iter + threadIdx.x};
+
+            if (load_pos_v < columns) partial += vector[load_pos_v] * matrix[load_pos_m];
+        }
+
+        VECTOR_TILE[threadIdx.x] = partial;
+        __syncthreads();
+
+        if (threadIdx.x == 0) {
+            T total{0};
+#pragma unroll
+            for (size_t i{0}; i < WARP_SIZE; ++i)
+                total += VECTOR_TILE[i];
+
+            dest[global_row] = dest[global_row] * beta + total * alpha;
+        }
     }
 
 
@@ -123,18 +163,32 @@ namespace cobraml::core {
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
+            case 2: {
+                constexpr uint WARP_SIZE{32};
+                constexpr dim3 block_dim{WARP_SIZE};
+                const dim3 grid_dim{static_cast<uint>(rows)};
+
+                gemv_memory_coalescing<T, WARP_SIZE><<<grid_dim, block_dim>>>(
+                    matrix,
+                    vector,
+                    dest,
+                    alpha,
+                    beta,
+                    columns,
+                    row_stride);
+                CUDA_CHECK(cudaGetLastError());
+                return;
+            }
             default: {
                 throw std::runtime_error("invalid function provided to gemv");
             }
         }
 #else
-        constexpr uint BLOCK_TILE_SIZE_X{16 * 16};
-        constexpr dim3 block_dim{BLOCK_TILE_SIZE_X};
-        const dim3 grid_dim{ceil_div(rows, block_dim.x)};
+        constexpr uint WARP_SIZE{32};
+        constexpr dim3 block_dim{WARP_SIZE};
+        const dim3 grid_dim{static_cast<uint>(rows)};
 
-        // std::cout << grid_dim.x << std::endl;
-
-        gemv_1d_thread_tile<T, BLOCK_TILE_SIZE_X><<<grid_dim, block_dim>>>(
+        gemv_memory_coalescing<T, WARP_SIZE><<<grid_dim, block_dim>>>(
             matrix,
             vector,
             dest,

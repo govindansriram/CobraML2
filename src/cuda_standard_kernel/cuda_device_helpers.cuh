@@ -31,7 +31,7 @@ __device__ __forceinline__ void block_warp_reduction(T value, const uint tidx, T
         if (tidx < WARP_SIZE) {
             const uint segments = ceil_div(THREADS_PER_BLOCK, WARP_SIZE);
             local_sum = tidx < segments ? smmem[tidx] : static_cast<T>(0);
-            warp_reduction(local_sum);
+            local_sum = warp_reduction<T, WARP_SIZE>(local_sum);
             if (tidx == 0) smmem[0] = local_sum;
         }
     } else {

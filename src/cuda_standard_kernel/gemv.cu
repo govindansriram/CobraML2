@@ -123,7 +123,6 @@ namespace cobraml::core {
         const T beta,
         const size_t columns,
         const size_t row_stride) {
-
         const size_t global_row{blockIdx.x};
         const size_t iters{ceil_div(columns, WARP_SIZE)};
 
@@ -153,7 +152,6 @@ namespace cobraml::core {
         const T beta,
         const size_t columns,
         const size_t row_stride) {
-
         __shared__ T PARTIALS[SEGMENTS];
 
         constexpr size_t threads_per_block{SEGMENTS * WARP_SIZE};
@@ -182,6 +180,39 @@ namespace cobraml::core {
             T final_sum{0};
             for (size_t i{0}; i < SEGMENTS; ++i) final_sum += PARTIALS[i];
             dest[global_row] = dest[global_row] * beta + final_sum * alpha;
+        }
+    }
+
+    template<typename T, size_t WARP_SIZE = 32, size_t SEGMENTS>
+    __global__ void gemv_warp_reduction_block2(
+        const T *matrix,
+        const T *vector,
+        T *dest,
+        const T alpha,
+        const T beta,
+        const size_t columns,
+        const size_t row_stride) {
+        __shared__ T PARTIALS[SEGMENTS];
+
+        constexpr size_t threads_per_block{SEGMENTS * WARP_SIZE};
+        const size_t global_row{blockIdx.x};
+        const size_t iters{ceil_div(columns, threads_per_block)};
+
+        T partial{static_cast<T>(0)};
+
+        // coalesced memory access every thread accesses data in iterations of 32 allowing access to be coalesced
+        for (size_t iter{0}; iter < iters; ++iter) {
+            // load to shared memory with coalesced memory access
+            const size_t load_pos_v{iter * threads_per_block + threadIdx.x};
+            const size_t load_pos_m{row_stride * global_row + load_pos_v};
+
+            if (load_pos_v < columns) partial += vector[load_pos_v] * matrix[load_pos_m];
+        }
+
+        block_warp_reduction<T, threads_per_block, WARP_SIZE>(partial, threadIdx.x, PARTIALS);
+
+        if (threadIdx.x == 0) {
+            dest[global_row] = dest[global_row] * beta + PARTIALS[0] * alpha;
         }
     }
 
@@ -281,17 +312,34 @@ namespace cobraml::core {
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
+            case 5: {
+                constexpr uint WARP_SIZE{32};
+                constexpr uint segments{2};
+                constexpr dim3 block_dim{WARP_SIZE * segments};
+                const dim3 grid_dim{static_cast<uint>(rows)};
+
+                gemv_warp_reduction_block2<T, WARP_SIZE, segments><<<grid_dim, block_dim>>>(
+                    matrix,
+                    vector,
+                    dest,
+                    alpha,
+                    beta,
+                    columns,
+                    row_stride);
+                CUDA_CHECK(cudaGetLastError());
+                return;
+            }
             default: {
                 throw std::runtime_error("invalid function provided to gemv");
             }
         }
 #else
         constexpr uint WARP_SIZE{32};
-        constexpr size_t segments{3};
+        constexpr uint segments{2};
         constexpr dim3 block_dim{WARP_SIZE * segments};
         const dim3 grid_dim{static_cast<uint>(rows)};
 
-        gemv_warp_reduction_block<T, WARP_SIZE, segments><<<grid_dim, block_dim>>>(
+        gemv_warp_reduction_block2<T, WARP_SIZE, segments><<<grid_dim, block_dim>>>(
             matrix,
             vector,
             dest,

@@ -34,12 +34,6 @@ TEST(CudaArrayTestFunctionals, test_device) {
 
     auto scal{tensor[0][2][2]};
     scal.set_item(10.3f);
-
-    auto res = cobraml::core::gemv(tensor[0], tensor[0][0], 1.0f, 1.0f);
-
-
-    std::cout << res;
-    std::cout << tensor;
 }
 
 TEST(CudaArrayTestFunctionals, eq) {
@@ -245,6 +239,8 @@ TEST(CudaArrayTestFunctionals, gemv) {
         {1001}, y);
 
     res = cobraml::core::gemv(large_ten, med_ten, 1, 1);
+
+    // std::cout << med_ten;
 
     ASSERT_TRUE(res == final_ten);
 }

@@ -5,10 +5,12 @@
 #ifndef CUDA_HELPERS_H
 #define CUDA_HELPERS_H
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 #include <iostream>
 
 
 namespace cobraml::core {
+    cublasHandle_t get_handle();
 
 #define CUDA_CHECK(call)                                         \
     do {                                                         \

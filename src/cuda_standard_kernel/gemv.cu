@@ -9,8 +9,35 @@
 #include "cuda_helpers.h"
 #include "cuda_math.h"
 #include "cuda_device_helpers.cuh"
+#include "cublas_v2.h"
 
 namespace cobraml::core {
+
+    void gemv_cublas(
+        const float *matrix,
+        const float *vector,
+        float *dest,
+        const float alpha,
+        const float beta,
+        const size_t rows,
+        const size_t columns,
+        const size_t row_stride) {
+
+        cublasSgemv(
+            get_handle(),
+            CUBLAS_OP_T,
+            static_cast<int>(columns),
+            static_cast<int>(rows),
+            &alpha,
+            matrix,
+            static_cast<int>(row_stride),
+            vector,
+            1,
+            &beta,
+            dest,
+            1);
+    }
+
     template<typename T>
     __global__ void gemv_naive(
         const T *matrix,
@@ -231,6 +258,19 @@ namespace cobraml::core {
 
         switch (func_pos) {
             case 0: {
+                if constexpr (std::is_same_v<T, float>) {
+                    gemv_cublas(matrix, vector, dest, alpha, beta, rows, columns, row_stride);
+                }else {
+                    const auto temp_pos{func_pos};
+                    func_pos = 6;
+                    gemv_dispatch<T>(matrix, vector, dest, alpha, beta, rows, columns, row_stride);
+                    func_pos = temp_pos;
+                }
+                CUDA_CHECK(cudaGetLastError());
+                return;
+            }
+            case 1: {
+                // std::cout << "here";
                 constexpr dim3 block_dim{16 * 16};
                 const dim3 grid_dim{ceil_div(rows, block_dim.x)};
 
@@ -246,7 +286,7 @@ namespace cobraml::core {
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
-            case 1: {
+            case 2: {
                 constexpr uint BLOCK_TILE_SIZE_X{16 * 16};
                 constexpr dim3 block_dim{BLOCK_TILE_SIZE_X};
                 const dim3 grid_dim{ceil_div(rows, block_dim.x)};
@@ -263,7 +303,7 @@ namespace cobraml::core {
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
-            case 2: {
+            case 3: {
                 constexpr uint WARP_SIZE{32};
                 constexpr dim3 block_dim{WARP_SIZE};
                 const dim3 grid_dim{static_cast<uint>(rows)};
@@ -279,7 +319,7 @@ namespace cobraml::core {
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
-            case 3: {
+            case 4: {
                 constexpr uint WARP_SIZE{32};
                 constexpr dim3 block_dim{WARP_SIZE};
                 const dim3 grid_dim{static_cast<uint>(rows)};
@@ -295,7 +335,7 @@ namespace cobraml::core {
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
-            case 4: {
+            case 5: {
                 constexpr uint WARP_SIZE{32};
                 constexpr uint segments{2};
                 constexpr dim3 block_dim{WARP_SIZE * segments};
@@ -312,7 +352,7 @@ namespace cobraml::core {
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
-            case 5: {
+            case 6: {
                 constexpr uint WARP_SIZE{32};
                 constexpr uint segments{2};
                 constexpr dim3 block_dim{WARP_SIZE * segments};

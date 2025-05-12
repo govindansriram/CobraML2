@@ -164,7 +164,7 @@ TEST(CudaArrayTestFunctionals, gemm) {
 }
 
 TEST(CudaArrayTestFunctionals, gemv) {
-    const std::vector<int> t{
+    const std::vector<float> t{
         1, 2, 3,
         4, 5, 6,
         7, 8, 9,
@@ -178,69 +178,67 @@ TEST(CudaArrayTestFunctionals, gemv) {
         25, 26, 27
     };
 
-    const std::vector<int> i{
+    const std::vector<float> i{
         1, 0, 0,
         0, 1, 0,
         0, 0, 1
     };
 
-    const std::vector<int> v{10, 20, 30};
+    const std::vector<float> v{10, 20, 30};
 
     const cobraml::core::Brarray tensor(
         cobraml::core::CUDA,
-        cobraml::core::INT32,
+        cobraml::core::FLOAT32,
         {3, 3, 3}, t);
 
     const cobraml::core::Brarray ident(
         cobraml::core::CUDA,
-        cobraml::core::INT32,
+        cobraml::core::FLOAT32,
         {3, 3}, i);
 
     const cobraml::core::Brarray vector(
         cobraml::core::CUDA,
-        cobraml::core::INT32,
+        cobraml::core::FLOAT32,
         {3}, v);
 
-    auto res{cobraml::core::gemv(ident, vector, 1, 1)};
+    auto res{cobraml::core::gemv<float>(ident, vector, 1.f, 1.f)};
     const std::vector<size_t> exp{3};
     ASSERT_EQ(res.get_shape(), exp);
-    ASSERT_EQ(res.get_dtype(), cobraml::core::INT32);
+    ASSERT_EQ(res.get_dtype(), cobraml::core::FLOAT32);
     ASSERT_EQ(res.get_device(), cobraml::core::CUDA);
+
     ASSERT_TRUE(res == vector);
 
     // test on matrix larger than 16 x 16
 
-    std::vector<int> A(1001 * 800, 0);
-    std::vector<int> x(800, 0);
-    std::vector<int> y(1001, 0);
+    std::vector<float> A(1001 * 800, 0);
+    std::vector<float> x(800, 0);
+    std::vector<float> y(1001, 0);
 
-    for (int i = 0; i < 1001 * 800; ++i)
-        A[i] = i / 800;
+    for (int k = 0; k < 1001 * 800; ++k)
+        A[k] = static_cast<float>(k / 800);
 
-    for (int i = 0; i < 800; ++i)
-        x[i] = 1;
+    for (int k = 0; k < 800; ++k)
+        x[k] = 1.f;
 
-    for (int i = 0; i < 1001; ++i)
-        y[i] = 800 * i;
+    for (int k = 0; k < 1001; ++k)
+        y[k] = 800.f * static_cast<float>(k);
 
     const cobraml::core::Brarray large_ten(
         cobraml::core::CUDA,
-        cobraml::core::INT32,
+        cobraml::core::FLOAT32,
         {1001, 800}, A);
 
     const cobraml::core::Brarray med_ten(
         cobraml::core::CUDA,
-        cobraml::core::INT32,
+        cobraml::core::FLOAT32,
         {800}, x);
 
     const cobraml::core::Brarray final_ten(
         cobraml::core::CUDA,
-        cobraml::core::INT32,
+        cobraml::core::FLOAT32,
         {1001}, y);
 
-    res = cobraml::core::gemv(large_ten, med_ten, 1, 1);
-
-    // std::cout << med_ten;
-
+    res = cobraml::core::gemv(large_ten, med_ten, 1.f, 1.f);
     ASSERT_TRUE(res == final_ten);
 }

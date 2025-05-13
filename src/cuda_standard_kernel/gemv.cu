@@ -12,7 +12,6 @@
 #include "cublas_v2.h"
 
 namespace cobraml::core {
-
     void gemv_cublas(
         const float *matrix,
         const float *vector,
@@ -22,7 +21,6 @@ namespace cobraml::core {
         const size_t rows,
         const size_t columns,
         const size_t row_stride) {
-
         cublasSgemv(
             get_handle(),
             CUBLAS_OP_T,
@@ -246,6 +244,85 @@ namespace cobraml::core {
         }
     }
 
+    template<size_t WARP_SIZE, size_t SEGMENTS>
+    __global__ void sp_gemv_warp_reduction_block_vector_load(
+        const float *matrix,
+        const float *vector,
+        float *dest,
+        const float alpha,
+        const float beta,
+        const size_t columns,
+        const size_t row_stride) {
+        __shared__ float PARTIALS[SEGMENTS];
+
+        constexpr size_t threads_per_block{SEGMENTS * WARP_SIZE};
+        const size_t global_row{blockIdx.x};
+
+        const auto f4_vec{reinterpret_cast<const float4 *>(vector)};
+        const auto f4_mat_row{reinterpret_cast<const float4 *>(matrix + global_row * row_stride)};
+
+        const size_t f4_cols{ceil_div(columns, 4)};
+        const size_t iters{ceil_div(f4_cols, threads_per_block)};
+        float partial{static_cast<float>(0)};
+
+        // coalesced memory access every thread accesses data in iterations of 32 allowing access to be coalesced
+        for (size_t iter{0}; iter < iters; ++iter) {
+            // load to shared memory with coalesced memory access
+
+            if (const size_t load_pos_v{iter * threads_per_block + threadIdx.x}; load_pos_v < f4_cols) {
+                const float4 vec_data{f4_vec[load_pos_v]};
+                const float4 mat_data{f4_mat_row[load_pos_v]};
+
+                partial += vec_data.w * mat_data.w;
+                partial += vec_data.x * mat_data.x;
+                partial += vec_data.y * mat_data.y;
+                partial += vec_data.z * mat_data.z;
+            }
+        }
+
+        block_warp_reduction<float, threads_per_block, WARP_SIZE>(partial, threadIdx.x, PARTIALS);
+
+        if (threadIdx.x == 0) {
+            dest[global_row] = dest[global_row] * beta + PARTIALS[0] * alpha;
+        }
+    }
+
+    template<typename T, size_t WARP_SIZE = 32, size_t SEGMENTS>
+    void gemv_warp_reduction_block_vector_load(
+        const T *matrix,
+        const T *vector,
+        T *dest,
+        const T alpha,
+        const T beta,
+        const size_t rows,
+        const size_t columns,
+        const size_t row_stride) {
+
+        constexpr dim3 block_dim{WARP_SIZE * SEGMENTS};
+        const dim3 grid_dim{static_cast<uint>(rows)};
+
+        if constexpr (std::is_same_v<T, float>) {
+            sp_gemv_warp_reduction_block_vector_load<WARP_SIZE, SEGMENTS><<<grid_dim, block_dim>>>(
+                matrix,
+                vector,
+                dest,
+                alpha,
+                beta,
+                columns,
+                row_stride);
+
+            return;
+        }
+
+        gemv_warp_reduction_block2<T, WARP_SIZE, SEGMENTS><<<grid_dim, block_dim>>>(
+            matrix,
+            vector,
+            dest,
+            alpha,
+            beta,
+            columns,
+            row_stride);
+    }
 
     template<typename T>
     void gemv_dispatch(
@@ -263,7 +340,7 @@ namespace cobraml::core {
             case 0: {
                 if constexpr (std::is_same_v<T, float>) {
                     gemv_cublas(matrix, vector, dest, alpha, beta, rows, columns, row_stride);
-                }else {
+                } else {
                     const auto temp_pos{func_pos};
                     func_pos = 6;
                     gemv_dispatch<T>(matrix, vector, dest, alpha, beta, rows, columns, row_stride);
@@ -372,6 +449,23 @@ namespace cobraml::core {
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
+            case 7: {
+                constexpr uint WARP_SIZE{32};
+                constexpr uint segments{2};
+
+                gemv_warp_reduction_block_vector_load<T, WARP_SIZE, segments>(
+                    matrix,
+                    vector,
+                    dest,
+                    alpha,
+                    beta,
+                    rows,
+                    columns,
+                    row_stride);
+
+                CUDA_CHECK(cudaGetLastError());
+                return;
+            }
             default: {
                 throw std::runtime_error("invalid function provided to gemv");
             }
@@ -379,17 +473,17 @@ namespace cobraml::core {
 #else
         constexpr uint WARP_SIZE{32};
         constexpr uint segments{2};
-        constexpr dim3 block_dim{WARP_SIZE * segments};
-        const dim3 grid_dim{static_cast<uint>(rows)};
 
-        gemv_warp_reduction_block2<T, WARP_SIZE, segments><<<grid_dim, block_dim>>>(
+        gemv_warp_reduction_block_vector_load<T, WARP_SIZE, segments>(
             matrix,
             vector,
             dest,
             alpha,
             beta,
+            rows,
             columns,
             row_stride);
+
         CUDA_CHECK(cudaGetLastError());
 #endif
     }

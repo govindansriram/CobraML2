@@ -42,6 +42,7 @@ set(SOURCES
         src/cuda_standard_kernel/cuda_allocator.cpp
         src/cuda_standard_kernel/cuda_allocator.h
         src/cuda_standard_kernel/cuda_helpers.h
+        src/cuda_standard_kernel/cuda_helpers.cpp
         src/instantiate.h
         src/cuda_standard_kernel/gemv.cu
         src/cuda_standard_kernel/cuda_math.h
@@ -63,7 +64,7 @@ target_include_directories(cobraml PUBLIC include)
 
 # Include directory for private headers
 target_include_directories(cobraml PRIVATE src/standard_kernel src/autograd src/autograd/layers src/cuda_standard_kernel CUDA::toolkit)
-target_link_libraries(cobraml PRIVATE CUDA::cudart)
+target_link_libraries(cobraml PRIVATE CUDA::cudart CUDA::cublas)
 
 set_target_properties(cobraml PROPERTIES
         POSITION_INDEPENDENT_CODE ON

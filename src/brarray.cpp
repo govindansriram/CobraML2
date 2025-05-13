@@ -892,7 +892,7 @@ namespace cobraml::core {
         if (get_device() != other.get_device())
             throw std::runtime_error("brarray are on different devices and are not comparable");
 
-        Brarray ret(get_device(), get_dtype(), get_shape());
+        Brarray ret(get_device(), INT32, get_shape());
         impl->eq(other.impl.get(), ret.impl.get());
 
         while (!ret.is_scalar_equivalent())

@@ -21,8 +21,8 @@ template<typename T, size_t THREADS_PER_BLOCK, size_t WARP_SIZE = 32>
 __device__ __forceinline__ void block_warp_reduction(T value, const uint tidx, T *smmem) {
     T local_sum{warp_reduction<T, WARP_SIZE>(value)};
     if (THREADS_PER_BLOCK > WARP_SIZE) {
-        const uint c_warp{tidx / WARP_SIZE};
-        const uint c_t_pos{tidx % WARP_SIZE};
+        const size_t c_warp{tidx / WARP_SIZE};
+        const size_t c_t_pos{tidx % WARP_SIZE};
 
         if (c_t_pos == 0) smmem[c_warp] = local_sum;
 
@@ -31,7 +31,7 @@ __device__ __forceinline__ void block_warp_reduction(T value, const uint tidx, T
         if (tidx < WARP_SIZE) {
             const uint segments = ceil_div(THREADS_PER_BLOCK, WARP_SIZE);
             local_sum = tidx < segments ? smmem[tidx] : static_cast<T>(0);
-            warp_reduction(local_sum);
+            local_sum = warp_reduction<T, WARP_SIZE>(local_sum);
             if (tidx == 0) smmem[0] = local_sum;
         }
     } else {

@@ -205,7 +205,10 @@ namespace cobraml::core {
 
         if (threadIdx.x == 0) {
             T final_sum{0};
-            for (size_t i{0}; i < SEGMENTS; ++i) final_sum += PARTIALS[i];
+#pragma unroll
+            for (size_t i{0}; i < SEGMENTS; ++i) {
+                final_sum += PARTIALS[i];
+            }
             dest[global_row] = dest[global_row] * beta + final_sum * alpha;
         }
     }

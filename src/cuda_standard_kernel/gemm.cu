@@ -545,6 +545,34 @@ namespace cobraml::core {
         }
     }
 
+    /**
+     * Loads data into the Matrix One and Two shared blocks
+     * Matrix One will be stored transposed this is appropriate
+     * if the algorithm originally access data columnwise leading
+     * to bank conflicts. This is done with vectorized loads
+     * improving memory bandwidth usage
+     *
+     * @tparam T the base datatype of the matrices
+     * @tparam VECTOR_TYPE dictates how much data to load at once (defaults to 16 bytes)
+     * @tparam BLOCK_TILE_SIZE_X
+     * @tparam BLOCK_TILE_SIZE_Y
+     * @tparam BLOCK_TILE_SIZE_K
+     * @tparam THREADS_PER_BLOCK
+     * @tparam BLOCK_TILE_SKEW_SIZE_X skews the starting positions for warp threads leading to less bank conflicts
+     * @tparam BLOCK_TILE_SKEW_SIZE_Y skews the starting positions for warp threads leading to less bank conflicts
+     * @param matrix_one
+     * @param matrix_two
+     * @param stride_one
+     * @param stride_two
+     * @param one_shared the shared memory block for matrix one should be transposed
+     * @param two_shared the shared memory block for matrix two
+     * @param mat_one_rows
+     * @param mat_two_columns
+     * @param shared
+     * @param iteration
+     * @param thread_linear_idx
+     * @param v0 an initial zero value for vectorized loads defaulted too when bounds are exceeded
+     */
     template<
         typename T,
         typename VECTOR_TYPE = int4,
@@ -598,6 +626,7 @@ namespace cobraml::core {
             ceil_div(BLOCK_TILE_SIZE_Y * VEC_BLOCK_TILE_SIZE_K, THREADS_PER_BLOCK)
         };
 
+        // load into matrix one
 #pragma unroll
         for (size_t one_iter{0}; one_iter < one_iterations; ++one_iter) {
             const size_t one_shared_row{(thread_linear_idx + one_iter * THREADS_PER_BLOCK) / VEC_BLOCK_TILE_SIZE_K};
@@ -610,6 +639,7 @@ namespace cobraml::core {
 
             VECTOR_TYPE mat_one_row_vector_vals{v0};
 
+            // if in bounds we save the data to the temp register value mat_one_row_vector_vals
             if (mat_one_row < mat_one_rows && mat_one_column < shared) {
                 const VECTOR_TYPE *mat_one_vec_ptr{
                     reinterpret_cast<const VECTOR_TYPE *>(matrix_one + (mat_one_row * stride_one) + mat_one_column)
@@ -628,6 +658,7 @@ namespace cobraml::core {
 
         constexpr size_t two_iterations{ceil_div(BLOCK_TILE_SIZE_K * VEC_BLOCK_TILE_SIZE_X, THREADS_PER_BLOCK)};
 
+        // load into matrix two
 #pragma unroll
         for (size_t two_iter{0}; two_iter < two_iterations; ++two_iter) {
             const size_t two_shared_row{(thread_linear_idx + two_iter * THREADS_PER_BLOCK) / VEC_BLOCK_TILE_SIZE_X};
@@ -641,6 +672,7 @@ namespace cobraml::core {
 
             VECTOR_TYPE mat_two_row_vector_vals{v0};
 
+            // if in bounds we save the data to the temp register value mat_two_row_vector_vals
             if (mat_two_row < shared && mat_two_column < mat_two_columns) {
                 const VECTOR_TYPE *mat_two_vec_ptr{
                     reinterpret_cast<const VECTOR_TYPE *>(matrix_two + (mat_two_row * stride_two) + mat_two_column)
@@ -655,6 +687,8 @@ namespace cobraml::core {
             }
         }
     }
+
+    // TODO see if you can vectorize load block A
 
     template<
         typename T,
@@ -675,10 +709,19 @@ namespace cobraml::core {
         const size_t row_stride_one,
         const size_t row_stride_two,
         const size_t row_stride_dest) {
-
         constexpr size_t THREADS_PER_BLOCK{
             (BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y) / (THREAD_TILE_SIZE_X * THREAD_TILE_SIZE_Y)
         };
+
+        /**
+         * TODO: possible improvements
+         * Add the unrolling,
+         * Make specific verisons for floats utilize float4 (can possibly lead to less instructions)
+         *
+         * Why not Double4
+         * Most NVIDIA GPUs (especially consumer cards like RTX series) have much lower memory bandwidth and
+         * ALU throughput for double precision, float 4 is the sweetspot
+         */
 
         // using 1 dimensional block
         const size_t thread_linear_idx{threadIdx.x};
@@ -709,6 +752,11 @@ namespace cobraml::core {
         constexpr size_t vectorized_thread_tile_size_x{THREAD_TILE_SIZE_X / units_per_vector};
 
         for (size_t iter{0}; iter < total_iters; ++iter) {
+
+            // loads the data in a transposed manner for block A, this is necessary
+            // since block A is transposed, this also loads data using vectorized loads
+            // ain this case we use int4 which means essentially 16 bytes are loaded at once
+            // this also requires 16 byte alignment
             load_data_to_shared_memory_transposed_vectorized<
                 T, int4,
                 BLOCK_TILE_SIZE_X,
@@ -732,6 +780,7 @@ namespace cobraml::core {
 
             __syncthreads();
 
+            // TODO test if unrolling is worth it? May add register pressure
             // # pragma unroll
             for (size_t k{0}; k < BLOCK_TILE_SIZE_K; ++k) {
                 const size_t shared_block_row{
@@ -742,7 +791,7 @@ namespace cobraml::core {
                     thread_linear_idx % (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) * THREAD_TILE_SIZE_X
                 };
 
-                // we don't access BLOCK A since the leading dimension is Y which may not be vectorization friendly
+                // we don't vectorize BLOCK A since the leading dimension is Y which may not be vectorization friendly
                 // this is because we transposed the block to make it more friendly to bank conflict access
                 // Imagine Tile Size of 2 and warp size of 2
                 // Here is our Matrix
@@ -761,13 +810,17 @@ namespace cobraml::core {
                 // [20 40 60 80]
                 // [30 50 70 90]
                 // [40 60 80 100]
-                // Now accessing the values will result in a broadcast not a bankconflict
+                // Now accessing the values will result in a broadcast not a bank conflict
 
+                // TODO test if unrolling is worth it? May add register pressure
                 // #pragma unroll
                 for (size_t one_tile_idx{0}; one_tile_idx < THREAD_TILE_SIZE_Y; ++one_tile_idx) {
                     one_cache[one_tile_idx] = mat_one_thread_block_tile_transposed[k][shared_block_row + one_tile_idx];
                 }
 
+                // here we do vectorized loads from shared memory directly into our registers for matrix B
+
+                // TODO test if unrolling is worth it? May add register pressure
                 // #pragma unroll
                 for (size_t two_tile_idx{0}; two_tile_idx < vectorized_thread_tile_size_x; ++two_tile_idx) {
                     const auto b_shared_ptr{
@@ -777,6 +830,7 @@ namespace cobraml::core {
                     reinterpret_cast<int4 *>(two_cache)[two_tile_idx] = *b_shared_ptr;
                 }
 
+                // We perform mat mul on create our partial result matrix
                 for (size_t ki{0}; ki < THREAD_TILE_SIZE_Y; ++ki)
                     for (size_t kj{0}; kj < THREAD_TILE_SIZE_X; ++kj)
                         intermediates[ki][kj] += one_cache[ki] * two_cache[kj];
@@ -800,7 +854,10 @@ namespace cobraml::core {
                 auto dest_ptr{reinterpret_cast<int4 *>(&matrix_dest[dest_row * row_stride_dest + dest_column])};
                 auto tile_ptr{reinterpret_cast<int4 *>(&intermediates[y][0]) + x};
 
+                // we load the vectors from the tile and the Dest Matrix, we scale by alpha and beta
+                // and perform the load at the end
                 if (dest_row < mat_one_rows && dest_column < mat_two_columns) {
+#pragma unroll
                     for (size_t i{0}; i < units_per_vector; ++i) {
                         reinterpret_cast<T *>(tile_ptr)[i] = reinterpret_cast<T *>(tile_ptr)[i] * alpha +
                                                              reinterpret_cast<T *>(dest_ptr)[i] * beta;
@@ -1011,45 +1068,76 @@ namespace cobraml::core {
                 return;
             }
             case 5: {
+                // mainly dictates how much shared memory we use
                 constexpr uint BLOCK_TILE_SIZE_X{128};
                 constexpr uint BLOCK_TILE_SIZE_Y{128};
                 constexpr uint BLOCK_TILE_SIZE_K{16};
 
+                // Each thread is responsible for computing a matrix block of c
+                // the size of which is THREAD_TILE_SIZE_Y x THREAD_TILE_SIZE_X
                 constexpr uint THREAD_TILE_SIZE_Y{8};
                 constexpr uint THREAD_TILE_SIZE_X{8};
 
+                // In total each block should compute BLOCK_TILE_SIZE_X x BLOCK_TILE_SIZE_Y
+                // elements of C, since each thread is responsible for BLOCK_TILE_SIZE_X x BLOCK_TILE_SIZE_Y
+                // we calculate the total threads based on that
                 constexpr uint NUM_THREADS_PER_BLOCK{
                     BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y / (THREAD_TILE_SIZE_Y * THREAD_TILE_SIZE_X)
                 };
 
+                // we ensure that Tiles are evenly distributed among threads
                 static_assert(BLOCK_TILE_SIZE_X % THREAD_TILE_SIZE_X == 0);
                 static_assert(BLOCK_TILE_SIZE_Y % THREAD_TILE_SIZE_Y == 0);
 
+                // TODO why?
                 static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_K == 0);
                 static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_X == 0);
 
+                // This ensures that all threads are responsible for loading the same amount of data
                 static_assert(BLOCK_TILE_SIZE_K * BLOCK_TILE_SIZE_Y % NUM_THREADS_PER_BLOCK == 0);
                 static_assert(BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_K % NUM_THREADS_PER_BLOCK == 0);
 
+                // 1 dimensional thread count
                 constexpr dim3 block_dim(NUM_THREADS_PER_BLOCK);
+
                 const dim3 grid_dim{
                     ceil_div(static_cast<uint>(mat_two_columns), BLOCK_TILE_SIZE_X),
                     ceil_div(static_cast<uint>(mat_one_rows), BLOCK_TILE_SIZE_Y)
                 };
 
-                gemm_2DBT_2DTT_vload<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_X,
-                    THREAD_TILE_SIZE_Y><<<grid_dim, block_dim>>>(
-                    matrix_one,
-                    matrix_two,
-                    matrix_dest,
-                    alpha,
-                    beta,
-                    mat_one_rows,
-                    mat_two_columns,
-                    shared,
-                    row_stride_one,
-                    row_stride_two,
-                    row_stride_dest);
+                // vectorized loads only work when multiple loads are needed to satisfy a tile
+                // for example the load size we use int4 (4 ints = 16 bytes) tile size is 8 = 32 bytes
+                // two loads are required. Now lets say int8 which is 1 byte, tile size is 8 which is 8 bytes
+                // the load with int4 will result in 16 bytes being loaded which is 16 elements this is spillover
+                if constexpr (constexpr size_t byts{sizeof(T)}; byts < 2) {
+                    gemm_2DBT_2DTT<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_Y,
+                        THREAD_TILE_SIZE_X><<<grid_dim, block_dim>>>(
+                        matrix_one,
+                        matrix_two,
+                        matrix_dest,
+                        alpha,
+                        beta,
+                        mat_one_rows,
+                        mat_two_columns,
+                        shared,
+                        row_stride_one,
+                        row_stride_two,
+                        row_stride_dest);
+                } else {
+                    gemm_2DBT_2DTT_vload<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_X,
+                        THREAD_TILE_SIZE_Y><<<grid_dim, block_dim>>>(
+                        matrix_one,
+                        matrix_two,
+                        matrix_dest,
+                        alpha,
+                        beta,
+                        mat_one_rows,
+                        mat_two_columns,
+                        shared,
+                        row_stride_one,
+                        row_stride_two,
+                        row_stride_dest);
+                }
 
                 CUDA_CHECK(cudaGetLastError());
                 return;

@@ -47,6 +47,10 @@ BENCHMARK(cuda_gemm)
 ->Args({12, 4})
 ->Threads(1);
 
+BENCHMARK(cuda_gemm)
+->Args({12, 5})
+->Threads(1);
+
 // BENCHMARK(cuda_eq)
 // ->Args({13, 2})
 // ->Threads(1);

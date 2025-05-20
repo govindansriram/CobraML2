@@ -1,3 +1,5 @@
+#include <assert.h>
+
 #include "cuda_math.h"
 #include "cuda_helpers.h"
 #include "cuda_device_helpers.cuh"
@@ -436,6 +438,39 @@ namespace cobraml::core {
 
         const uint thread_linear_idx{threadIdx.x}; // since block dim is 1 dimensional
 
+        /**
+         * High level overview of how this works
+         *
+         * Assume Matrix One
+         * [0,  1,  2,  3]
+         * [4,  5,  6,  7]
+         * [8,  9,  10, 11]
+         * [12, 13, 14, 15]
+         *
+         * Assume Matrix Two
+         * [16, 17, 18, 19]
+         * [20, 21, 22, 23]
+         * [24, 25, 26, 27]
+         * [28, 29, 30, 31]
+         *
+         * assume block
+         * [0, 1]
+         * [2, 3]
+         *
+         * thread 0 would load rowise from Matrix One in the first K step (into registers)
+         * [0]
+         * [4]
+         * thread 0 would load column wise from Matrix two in the first K step (into registers)
+         * [16, 17]
+         *
+         * it would then have compute the partial matrix
+         * [0,  0]
+         * [64, 68]
+         *
+         * It would then iterate over the respective K dimensions getting the final partial
+         * matrices
+         */
+
         for (uint iter{0}; iter < total_iters; ++iter) {
             load_data_to_shared_memory<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, threads_per_block>(
                 matrix_one,
@@ -509,6 +544,273 @@ namespace cobraml::core {
             }
         }
     }
+
+    template<
+        typename T,
+        typename VECTOR_TYPE = int4,
+        size_t BLOCK_TILE_SIZE_X,
+        size_t BLOCK_TILE_SIZE_Y,
+        size_t BLOCK_TILE_SIZE_K,
+        size_t THREADS_PER_BLOCK,
+        size_t BLOCK_TILE_SKEW_SIZE_X = 0,
+        size_t BLOCK_TILE_SKEW_SIZE_Y = 0
+    >
+    __device__ void load_data_to_shared_memory_transposed_vectorized(
+        const T *matrix_one,
+        const T *matrix_two,
+        const size_t stride_one,
+        const size_t stride_two,
+        T one_shared[BLOCK_TILE_SIZE_K][BLOCK_TILE_SIZE_Y + BLOCK_TILE_SKEW_SIZE_Y],
+        T two_shared[BLOCK_TILE_SIZE_K][BLOCK_TILE_SIZE_X + BLOCK_TILE_SKEW_SIZE_X],
+        const size_t mat_one_rows,
+        const size_t mat_two_columns,
+        const size_t shared,
+        const uint iteration,
+        const uint thread_linear_idx,
+        VECTOR_TYPE v0
+    ) {
+        constexpr size_t units_per_vector{sizeof(VECTOR_TYPE) / sizeof(T)};
+        static_assert(sizeof(VECTOR_TYPE) % sizeof(T) == 0);
+
+        // ensure there will be an even amount of vectorized loads
+        static_assert(BLOCK_TILE_SIZE_X % units_per_vector == 0);
+        static_assert(BLOCK_TILE_SIZE_K % units_per_vector == 0);
+
+#ifndef BENCHMARK
+        // ensures leading dimensions are padded to handle additional reads
+        assert(stride_one % units_per_vector == 0);
+        assert(stride_two % units_per_vector == 0);
+#endif
+
+        // We need to make sure the data alignment is correct.
+        static_assert((BLOCK_TILE_SIZE_Y) * sizeof(T) % sizeof(VECTOR_TYPE) == 0U);
+        static_assert((BLOCK_TILE_SIZE_X) * sizeof(T) % sizeof(VECTOR_TYPE) == 0U);
+
+        static_assert((BLOCK_TILE_SIZE_Y + BLOCK_TILE_SKEW_SIZE_Y) * sizeof(T) % sizeof(VECTOR_TYPE) == 0U);
+        static_assert((BLOCK_TILE_SIZE_X + BLOCK_TILE_SKEW_SIZE_X) * sizeof(T) % sizeof(VECTOR_TYPE) == 0U);
+
+        // scaling the load number down to account for the vectorized size
+        constexpr size_t VEC_BLOCK_TILE_SIZE_X{BLOCK_TILE_SIZE_X / units_per_vector};
+        constexpr size_t VEC_BLOCK_TILE_SIZE_K{BLOCK_TILE_SIZE_K / units_per_vector};
+
+        // determines how many vectorized loads are performed per thread
+        constexpr size_t one_iterations{
+            ceil_div(BLOCK_TILE_SIZE_Y * VEC_BLOCK_TILE_SIZE_K, THREADS_PER_BLOCK)
+        };
+
+#pragma unroll
+        for (size_t one_iter{0}; one_iter < one_iterations; ++one_iter) {
+            const size_t one_shared_row{(thread_linear_idx + one_iter * THREADS_PER_BLOCK) / VEC_BLOCK_TILE_SIZE_K};
+            const size_t one_shared_column{
+                (thread_linear_idx + one_iter * THREADS_PER_BLOCK) % VEC_BLOCK_TILE_SIZE_K * units_per_vector
+            };
+
+            const size_t mat_one_row{blockIdx.y * BLOCK_TILE_SIZE_Y + one_shared_row};
+            const size_t mat_one_column{iteration * BLOCK_TILE_SIZE_K + one_shared_column};
+
+            VECTOR_TYPE mat_one_row_vector_vals{v0};
+
+            if (mat_one_row < mat_one_rows && mat_one_column < shared) {
+                const VECTOR_TYPE *mat_one_vec_ptr{
+                    reinterpret_cast<const VECTOR_TYPE *>(matrix_one + (mat_one_row * stride_one) + mat_one_column)
+                };
+                mat_one_row_vector_vals = *mat_one_vec_ptr;
+            }
+
+            // Transposed store of the data back into shared memory
+            if (one_shared_row < BLOCK_TILE_SIZE_Y && one_shared_column < BLOCK_TILE_SIZE_K) {
+                for (size_t i{0}; i < units_per_vector; ++i) {
+                    one_shared[one_shared_column + i][one_shared_row] =
+                            reinterpret_cast<const T *>(&mat_one_row_vector_vals)[i];
+                }
+            }
+        }
+
+        constexpr size_t two_iterations{ceil_div(BLOCK_TILE_SIZE_K * VEC_BLOCK_TILE_SIZE_X, THREADS_PER_BLOCK)};
+
+#pragma unroll
+        for (size_t two_iter{0}; two_iter < two_iterations; ++two_iter) {
+            const size_t two_shared_row{(thread_linear_idx + two_iter * THREADS_PER_BLOCK) / VEC_BLOCK_TILE_SIZE_X};
+
+            const size_t two_shared_column{
+                (thread_linear_idx + two_iter * THREADS_PER_BLOCK) % VEC_BLOCK_TILE_SIZE_X * units_per_vector
+            };
+
+            const size_t mat_two_row{iteration * BLOCK_TILE_SIZE_K + two_shared_row};
+            const size_t mat_two_column{blockIdx.x * BLOCK_TILE_SIZE_X + two_shared_column};
+
+            VECTOR_TYPE mat_two_row_vector_vals{v0};
+
+            if (mat_two_row < shared && mat_two_column < mat_two_columns) {
+                const VECTOR_TYPE *mat_two_vec_ptr{
+                    reinterpret_cast<const VECTOR_TYPE *>(matrix_two + (mat_two_row * stride_two) + mat_two_column)
+                };
+
+                mat_two_row_vector_vals = *mat_two_vec_ptr;
+            }
+
+            if (two_shared_row < BLOCK_TILE_SIZE_K && two_shared_column < BLOCK_TILE_SIZE_X) {
+                *reinterpret_cast<VECTOR_TYPE *>(&two_shared[two_shared_row][two_shared_column]) =
+                        mat_two_row_vector_vals;
+            }
+        }
+    }
+
+    template<
+        typename T,
+        size_t BLOCK_TILE_SIZE_X,
+        size_t BLOCK_TILE_SIZE_Y,
+        size_t BLOCK_TILE_SIZE_K,
+        size_t THREAD_TILE_SIZE_X,
+        size_t THREAD_TILE_SIZE_Y>
+    __global__ void gemm_2DBT_2DTT_vload(
+        const T *matrix_one,
+        const T *matrix_two,
+        T *matrix_dest,
+        const T alpha,
+        const T beta,
+        const size_t mat_one_rows,
+        const size_t mat_two_columns,
+        const size_t shared,
+        const size_t row_stride_one,
+        const size_t row_stride_two,
+        const size_t row_stride_dest) {
+
+        constexpr size_t THREADS_PER_BLOCK{
+            (BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y) / (THREAD_TILE_SIZE_X * THREAD_TILE_SIZE_Y)
+        };
+
+        // using 1 dimensional block
+        const size_t thread_linear_idx{threadIdx.x};
+
+        // TRANSPOSED to avoid bank conflicts
+        __shared__ T mat_one_thread_block_tile_transposed[BLOCK_TILE_SIZE_K][BLOCK_TILE_SIZE_Y];
+        __shared__ T mat_two_thread_block_tile[BLOCK_TILE_SIZE_K][BLOCK_TILE_SIZE_X];
+
+        const size_t total_iters{ceil_div(shared, BLOCK_TILE_SIZE_K)};
+
+        // the intermediate results of each computation
+        T intermediates[THREAD_TILE_SIZE_Y][THREAD_TILE_SIZE_X] = {static_cast<T>(0)};
+
+        // register cached values of matrix one
+        T one_cache[THREAD_TILE_SIZE_Y] = {static_cast<T>(0)};
+
+        // register cached values of matrix two
+        T two_cache[THREAD_TILE_SIZE_X] = {static_cast<T>(0)};
+
+        constexpr size_t units_per_vector{sizeof(int4) / sizeof(T)};
+
+        // ensure int4 can be event split up by the base TYPE necessary for conversion
+        static_assert(sizeof(int4) % sizeof(T) == 0);
+
+        // we will store data along these dimensions for vectorized storage they need to be divisible
+        static_assert(BLOCK_TILE_SIZE_K % units_per_vector == 0);
+        static_assert(BLOCK_TILE_SIZE_X % units_per_vector == 0);
+        constexpr size_t vectorized_thread_tile_size_x{THREAD_TILE_SIZE_X / units_per_vector};
+
+        for (size_t iter{0}; iter < total_iters; ++iter) {
+            load_data_to_shared_memory_transposed_vectorized<
+                T, int4,
+                BLOCK_TILE_SIZE_X,
+                BLOCK_TILE_SIZE_Y,
+                BLOCK_TILE_SIZE_K,
+                THREADS_PER_BLOCK
+            >(
+                matrix_one,
+                matrix_two,
+                row_stride_one,
+                row_stride_two,
+                mat_one_thread_block_tile_transposed,
+                mat_two_thread_block_tile,
+                mat_one_rows,
+                mat_two_columns,
+                shared,
+                iter,
+                thread_linear_idx,
+                int4{0, 0, 0, 0}
+            );
+
+            __syncthreads();
+
+            // # pragma unroll
+            for (size_t k{0}; k < BLOCK_TILE_SIZE_K; ++k) {
+                const size_t shared_block_row{
+                    thread_linear_idx / (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) * THREAD_TILE_SIZE_Y
+                };
+
+                const size_t shared_block_column{
+                    thread_linear_idx % (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) * THREAD_TILE_SIZE_X
+                };
+
+                // we don't access BLOCK A since the leading dimension is Y which may not be vectorization friendly
+                // this is because we transposed the block to make it more friendly to bank conflict access
+                // Imagine Tile Size of 2 and warp size of 2
+                // Here is our Matrix
+                // [10 20 30 40 ]
+                // [30 40 50 60 ]
+                // [50 60 70 80 ]
+                // [70 80 90 100]
+                //
+                // Assume we had 4 threads
+                // [0, 1, 2, 3]
+                // Thread 0 and 1 will access 10 30 (columnwise); thread 2 and 3 will access 50 70 (columnwise)
+                // this results in a bank conflict
+                //
+                // Transposing we get
+                // [10 30 50 70]
+                // [20 40 60 80]
+                // [30 50 70 90]
+                // [40 60 80 100]
+                // Now accessing the values will result in a broadcast not a bankconflict
+
+                // #pragma unroll
+                for (size_t one_tile_idx{0}; one_tile_idx < THREAD_TILE_SIZE_Y; ++one_tile_idx) {
+                    one_cache[one_tile_idx] = mat_one_thread_block_tile_transposed[k][shared_block_row + one_tile_idx];
+                }
+
+                // #pragma unroll
+                for (size_t two_tile_idx{0}; two_tile_idx < vectorized_thread_tile_size_x; ++two_tile_idx) {
+                    const auto b_shared_ptr{
+                        reinterpret_cast<const int4 *>(&mat_two_thread_block_tile[k][shared_block_column]) +
+                        two_tile_idx
+                    };
+                    reinterpret_cast<int4 *>(two_cache)[two_tile_idx] = *b_shared_ptr;
+                }
+
+                for (size_t ki{0}; ki < THREAD_TILE_SIZE_Y; ++ki)
+                    for (size_t kj{0}; kj < THREAD_TILE_SIZE_X; ++kj)
+                        intermediates[ki][kj] += one_cache[ki] * two_cache[kj];
+            }
+            __syncthreads();
+        }
+
+        for (size_t y{0}; y < THREAD_TILE_SIZE_Y; ++y) {
+            const size_t dest_row{
+                blockIdx.y * BLOCK_TILE_SIZE_Y +
+                (thread_linear_idx / (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) * THREAD_TILE_SIZE_Y) + y
+            };
+
+            for (size_t x{0}; x < vectorized_thread_tile_size_x; ++x) {
+                const size_t dest_column{
+                    blockIdx.x * BLOCK_TILE_SIZE_X +
+                    (thread_linear_idx % (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) * THREAD_TILE_SIZE_X) +
+                    x * units_per_vector
+                };
+
+                auto dest_ptr{reinterpret_cast<int4 *>(&matrix_dest[dest_row * row_stride_dest + dest_column])};
+                auto tile_ptr{reinterpret_cast<int4 *>(&intermediates[y][0]) + x};
+
+                if (dest_row < mat_one_rows && dest_column < mat_two_columns) {
+                    for (size_t i{0}; i < units_per_vector; ++i) {
+                        reinterpret_cast<T *>(tile_ptr)[i] = reinterpret_cast<T *>(tile_ptr)[i] * alpha +
+                                                             reinterpret_cast<T *>(dest_ptr)[i] * beta;
+                    }
+                    *dest_ptr = *tile_ptr;
+                }
+            }
+        }
+    }
+
 
     template<typename T>
     static void gemm_dispatch(
@@ -708,50 +1010,126 @@ namespace cobraml::core {
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
+            case 5: {
+                constexpr uint BLOCK_TILE_SIZE_X{128};
+                constexpr uint BLOCK_TILE_SIZE_Y{128};
+                constexpr uint BLOCK_TILE_SIZE_K{16};
+
+                constexpr uint THREAD_TILE_SIZE_Y{8};
+                constexpr uint THREAD_TILE_SIZE_X{8};
+
+                constexpr uint NUM_THREADS_PER_BLOCK{
+                    BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y / (THREAD_TILE_SIZE_Y * THREAD_TILE_SIZE_X)
+                };
+
+                static_assert(BLOCK_TILE_SIZE_X % THREAD_TILE_SIZE_X == 0);
+                static_assert(BLOCK_TILE_SIZE_Y % THREAD_TILE_SIZE_Y == 0);
+
+                static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_K == 0);
+                static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_X == 0);
+
+                static_assert(BLOCK_TILE_SIZE_K * BLOCK_TILE_SIZE_Y % NUM_THREADS_PER_BLOCK == 0);
+                static_assert(BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_K % NUM_THREADS_PER_BLOCK == 0);
+
+                constexpr dim3 block_dim(NUM_THREADS_PER_BLOCK);
+                const dim3 grid_dim{
+                    ceil_div(static_cast<uint>(mat_two_columns), BLOCK_TILE_SIZE_X),
+                    ceil_div(static_cast<uint>(mat_one_rows), BLOCK_TILE_SIZE_Y)
+                };
+
+                gemm_2DBT_2DTT_vload<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_X,
+                    THREAD_TILE_SIZE_Y><<<grid_dim, block_dim>>>(
+                    matrix_one,
+                    matrix_two,
+                    matrix_dest,
+                    alpha,
+                    beta,
+                    mat_one_rows,
+                    mat_two_columns,
+                    shared,
+                    row_stride_one,
+                    row_stride_two,
+                    row_stride_dest);
+
+                CUDA_CHECK(cudaGetLastError());
+                return;
+            }
             default: {
                 throw std::runtime_error("invalid function provided");
             }
         }
 #else
+
+        // mainly dictates how much shared memory we use
         constexpr uint BLOCK_TILE_SIZE_X{128};
         constexpr uint BLOCK_TILE_SIZE_Y{128};
         constexpr uint BLOCK_TILE_SIZE_K{16};
 
+        // Each thread is responsible for computing a matrix block of c
+        // the size of which is THREAD_TILE_SIZE_Y x THREAD_TILE_SIZE_X
         constexpr uint THREAD_TILE_SIZE_Y{8};
         constexpr uint THREAD_TILE_SIZE_X{8};
 
+        // In total each block should compute BLOCK_TILE_SIZE_X x BLOCK_TILE_SIZE_Y
+        // elements of C, since each thread is responsible for BLOCK_TILE_SIZE_X x BLOCK_TILE_SIZE_Y
+        // we calculate the total threads based on that
         constexpr uint NUM_THREADS_PER_BLOCK{
             BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y / (THREAD_TILE_SIZE_Y * THREAD_TILE_SIZE_X)
         };
 
+        // we ensure that Tiles are evenly distributed among threads
         static_assert(BLOCK_TILE_SIZE_X % THREAD_TILE_SIZE_X == 0);
         static_assert(BLOCK_TILE_SIZE_Y % THREAD_TILE_SIZE_Y == 0);
 
+        // TODO why?
         static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_K == 0);
         static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_X == 0);
 
+        // This ensures that all threads are responsible for loading the same amount of data
         static_assert(BLOCK_TILE_SIZE_K * BLOCK_TILE_SIZE_Y % NUM_THREADS_PER_BLOCK == 0);
         static_assert(BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_K % NUM_THREADS_PER_BLOCK == 0);
 
+        // 1 dimensional thread count
         constexpr dim3 block_dim(NUM_THREADS_PER_BLOCK);
+
         const dim3 grid_dim{
             ceil_div(static_cast<uint>(mat_two_columns), BLOCK_TILE_SIZE_X),
             ceil_div(static_cast<uint>(mat_one_rows), BLOCK_TILE_SIZE_Y)
         };
 
-        gemm_2DBT_2DTT<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_Y,
-            THREAD_TILE_SIZE_X><<<grid_dim, block_dim>>>(
-            matrix_one,
-            matrix_two,
-            matrix_dest,
-            alpha,
-            beta,
-            mat_one_rows,
-            mat_two_columns,
-            shared,
-            row_stride_one,
-            row_stride_two,
-            row_stride_dest);
+        // vectorized loads only work when multiple loads are needed to satisfy a tile
+        // for example the load size we use int4 (4 ints = 16 bytes) tile size is 8 = 32 bytes
+        // two loads are required. Now lets say int8 which is 1 byte, tile size is 8 which is 8 bytes
+        // the load with int4 will result in 16 bytes being loaded which is 16 elements this is spillover
+        if constexpr (constexpr size_t byts{sizeof(T)}; byts < 2) {
+            gemm_2DBT_2DTT<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_Y,
+                THREAD_TILE_SIZE_X><<<grid_dim, block_dim>>>(
+                matrix_one,
+                matrix_two,
+                matrix_dest,
+                alpha,
+                beta,
+                mat_one_rows,
+                mat_two_columns,
+                shared,
+                row_stride_one,
+                row_stride_two,
+                row_stride_dest);
+        } else {
+            gemm_2DBT_2DTT_vload<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_X,
+                THREAD_TILE_SIZE_Y><<<grid_dim, block_dim>>>(
+                matrix_one,
+                matrix_two,
+                matrix_dest,
+                alpha,
+                beta,
+                mat_one_rows,
+                mat_two_columns,
+                shared,
+                row_stride_one,
+                row_stride_two,
+                row_stride_dest);
+        }
 
         CUDA_CHECK(cudaGetLastError());
 #endif

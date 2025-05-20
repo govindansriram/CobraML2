@@ -62,7 +62,7 @@ template<
         else if constexpr (std::is_same_v<T, int64_t>) printf("%lld ", vector[i]);
         else printf("%d ", vector[i]);
     }
-    printf("]");
+    printf("]\n");
 }
 
 template<

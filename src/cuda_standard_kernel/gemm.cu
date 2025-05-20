@@ -552,8 +552,8 @@ namespace cobraml::core {
         size_t BLOCK_TILE_SIZE_Y,
         size_t BLOCK_TILE_SIZE_K,
         size_t THREADS_PER_BLOCK,
-        size_t BLOCK_TILE_SKEW_SIZE_X = 0U,
-        size_t BLOCK_TILE_SKEW_SIZE_Y = 0U
+        size_t BLOCK_TILE_SKEW_SIZE_X = 0,
+        size_t BLOCK_TILE_SKEW_SIZE_Y = 0
     >
     __device__ void load_data_to_shared_memory_transposed_vectorized(
         const T *matrix_one,
@@ -570,27 +570,33 @@ namespace cobraml::core {
         VECTOR_TYPE v0
     ) {
         constexpr size_t units_per_vector{sizeof(VECTOR_TYPE) / sizeof(T)};
-#ifndef BENCHMARK
         static_assert(sizeof(VECTOR_TYPE) % sizeof(T) == 0);
+
+        // ensure there will be an even amount of vectorized loads
         static_assert(BLOCK_TILE_SIZE_X % units_per_vector == 0);
         static_assert(BLOCK_TILE_SIZE_K % units_per_vector == 0);
 
-        // ensure no additional bounds checks are required
+#ifndef BENCHMARK
+        // ensures leading dimensions are padded to handle additional reads
         assert(stride_one % units_per_vector == 0);
         assert(stride_two % units_per_vector == 0);
+#endif
 
         // We need to make sure the data alignment is correct.
         static_assert((BLOCK_TILE_SIZE_Y) * sizeof(T) % sizeof(VECTOR_TYPE) == 0U);
         static_assert((BLOCK_TILE_SIZE_X) * sizeof(T) % sizeof(VECTOR_TYPE) == 0U);
+
         static_assert((BLOCK_TILE_SIZE_Y + BLOCK_TILE_SKEW_SIZE_Y) * sizeof(T) % sizeof(VECTOR_TYPE) == 0U);
         static_assert((BLOCK_TILE_SIZE_X + BLOCK_TILE_SKEW_SIZE_X) * sizeof(T) % sizeof(VECTOR_TYPE) == 0U);
 
-#endif
-
+        // scaling the load number down to account for the vectorized size
         constexpr size_t VEC_BLOCK_TILE_SIZE_X{BLOCK_TILE_SIZE_X / units_per_vector};
         constexpr size_t VEC_BLOCK_TILE_SIZE_K{BLOCK_TILE_SIZE_K / units_per_vector};
 
-        constexpr size_t one_iterations{ceil_div(BLOCK_TILE_SIZE_Y * VEC_BLOCK_TILE_SIZE_K, THREADS_PER_BLOCK)};
+        // determines how many vectorized loads are performed per thread
+        constexpr size_t one_iterations{
+            ceil_div(BLOCK_TILE_SIZE_Y * VEC_BLOCK_TILE_SIZE_K, THREADS_PER_BLOCK)
+        };
 
 #pragma unroll
         for (size_t one_iter{0}; one_iter < one_iterations; ++one_iter) {
@@ -608,7 +614,6 @@ namespace cobraml::core {
                 const VECTOR_TYPE *mat_one_vec_ptr{
                     reinterpret_cast<const VECTOR_TYPE *>(matrix_one + (mat_one_row * stride_one) + mat_one_column)
                 };
-
                 mat_one_row_vector_vals = *mat_one_vec_ptr;
             }
 
@@ -644,7 +649,7 @@ namespace cobraml::core {
                 mat_two_row_vector_vals = *mat_two_vec_ptr;
             }
 
-            if (mat_two_row < BLOCK_TILE_SIZE_K && mat_two_column < BLOCK_TILE_SIZE_X) {
+            if (two_shared_row < BLOCK_TILE_SIZE_K && two_shared_column < BLOCK_TILE_SIZE_X) {
                 *reinterpret_cast<VECTOR_TYPE *>(&two_shared[two_shared_row][two_shared_column]) =
                         mat_two_row_vector_vals;
             }
@@ -670,13 +675,15 @@ namespace cobraml::core {
         const size_t row_stride_one,
         const size_t row_stride_two,
         const size_t row_stride_dest) {
+
         constexpr size_t THREADS_PER_BLOCK{
-            (BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y) / (THREAD_TILE_SIZE_X / THREAD_TILE_SIZE_Y)
+            (BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y) / (THREAD_TILE_SIZE_X * THREAD_TILE_SIZE_Y)
         };
 
         // using 1 dimensional block
         const size_t thread_linear_idx{threadIdx.x};
 
+        // TRANSPOSED to avoid bank conflicts
         __shared__ T mat_one_thread_block_tile_transposed[BLOCK_TILE_SIZE_K][BLOCK_TILE_SIZE_Y];
         __shared__ T mat_two_thread_block_tile[BLOCK_TILE_SIZE_K][BLOCK_TILE_SIZE_X];
 
@@ -691,8 +698,14 @@ namespace cobraml::core {
         // register cached values of matrix two
         T two_cache[THREAD_TILE_SIZE_X] = {static_cast<T>(0)};
 
-        constexpr int4 zero_int4{0, 0, 0, 0};
         constexpr size_t units_per_vector{sizeof(int4) / sizeof(T)};
+
+        // ensure int4 can be event split up by the base TYPE necessary for conversion
+        static_assert(sizeof(int4) % sizeof(T) == 0);
+
+        // we will store data along these dimensions for vectorized storage they need to be divisible
+        static_assert(BLOCK_TILE_SIZE_K % units_per_vector == 0);
+        static_assert(BLOCK_TILE_SIZE_X % units_per_vector == 0);
         constexpr size_t vectorized_thread_tile_size_x{THREAD_TILE_SIZE_X / units_per_vector};
 
         for (size_t iter{0}; iter < total_iters; ++iter) {
@@ -714,7 +727,7 @@ namespace cobraml::core {
                 shared,
                 iter,
                 thread_linear_idx,
-                zero_int4
+                int4{0, 0, 0, 0}
             );
 
             __syncthreads();
@@ -761,7 +774,7 @@ namespace cobraml::core {
                         reinterpret_cast<const int4 *>(&mat_two_thread_block_tile[k][shared_block_column]) +
                         two_tile_idx
                     };
-                    reinterpret_cast<int4 *>(two_cache)[shared_block_column] = *b_shared_ptr;
+                    reinterpret_cast<int4 *>(two_cache)[two_tile_idx] = *b_shared_ptr;
                 }
 
                 for (size_t ki{0}; ki < THREAD_TILE_SIZE_Y; ++ki)
@@ -785,14 +798,15 @@ namespace cobraml::core {
                 };
 
                 auto dest_ptr{reinterpret_cast<int4 *>(&matrix_dest[dest_row * row_stride_dest + dest_column])};
-                auto tile_ptr{reinterpret_cast<int4 *>(&intermediates[x][0]) + x};
+                auto tile_ptr{reinterpret_cast<int4 *>(&intermediates[y][0]) + x};
 
-                for (size_t i{0}; i < units_per_vector; ++i) {
-                    reinterpret_cast<T *>(tile_ptr)[i] = reinterpret_cast<T *>(tile_ptr)[i] * alpha +
-                                                         reinterpret_cast<T *>(dest_ptr)[i] * beta;
+                if (dest_row < mat_one_rows && dest_column < mat_two_columns) {
+                    for (size_t i{0}; i < units_per_vector; ++i) {
+                        reinterpret_cast<T *>(tile_ptr)[i] = reinterpret_cast<T *>(tile_ptr)[i] * alpha +
+                                                             reinterpret_cast<T *>(dest_ptr)[i] * beta;
+                    }
+                    *dest_ptr = *tile_ptr;
                 }
-
-                if (dest_row < mat_one_rows && dest_column < mat_two_columns) *dest_ptr = *tile_ptr;
             }
         }
     }
@@ -1045,27 +1059,39 @@ namespace cobraml::core {
             }
         }
 #else
+
+        // mainly dictates how much shared memory we use
         constexpr uint BLOCK_TILE_SIZE_X{128};
         constexpr uint BLOCK_TILE_SIZE_Y{128};
         constexpr uint BLOCK_TILE_SIZE_K{16};
 
+        // Each thread is responsible for computing a matrix block of c
+        // the size of which is THREAD_TILE_SIZE_Y x THREAD_TILE_SIZE_X
         constexpr uint THREAD_TILE_SIZE_Y{8};
         constexpr uint THREAD_TILE_SIZE_X{8};
 
+        // In total each block should compute BLOCK_TILE_SIZE_X x BLOCK_TILE_SIZE_Y
+        // elements of C, since each thread is responsible for BLOCK_TILE_SIZE_X x BLOCK_TILE_SIZE_Y
+        // we calculate the total threads based on that
         constexpr uint NUM_THREADS_PER_BLOCK{
             BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y / (THREAD_TILE_SIZE_Y * THREAD_TILE_SIZE_X)
         };
 
+        // we ensure that Tiles are evenly distributed among threads
         static_assert(BLOCK_TILE_SIZE_X % THREAD_TILE_SIZE_X == 0);
         static_assert(BLOCK_TILE_SIZE_Y % THREAD_TILE_SIZE_Y == 0);
 
+        // TODO why?
         static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_K == 0);
         static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_X == 0);
 
+        // This ensures that all threads are responsible for loading the same amount of data
         static_assert(BLOCK_TILE_SIZE_K * BLOCK_TILE_SIZE_Y % NUM_THREADS_PER_BLOCK == 0);
         static_assert(BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_K % NUM_THREADS_PER_BLOCK == 0);
 
+        // 1 dimensional thread count
         constexpr dim3 block_dim(NUM_THREADS_PER_BLOCK);
+
         const dim3 grid_dim{
             ceil_div(static_cast<uint>(mat_two_columns), BLOCK_TILE_SIZE_X),
             ceil_div(static_cast<uint>(mat_one_rows), BLOCK_TILE_SIZE_Y)

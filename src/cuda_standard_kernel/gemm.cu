@@ -1,3 +1,5 @@
+#include <assert.h>
+
 #include "cuda_math.h"
 #include "cuda_helpers.h"
 #include "cuda_device_helpers.cuh"
@@ -546,7 +548,6 @@ namespace cobraml::core {
     template<
         typename T,
         typename VECTOR_TYPE = int4,
-        VECTOR_TYPE V_ZERO,
         size_t BLOCK_TILE_SIZE_X,
         size_t BLOCK_TILE_SIZE_Y,
         size_t BLOCK_TILE_SIZE_K,
@@ -565,7 +566,8 @@ namespace cobraml::core {
         const size_t mat_two_columns,
         const size_t shared,
         const uint iteration,
-        const uint thread_linear_idx
+        const uint thread_linear_idx,
+        VECTOR_TYPE v0
     ) {
         constexpr size_t units_per_vector{sizeof(VECTOR_TYPE) / sizeof(T)};
 #ifndef BENCHMARK
@@ -574,8 +576,8 @@ namespace cobraml::core {
         static_assert(BLOCK_TILE_SIZE_K % units_per_vector == 0);
 
         // ensure no additional bounds checks are required
-        static_assert(stride_one % units_per_vector == 0);
-        static_assert(stride_two % units_per_vector == 0);
+        assert(stride_one % units_per_vector == 0);
+        assert(stride_two % units_per_vector == 0);
 
         // We need to make sure the data alignment is correct.
         static_assert((BLOCK_TILE_SIZE_Y) * sizeof(T) % sizeof(VECTOR_TYPE) == 0U);
@@ -600,11 +602,11 @@ namespace cobraml::core {
             const size_t mat_one_row{blockIdx.y * BLOCK_TILE_SIZE_Y + one_shared_row};
             const size_t mat_one_column{iteration * BLOCK_TILE_SIZE_K + one_shared_column};
 
-            VECTOR_TYPE mat_one_row_vector_vals{V_ZERO};
+            VECTOR_TYPE mat_one_row_vector_vals{v0};
 
             if (mat_one_row < mat_one_rows && mat_one_column < shared) {
                 const VECTOR_TYPE *mat_one_vec_ptr{
-                    reinterpret_cast<VECTOR_TYPE *>(matrix_one + (mat_one_row * stride_one) + mat_one_column)
+                    reinterpret_cast<const VECTOR_TYPE *>(matrix_one + (mat_one_row * stride_one) + mat_one_column)
                 };
 
                 mat_one_row_vector_vals = *mat_one_vec_ptr;
@@ -632,18 +634,18 @@ namespace cobraml::core {
             const size_t mat_two_row{iteration * BLOCK_TILE_SIZE_K + two_shared_row};
             const size_t mat_two_column{blockIdx.x * BLOCK_TILE_SIZE_X + two_shared_column};
 
-            VECTOR_TYPE mat_two_row_vector_vals{V_ZERO};
+            VECTOR_TYPE mat_two_row_vector_vals{v0};
 
             if (mat_two_row < shared && mat_two_column < mat_two_columns) {
                 const VECTOR_TYPE *mat_two_vec_ptr{
-                    reinterpret_cast<VECTOR_TYPE *>(matrix_two + (mat_two_row * stride_two) + mat_two_column)
+                    reinterpret_cast<const VECTOR_TYPE *>(matrix_two + (mat_two_row * stride_two) + mat_two_column)
                 };
 
                 mat_two_row_vector_vals = *mat_two_vec_ptr;
             }
 
             if (mat_two_row < BLOCK_TILE_SIZE_K && mat_two_column < BLOCK_TILE_SIZE_X) {
-                *reinterpret_cast<VECTOR_TYPE *>(two_shared[two_shared_row][two_shared_column]) =
+                *reinterpret_cast<VECTOR_TYPE *>(&two_shared[two_shared_row][two_shared_column]) =
                         mat_two_row_vector_vals;
             }
         }
@@ -696,7 +698,6 @@ namespace cobraml::core {
         for (size_t iter{0}; iter < total_iters; ++iter) {
             load_data_to_shared_memory_transposed_vectorized<
                 T, int4,
-                zero_int4,
                 BLOCK_TILE_SIZE_X,
                 BLOCK_TILE_SIZE_Y,
                 BLOCK_TILE_SIZE_K,
@@ -712,7 +713,8 @@ namespace cobraml::core {
                 mat_two_columns,
                 shared,
                 iter,
-                thread_linear_idx
+                thread_linear_idx,
+                zero_int4
             );
 
             __syncthreads();
@@ -756,7 +758,8 @@ namespace cobraml::core {
                 // #pragma unroll
                 for (size_t two_tile_idx{0}; two_tile_idx < vectorized_thread_tile_size_x; ++two_tile_idx) {
                     const auto b_shared_ptr{
-                        reinterpret_cast<const int4 *>(mat_two_thread_block_tile[k][shared_block_column]) + two_tile_idx
+                        reinterpret_cast<const int4 *>(&mat_two_thread_block_tile[k][shared_block_column]) +
+                        two_tile_idx
                     };
                     reinterpret_cast<int4 *>(two_cache)[shared_block_column] = *b_shared_ptr;
                 }
@@ -769,20 +772,24 @@ namespace cobraml::core {
         }
 
         for (size_t y{0}; y < THREAD_TILE_SIZE_Y; ++y) {
-            const size_t dest_row{blockIdx.y * BLOCK_TILE_SIZE_Y +
-                (thread_linear_idx / (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) * THREAD_TILE_SIZE_Y) + y};
+            const size_t dest_row{
+                blockIdx.y * BLOCK_TILE_SIZE_Y +
+                (thread_linear_idx / (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) * THREAD_TILE_SIZE_Y) + y
+            };
 
             for (size_t x{0}; x < vectorized_thread_tile_size_x; ++x) {
-                const size_t dest_column{blockIdx.x * BLOCK_TILE_SIZE_X +
+                const size_t dest_column{
+                    blockIdx.x * BLOCK_TILE_SIZE_X +
                     (thread_linear_idx % (BLOCK_TILE_SIZE_X / THREAD_TILE_SIZE_X) * THREAD_TILE_SIZE_X) +
-                        x * units_per_vector};
+                    x * units_per_vector
+                };
 
                 auto dest_ptr{reinterpret_cast<int4 *>(&matrix_dest[dest_row * row_stride_dest + dest_column])};
                 auto tile_ptr{reinterpret_cast<int4 *>(&intermediates[x][0]) + x};
 
                 for (size_t i{0}; i < units_per_vector; ++i) {
                     reinterpret_cast<T *>(tile_ptr)[i] = reinterpret_cast<T *>(tile_ptr)[i] * alpha +
-                        reinterpret_cast<T *>(dest_ptr)[i] * beta;
+                                                         reinterpret_cast<T *>(dest_ptr)[i] * beta;
                 }
 
                 if (dest_row < mat_one_rows && dest_column < mat_two_columns) *dest_ptr = *tile_ptr;
@@ -1064,19 +1071,39 @@ namespace cobraml::core {
             ceil_div(static_cast<uint>(mat_one_rows), BLOCK_TILE_SIZE_Y)
         };
 
-        gemm_2DBT_2DTT<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_Y,
-            THREAD_TILE_SIZE_X><<<grid_dim, block_dim>>>(
-            matrix_one,
-            matrix_two,
-            matrix_dest,
-            alpha,
-            beta,
-            mat_one_rows,
-            mat_two_columns,
-            shared,
-            row_stride_one,
-            row_stride_two,
-            row_stride_dest);
+        // vectorized loads only work when multiple loads are needed to satisfy a tile
+        // for example the load size we use int4 (4 ints = 16 bytes) tile size is 8 = 32 bytes
+        // two loads are required. Now lets say int8 which is 1 byte, tile size is 8 which is 8 bytes
+        // the load with int4 will result in 16 bytes being loaded which is 16 elements this is spillover
+        if constexpr (constexpr size_t byts{sizeof(T)}; byts < 2) {
+            gemm_2DBT_2DTT<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_Y,
+                THREAD_TILE_SIZE_X><<<grid_dim, block_dim>>>(
+                matrix_one,
+                matrix_two,
+                matrix_dest,
+                alpha,
+                beta,
+                mat_one_rows,
+                mat_two_columns,
+                shared,
+                row_stride_one,
+                row_stride_two,
+                row_stride_dest);
+        } else {
+            gemm_2DBT_2DTT_vload<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_X,
+                THREAD_TILE_SIZE_Y><<<grid_dim, block_dim>>>(
+                matrix_one,
+                matrix_two,
+                matrix_dest,
+                alpha,
+                beta,
+                mat_one_rows,
+                mat_two_columns,
+                shared,
+                row_stride_one,
+                row_stride_two,
+                row_stride_dest);
+        }
 
         CUDA_CHECK(cudaGetLastError());
 #endif

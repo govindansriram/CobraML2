@@ -1207,11 +1207,9 @@ namespace cobraml::core {
 
             // #pragma unroll
             for (size_t k{0}; k < BLOCK_TILE_SIZE_K; ++k) {
-
                 // we need to start filling the one matrix cache
                 // #pragma unroll
                 for (size_t y_cache_idx{0}; y_cache_idx < NUM_CACHES_PER_WARP_Y; ++y_cache_idx) {
-
                     // Here we calculate the row in the shared block based on the warp coordinates
                     // and the thread coordinates
 
@@ -1272,22 +1270,63 @@ namespace cobraml::core {
 
                 // compute intermediates
                 // #pragma unroll
-                for (size_t i{0}; i < NUM_CACHES_PER_WARP_Y; ++i) {
+                for (size_t y_cache_idx{0}; y_cache_idx < NUM_CACHES_PER_WARP_Y; ++y_cache_idx) {
                     // #pragma unroll
-                    for (size_t j{0}; j < NUM_CACHES_PER_WARP_X; ++j) {
+                    for (size_t x_cache_idx{0}; x_cache_idx < NUM_CACHES_PER_WARP_X; ++x_cache_idx) {
                         // #pragma unroll
-                        for (size_t ii{0}; ii < THREAD_TILE_SIZE_Y; ++ii) {
-                            T one_cache_value{one_cache_value[i][ii]};
+                        for (size_t one_cache_idx{0}; one_cache_idx < THREAD_TILE_SIZE_Y; ++one_cache_idx) {
+                            T one_cache_value{one_cache_value[y_cache_idx][one_cache_idx]};
                             // #pragma unroll
-                            for (size_t jj{0}; jj < THREAD_TILE_SIZE_X; ++jj) {
-                                intermediates[i][j][ii][jj] =
-                                    one_cache_value * two_cache[j][jj];
+                            for (size_t two_cache_index{0}; two_cache_index < THREAD_TILE_SIZE_X; ++two_cache_index) {
+                                intermediates[y_cache_idx][x_cache_idx][one_cache_idx][two_cache_index] =
+                                        one_cache_value * two_cache[x_cache_idx][two_cache_index];
                             }
                         }
                     }
                 }
             }
             __syncthreads();
+        }
+
+        // vectorized store back into the dest matrix
+        // #pragma unroll
+        for (size_t y_cache_idx{0}; y_cache_idx < NUM_CACHES_PER_WARP_Y; ++y_cache_idx) {
+            // #pragma unroll
+            for (size_t x_cache_idx{0}; x_cache_idx < NUM_CACHES_PER_WARP_X; ++x_cache_idx) {
+                // #pragma unroll
+                for (size_t one_cache_idx{0}; one_cache_idx < THREAD_TILE_SIZE_Y; ++one_cache_idx) {
+
+                    const size_t dest_row{
+                        BLOCK_TILE_SIZE_Y * blockIdx.y +
+                        warp_row_idx * WARP_TILE_SIZE_Y +
+                        y_cache_idx * (WARP_TILE_SIZE_Y / NUM_CACHES_PER_WARP_Y) +
+                        thread_idx_in_warp_row * THREAD_TILE_SIZE_Y + one_cache_idx
+                    };
+
+                    const size_t dest_column{
+                        BLOCK_TILE_SIZE_X * blockIdx.x +
+                        warp_col_idx * WARP_TILE_SIZE_X +
+                        x_cache_idx * (WARP_TILE_SIZE_X / NUM_CACHES_PER_WARP_X) +
+                        thread_idx_in_warp_column * THREAD_TILE_SIZE_X
+                    };
+
+                    auto dest_ptr{&matrix_dest[dest_row * row_stride_dest + dest_column]};
+                    auto tile_ptr{&intermediates[y_cache_idx][x_cache_idx][one_cache_idx]};
+
+                    // #pragma unroll
+                    for (size_t two_cache_vec_idx{0}; two_cache_vec_idx < vectorized_thread_tile_size_x; ++two_cache_vec_idx) {
+                        if (dest_row < mat_one_rows && (dest_column + two_cache_vec_idx * units_per_vector < mat_two_columns)) {
+#pragma unroll
+                            for (size_t tile_idx{0}; tile_idx < units_per_vector; ++tile_idx) {
+                                tile_ptr[tile_idx] = tile_ptr[tile_idx] * alpha + dest_ptr[tile_idx] * beta;
+                            }
+
+                            reinterpret_cast<int4 *>(dest_ptr)[two_cache_vec_idx] =
+                                    reinterpret_cast<int4 *>(tile_ptr)[two_cache_vec_idx];
+                        }
+                    }
+                }
+            }
         }
     }
 

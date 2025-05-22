@@ -995,7 +995,7 @@ namespace cobraml::core {
                 for (size_t one_tile_idx{0}; one_tile_idx < vectorized_thread_tile_size_y; ++one_tile_idx) {
                     const auto a_shared_ptr{
                         reinterpret_cast<const int4 *>(&mat_one_thread_block_tile_transposed[k][shared_block_row]) +
-                            one_tile_idx
+                        one_tile_idx
                     };
 
                     reinterpret_cast<int4 *>(one_cache)[one_tile_idx] = *a_shared_ptr;
@@ -1046,6 +1046,286 @@ namespace cobraml::core {
                                                              reinterpret_cast<T *>(dest_ptr)[i] * beta;
                     }
                     *dest_ptr = *tile_ptr;
+                }
+            }
+        }
+    }
+
+    template<
+        typename T,
+        size_t BLOCK_TILE_SIZE_X,
+        size_t BLOCK_TILE_SIZE_Y,
+        size_t BLOCK_TILE_SIZE_K,
+        size_t WARP_TILE_SIZE_X,
+        size_t WARP_TILE_SIZE_Y,
+        size_t THREAD_TILE_SIZE_X,
+        size_t THREAD_TILE_SIZE_Y,
+        size_t NUM_THREADS_PER_WARP_X,
+        size_t NUM_THREADS_PER_WARP_Y
+    >
+    __global__ void gemm_2DBT_2DWT_2DTT_vload(
+        const T *matrix_one,
+        const T *matrix_two,
+        T *matrix_dest,
+        const T alpha,
+        const T beta,
+        const size_t mat_one_rows,
+        const size_t mat_two_columns,
+        const size_t shared,
+        const size_t row_stride_one,
+        const size_t row_stride_two,
+        const size_t row_stride_dest) {
+        __shared__ T mat_one_thread_block_tile_transposed[BLOCK_TILE_SIZE_K][BLOCK_TILE_SIZE_Y];
+        __shared__ T mat_two_thread_block_tile[BLOCK_TILE_SIZE_K][BLOCK_TILE_SIZE_X];
+
+        // One Warp TILE will be of size WARP_TILE_SIZE_X x WARP_TILE_SIZE_Y
+        // One Warp will be responsible for each Warp block, ideally multiple warp blocks
+        // will be able to fit in one regular block allowing multiple warps to exist per
+        // block
+
+        // EACH block computes BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y outputs of C
+
+        // max threads per warp is 32, so we ensure that the warp block also complies
+        // with this.
+        static_assert(NUM_THREADS_PER_WARP_X * NUM_THREADS_PER_WARP_Y == 32);
+
+        // We need to figure out a couple of things,
+        // 1) we need to figure out how many WARP Tiles will be present in
+        // the x and y direction similar as to calculating how many blocks will
+        // be in the grid for a GPU launch we are doing the same but making a block
+        // the grid and having our WARP TILE Be the new block
+        //
+        // 2) This is needed to calculate the total amount of THREADS per block in a
+        // constant way
+        constexpr size_t NUM_WARPS_PER_BLOCK_X{BLOCK_TILE_SIZE_X / WARP_TILE_SIZE_X};
+        static_assert(BLOCK_TILE_SIZE_X % WARP_TILE_SIZE_X == 0);
+
+        // repeat for y dimension
+        constexpr size_t NUM_WARPS_PER_BLOCK_Y{BLOCK_TILE_SIZE_Y / WARP_TILE_SIZE_Y};
+        static_assert(BLOCK_TILE_SIZE_Y % WARP_TILE_SIZE_Y == 0);
+
+        // so total amount of warp tiles in a block would be
+        // NUM_WARPS_PER_BLOCK_X * NUM_WARPS_PER_BLOCK_Y
+
+        // In the previous implementation each thread had 2 register caches
+        //
+        // one cache cached several values in the y dimension from matrix one, total
+        // elements are THREAD_TILE_SIZE_Y
+        //
+        // two cache cached several values in the x dimension from matrix two, total
+        // elements are THREAD_TILE_SIZE_X
+        //
+        // In the end these values were reused for multiplication computing a total
+        // of THREAD_TILE_SIZE_Y x THREAD_TILE_SIZE_X elements.
+        //
+        // Now that we are bounding warps to WARP_TILE sizes the amount of data being
+        // computed by each thread may go up. So we know need to adjust the amount
+        // of values being cached and computed to reflect this.
+        //
+        // We ideally want to keep our thread tile sizes consistent so we
+        // instead add an extra dimension to each cache
+        constexpr size_t NUM_CACHES_PER_WARP_X{
+            WARP_TILE_SIZE_X / (THREAD_TILE_SIZE_X * NUM_THREADS_PER_WARP_X)
+        };
+
+        // repeat for y TILE cache
+        constexpr size_t NUM_CACHES_PER_WARP_Y{
+            WARP_TILE_SIZE_Y / (THREAD_TILE_SIZE_Y * NUM_THREADS_PER_WARP_Y)
+        };
+
+        static_assert(WARP_TILE_SIZE_X % (THREAD_TILE_SIZE_X * NUM_THREADS_PER_WARP_X) == 0);
+        static_assert(WARP_TILE_SIZE_Y % (THREAD_TILE_SIZE_Y * NUM_THREADS_PER_WARP_Y) == 0);
+
+        // Now we create the caches with the extra dimension
+        T one_cache[NUM_CACHES_PER_WARP_Y][THREAD_TILE_SIZE_Y] = {static_cast<T>(0)};
+        T two_cache[NUM_CACHES_PER_WARP_X][THREAD_TILE_SIZE_X] = {static_cast<T>(0)};
+
+        // since we have more caches we will have more intermediates (values computed per thread)
+        // as well, so we add extra dimensions here as well reflecting this
+        T intermediates[NUM_CACHES_PER_WARP_Y][NUM_CACHES_PER_WARP_X][THREAD_TILE_SIZE_Y][
+            THREAD_TILE_SIZE_X] = {static_cast<T>(0)};
+
+        // now we can also easily calculate the total threads per block, needed for loading data
+        constexpr size_t THREADS_PER_BLOCK{NUM_WARPS_PER_BLOCK_X * NUM_WARPS_PER_BLOCK_Y * 32};
+
+        // this kernel should be launched with a 1d block so the linear dimension is just the threadidx.x
+        const size_t thread_linear_idx{threadIdx.x};
+
+        // the linear idx of the warp in the thread block
+        const size_t warp_linear_idx{thread_linear_idx / warpSize};
+
+        // Now lets figure out what warp that linear idx maps too (x, y)
+        const size_t warp_row_idx{warp_linear_idx / NUM_WARPS_PER_BLOCK_X};
+        const size_t warp_col_idx{warp_linear_idx % NUM_WARPS_PER_BLOCK_X};
+
+        // figure out what row and column we are in the warp
+        const size_t thread_linear_idx_in_warp{thread_linear_idx % warpSize};
+        const size_t thread_idx_in_warp_row{thread_linear_idx_in_warp / NUM_THREADS_PER_WARP_X};
+        const size_t thread_idx_in_warp_column{thread_linear_idx_in_warp % NUM_THREADS_PER_WARP_X};
+
+        constexpr size_t units_per_vector{sizeof(int4) / sizeof(T)};
+
+        // ensure int4 can be event split up by the base TYPE necessary for conversion
+        static_assert(sizeof(int4) % sizeof(T) == 0);
+
+        // we will store data along these dimensions for vectorized storage they need to be divisible
+        static_assert(BLOCK_TILE_SIZE_K % units_per_vector == 0);
+        static_assert(BLOCK_TILE_SIZE_X % units_per_vector == 0);
+
+        static_assert(THREAD_TILE_SIZE_X % units_per_vector == 0);
+        static_assert(THREAD_TILE_SIZE_Y % units_per_vector == 0);
+
+        // This determines how many vectorized loads we need to perform to fill one tile
+        constexpr size_t vectorized_thread_tile_size_x{THREAD_TILE_SIZE_X / units_per_vector};
+        constexpr size_t vectorized_thread_tile_size_y{THREAD_TILE_SIZE_Y / units_per_vector};
+
+        const size_t total_iters{ceil_div(shared, BLOCK_TILE_SIZE_K)};
+
+        for (size_t iter{0}; iter < total_iters; ++iter) {
+            load_data_to_shared_memory_transposed_vectorized<
+                T, int4,
+                BLOCK_TILE_SIZE_X,
+                BLOCK_TILE_SIZE_Y,
+                BLOCK_TILE_SIZE_K,
+                THREADS_PER_BLOCK
+            >(
+                matrix_one,
+                matrix_two,
+                row_stride_one,
+                row_stride_two,
+                mat_one_thread_block_tile_transposed,
+                mat_two_thread_block_tile,
+                mat_one_rows,
+                mat_two_columns,
+                shared,
+                iter,
+                thread_linear_idx,
+                int4{0, 0, 0, 0}
+            );
+
+            __syncthreads();
+
+            // #pragma unroll
+            for (size_t k{0}; k < BLOCK_TILE_SIZE_K; ++k) {
+                // we need to start filling the one matrix cache
+                // #pragma unroll
+                for (size_t y_cache_idx{0}; y_cache_idx < NUM_CACHES_PER_WARP_Y; ++y_cache_idx) {
+                    // Here we calculate the row in the shared block based on the warp coordinates
+                    // and the thread coordinates
+
+                    // To calculate the row we first multiply the warp block y coordinate by the
+                    // Warp y dimension scale on the grid scale this is equivalent to doing blockIdx.y * blockDim.y
+                    // Next based on what cache we are in we need to skip that many rows. We do this by multiplying the
+                    // y_cache_idx by (WARP_TILE_SIZE_Y / NUM_CACHES_PER_WARP_Y) this value is equivalent too
+                    // (THREAD_TILE_SIZE_Y * NUM_THREADS_PER_WARP_Y) which is how many distinct rows are processed per
+                    // one cache fill of warp tile. Finally, we add the row that this thread is part of in the warp.
+
+                    // each thread loads TILE_SIZE_Y
+                    // assuming this configuration NUM_THREADS_PER_WARP_X = 4, and NUM_THREADS_PER_WARP_Y = 8
+                    // we can assume this load pattern
+                    // Threads [0 to 3] load rows [0 to 7], Threads [4 to 7] load rows [8 to 15] ...
+                    // Threads [28 to 31] load rows [54 to 63], this would result in a bank conflict for each
+                    // new warp_row and a broadcast for all threads in warp row, but luckily
+                    // the shared memory is transposed resulting in only broadcasts
+                    const size_t one_shared_row_idx{
+                        warp_row_idx * WARP_TILE_SIZE_Y +
+                        y_cache_idx * (WARP_TILE_SIZE_Y / NUM_CACHES_PER_WARP_Y) +
+                        thread_idx_in_warp_row * THREAD_TILE_SIZE_Y
+                    };
+
+                    const auto one_shared_ptr{
+                        reinterpret_cast<int4 *>(&mat_one_thread_block_tile_transposed[k][one_shared_row_idx])
+                    };
+
+                    auto tile_ptr{
+                        reinterpret_cast<int4 *>(&one_cache[y_cache_idx])
+                    };
+
+                    // load into register cache one[y_cache_idx] with vectorized loads
+#pragma unroll
+                    for (size_t vy_iter{0}; vy_iter < vectorized_thread_tile_size_y; ++vy_iter)
+                        tile_ptr[vy_iter] = one_shared_ptr[vy_iter];
+                }
+
+                // #pragma unroll
+                for (size_t x_cache_id{0}; x_cache_id < NUM_CACHES_PER_WARP_X; ++x_cache_id) {
+                    const size_t two_shared_col_idx{
+                        warp_col_idx * WARP_TILE_SIZE_X +
+                        x_cache_id * (WARP_TILE_SIZE_X / NUM_CACHES_PER_WARP_X) +
+                        thread_idx_in_warp_column * THREAD_TILE_SIZE_X
+                    };
+
+                    const auto two_shared_ptr{
+                        reinterpret_cast<int4 *>(&mat_two_thread_block_tile[k][two_shared_col_idx])
+                    };
+
+                    auto tile_ptr{
+                        reinterpret_cast<int4 *>(&two_cache[x_cache_id])
+                    };
+
+#pragma unroll
+                    for (size_t vx_iter{0}; vx_iter < vectorized_thread_tile_size_x; ++vx_iter)
+                        tile_ptr[vx_iter] = two_shared_ptr[vx_iter];
+                }
+
+                // compute intermediates
+                // #pragma unroll
+                for (size_t y_cache_idx{0}; y_cache_idx < NUM_CACHES_PER_WARP_Y; ++y_cache_idx) {
+                    // #pragma unroll
+                    for (size_t x_cache_idx{0}; x_cache_idx < NUM_CACHES_PER_WARP_X; ++x_cache_idx) {
+                        // #pragma unroll
+                        for (size_t one_cache_idx{0}; one_cache_idx < THREAD_TILE_SIZE_Y; ++one_cache_idx) {
+                            T one_cache_value{one_cache[y_cache_idx][one_cache_idx]};
+                            // #pragma unroll
+                            for (size_t two_cache_index{0}; two_cache_index < THREAD_TILE_SIZE_X; ++two_cache_index) {
+                                intermediates[y_cache_idx][x_cache_idx][one_cache_idx][two_cache_index] +=
+                                        one_cache_value * two_cache[x_cache_idx][two_cache_index];
+                            }
+                        }
+                    }
+                }
+            }
+            __syncthreads();
+        }
+
+        // vectorized store back into the dest matrix
+        // #pragma unroll
+        for (size_t y_cache_idx{0}; y_cache_idx < NUM_CACHES_PER_WARP_Y; ++y_cache_idx) {
+            // #pragma unroll
+            for (size_t x_cache_idx{0}; x_cache_idx < NUM_CACHES_PER_WARP_X; ++x_cache_idx) {
+                // #pragma unroll
+                for (size_t one_cache_idx{0}; one_cache_idx < THREAD_TILE_SIZE_Y; ++one_cache_idx) {
+                    const size_t dest_row{
+                        BLOCK_TILE_SIZE_Y * blockIdx.y +
+                        warp_row_idx * WARP_TILE_SIZE_Y +
+                        y_cache_idx * (WARP_TILE_SIZE_Y / NUM_CACHES_PER_WARP_Y) +
+                        thread_idx_in_warp_row * THREAD_TILE_SIZE_Y + one_cache_idx
+                    };
+
+                    const size_t dest_column{
+                        BLOCK_TILE_SIZE_X * blockIdx.x +
+                        warp_col_idx * WARP_TILE_SIZE_X +
+                        x_cache_idx * (WARP_TILE_SIZE_X / NUM_CACHES_PER_WARP_X) +
+                        thread_idx_in_warp_column * THREAD_TILE_SIZE_X
+                    };
+
+                    auto dest_ptr{&matrix_dest[dest_row * row_stride_dest + dest_column]};
+                    T *tile_ptr{&intermediates[y_cache_idx][x_cache_idx][one_cache_idx][0]};
+
+                    // #pragma unroll
+                    for (size_t two_cache_vec_idx{0}; two_cache_vec_idx < vectorized_thread_tile_size_x; ++
+                         two_cache_vec_idx) {
+                        if (dest_row < mat_one_rows && (
+                                dest_column + two_cache_vec_idx * units_per_vector < mat_two_columns)) {
+#pragma unroll
+                            for (size_t tile_idx{0}; tile_idx < units_per_vector; ++tile_idx) {
+                                tile_ptr[tile_idx] = tile_ptr[tile_idx] * alpha + dest_ptr[tile_idx] * beta;
+                            }
+
+                            reinterpret_cast<int4 *>(dest_ptr)[two_cache_vec_idx] =
+                                    reinterpret_cast<int4 *>(tile_ptr)[two_cache_vec_idx];
+                        }
+                    }
                 }
             }
         }
@@ -1326,7 +1606,7 @@ namespace cobraml::core {
                 return;
             }
             case 6: {
-                                // mainly dictates how much shared memory we use
+                // mainly dictates how much shared memory we use
                 constexpr uint BLOCK_TILE_SIZE_X{128};
                 constexpr uint BLOCK_TILE_SIZE_Y{128};
                 constexpr uint BLOCK_TILE_SIZE_K{16};
@@ -1382,7 +1662,8 @@ namespace cobraml::core {
                         row_stride_two,
                         row_stride_dest);
                 } else {
-                    gemm_2DBT_2DTT_vload2<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_X,
+                    gemm_2DBT_2DTT_vload2<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_X
+                        ,
                         THREAD_TILE_SIZE_Y><<<grid_dim, block_dim>>>(
                         matrix_one,
                         matrix_two,
@@ -1400,54 +1681,143 @@ namespace cobraml::core {
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
+            case 7: {
+                constexpr uint BLOCK_TILE_SIZE_X{128};
+                constexpr uint BLOCK_TILE_SIZE_Y{128};
+                constexpr uint BLOCK_TILE_SIZE_K{16};
+
+                // the size of the warp tile block, each warp is responsible for computing
+                // this many elements
+                constexpr unsigned int WARP_TILE_SIZE_X{32};
+                constexpr unsigned int WARP_TILE_SIZE_Y{64};
+
+                // check if warp tile blocks fit evenly in the regular block
+                constexpr size_t NUM_WARPS_PER_BLOCK_X{BLOCK_TILE_SIZE_X / WARP_TILE_SIZE_X};
+                constexpr size_t NUM_WARPS_PER_BLOCK_Y{BLOCK_TILE_SIZE_Y / WARP_TILE_SIZE_Y};
+
+                static_assert(BLOCK_TILE_SIZE_X % WARP_TILE_SIZE_X == 0);
+                static_assert(BLOCK_TILE_SIZE_Y % WARP_TILE_SIZE_Y == 0);
+
+                // The size of the internal register caches
+                constexpr uint THREAD_TILE_SIZE_Y{8};
+                constexpr uint THREAD_TILE_SIZE_X{8};
+
+                // how many threads to allocate in each dimension, the product must
+                // be 32
+                constexpr unsigned int NUM_THREADS_PER_WARP_X{4};
+                constexpr unsigned int NUM_THREADS_PER_WARP_Y{8};
+
+                static_assert(NUM_THREADS_PER_WARP_X * NUM_THREADS_PER_WARP_Y == 32);
+
+                // ensure each thread stores the same amount of data in their tiles
+                static_assert(WARP_TILE_SIZE_X % (THREAD_TILE_SIZE_X * NUM_THREADS_PER_WARP_X) == 0);
+                static_assert(WARP_TILE_SIZE_Y % (THREAD_TILE_SIZE_Y * NUM_THREADS_PER_WARP_Y) == 0U);
+
+                const dim3 grid_dim{
+                    ceil_div(static_cast<uint>(mat_two_columns), BLOCK_TILE_SIZE_X),
+                    ceil_div(static_cast<uint>(mat_one_rows), BLOCK_TILE_SIZE_Y)
+                };
+
+                if constexpr (constexpr size_t byts{sizeof(T)}; byts < 2) {
+                    constexpr uint NUM_THREADS_PER_BLOCK{
+                        BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y / (THREAD_TILE_SIZE_Y * THREAD_TILE_SIZE_X)
+                    };
+
+                    constexpr dim3 block_dim(NUM_THREADS_PER_BLOCK);
+
+                    gemm_2DBT_2DTT<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_Y,
+                        THREAD_TILE_SIZE_X><<<grid_dim, block_dim>>>(
+                        matrix_one,
+                        matrix_two,
+                        matrix_dest,
+                        alpha,
+                        beta,
+                        mat_one_rows,
+                        mat_two_columns,
+                        shared,
+                        row_stride_one,
+                        row_stride_two,
+                        row_stride_dest);
+                }else {
+                    constexpr size_t NUM_THREADS_PER_BLOCK{32 * NUM_WARPS_PER_BLOCK_X * NUM_WARPS_PER_BLOCK_Y};
+                    constexpr dim3 block_dim(NUM_THREADS_PER_BLOCK);
+
+                    gemm_2DBT_2DWT_2DTT_vload<
+                        T,
+                        BLOCK_TILE_SIZE_X,
+                        BLOCK_TILE_SIZE_Y,
+                        BLOCK_TILE_SIZE_K,
+                        WARP_TILE_SIZE_X,
+                        WARP_TILE_SIZE_Y,
+                        THREAD_TILE_SIZE_X,
+                        THREAD_TILE_SIZE_Y,
+                        NUM_THREADS_PER_WARP_X,
+                        NUM_THREADS_PER_WARP_Y><<<grid_dim, block_dim>>>(
+                            matrix_one,
+                            matrix_two,
+                            matrix_dest,
+                            alpha,
+                            beta,
+                            mat_one_rows,
+                            mat_two_columns,
+                            shared,
+                            row_stride_one,
+                            row_stride_two,
+                            row_stride_dest
+                    );
+                }
+
+                CUDA_CHECK(cudaGetLastError());
+                return;
+            }
             default: {
                 throw std::runtime_error("invalid function provided");
             }
         }
 #else
-
-        // mainly dictates how much shared memory we use
         constexpr uint BLOCK_TILE_SIZE_X{128};
         constexpr uint BLOCK_TILE_SIZE_Y{128};
         constexpr uint BLOCK_TILE_SIZE_K{16};
 
-        // Each thread is responsible for computing a matrix block of c
-        // the size of which is THREAD_TILE_SIZE_Y x THREAD_TILE_SIZE_X
+        // the size of the warp tile block, each warp is responsible for computing
+        // this many elements
+        constexpr unsigned int WARP_TILE_SIZE_X{32};
+        constexpr unsigned int WARP_TILE_SIZE_Y{64};
+
+        // check if warp tile blocks fit evenly in the regular block
+        constexpr size_t NUM_WARPS_PER_BLOCK_X{BLOCK_TILE_SIZE_X / WARP_TILE_SIZE_X};
+        constexpr size_t NUM_WARPS_PER_BLOCK_Y{BLOCK_TILE_SIZE_Y / WARP_TILE_SIZE_Y};
+
+        static_assert(BLOCK_TILE_SIZE_X % WARP_TILE_SIZE_X == 0);
+        static_assert(BLOCK_TILE_SIZE_Y % WARP_TILE_SIZE_Y == 0);
+
+        // The size of the internal register caches
         constexpr uint THREAD_TILE_SIZE_Y{8};
         constexpr uint THREAD_TILE_SIZE_X{8};
 
-        // In total each block should compute BLOCK_TILE_SIZE_X x BLOCK_TILE_SIZE_Y
-        // elements of C, since each thread is responsible for BLOCK_TILE_SIZE_X x BLOCK_TILE_SIZE_Y
-        // we calculate the total threads based on that
-        constexpr uint NUM_THREADS_PER_BLOCK{
-            BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y / (THREAD_TILE_SIZE_Y * THREAD_TILE_SIZE_X)
-        };
+        // how many threads to allocate in each dimension, the product must
+        // be 32
+        constexpr unsigned int NUM_THREADS_PER_WARP_X{4};
+        constexpr unsigned int NUM_THREADS_PER_WARP_Y{8};
 
-        // we ensure that Tiles are evenly distributed among threads
-        static_assert(BLOCK_TILE_SIZE_X % THREAD_TILE_SIZE_X == 0);
-        static_assert(BLOCK_TILE_SIZE_Y % THREAD_TILE_SIZE_Y == 0);
+        static_assert(NUM_THREADS_PER_WARP_X * NUM_THREADS_PER_WARP_Y == 32);
 
-        // TODO why?
-        static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_K == 0);
-        static_assert(NUM_THREADS_PER_BLOCK % BLOCK_TILE_SIZE_X == 0);
-
-        // This ensures that all threads are responsible for loading the same amount of data
-        static_assert(BLOCK_TILE_SIZE_K * BLOCK_TILE_SIZE_Y % NUM_THREADS_PER_BLOCK == 0);
-        static_assert(BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_K % NUM_THREADS_PER_BLOCK == 0);
-
-        // 1 dimensional thread count
-        constexpr dim3 block_dim(NUM_THREADS_PER_BLOCK);
+        // ensure each thread stores the same amount of data in their tiles
+        static_assert(WARP_TILE_SIZE_X % (THREAD_TILE_SIZE_X * NUM_THREADS_PER_WARP_X) == 0);
+        static_assert(WARP_TILE_SIZE_Y % (THREAD_TILE_SIZE_Y * NUM_THREADS_PER_WARP_Y) == 0U);
 
         const dim3 grid_dim{
             ceil_div(static_cast<uint>(mat_two_columns), BLOCK_TILE_SIZE_X),
             ceil_div(static_cast<uint>(mat_one_rows), BLOCK_TILE_SIZE_Y)
         };
 
-        // vectorized loads only work when multiple loads are needed to satisfy a tile
-        // for example the load size we use int4 (4 ints = 16 bytes) tile size is 8 = 32 bytes
-        // two loads are required. Now lets say int8 which is 1 byte, tile size is 8 which is 8 bytes
-        // the load with int4 will result in 16 bytes being loaded which is 16 elements this is spillover
         if constexpr (constexpr size_t byts{sizeof(T)}; byts < 2) {
+            constexpr uint NUM_THREADS_PER_BLOCK{
+                BLOCK_TILE_SIZE_X * BLOCK_TILE_SIZE_Y / (THREAD_TILE_SIZE_Y * THREAD_TILE_SIZE_X)
+            };
+
+            constexpr dim3 block_dim(NUM_THREADS_PER_BLOCK);
+
             gemm_2DBT_2DTT<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_Y,
                 THREAD_TILE_SIZE_X><<<grid_dim, block_dim>>>(
                 matrix_one,
@@ -1462,8 +1832,20 @@ namespace cobraml::core {
                 row_stride_two,
                 row_stride_dest);
         } else {
-            gemm_2DBT_2DTT_vload2<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_X,
-                THREAD_TILE_SIZE_Y><<<grid_dim, block_dim>>>(
+            constexpr size_t NUM_THREADS_PER_BLOCK{32 * NUM_WARPS_PER_BLOCK_X * NUM_WARPS_PER_BLOCK_Y};
+            constexpr dim3 block_dim(NUM_THREADS_PER_BLOCK);
+
+            gemm_2DBT_2DWT_2DTT_vload<
+                T,
+                BLOCK_TILE_SIZE_X,
+                BLOCK_TILE_SIZE_Y,
+                BLOCK_TILE_SIZE_K,
+                WARP_TILE_SIZE_X,
+                WARP_TILE_SIZE_Y,
+                THREAD_TILE_SIZE_X,
+                THREAD_TILE_SIZE_Y,
+                NUM_THREADS_PER_WARP_X,
+                NUM_THREADS_PER_WARP_Y><<<grid_dim, block_dim>>>(
                 matrix_one,
                 matrix_two,
                 matrix_dest,
@@ -1474,7 +1856,8 @@ namespace cobraml::core {
                 shared,
                 row_stride_one,
                 row_stride_two,
-                row_stride_dest);
+                row_stride_dest
+            );
         }
 
         CUDA_CHECK(cudaGetLastError());

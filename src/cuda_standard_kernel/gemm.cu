@@ -1101,8 +1101,8 @@ namespace cobraml::core {
         static_assert(BLOCK_TILE_SIZE_X % WARP_TILE_SIZE_X == 0);
 
         // repeat for y dimension
-        // constexpr size_t NUM_WARPS_PER_BLOCK_Y{BLOCK_TILE_SIZE_Y / WARP_TILE_SIZE_Y};
-        // static_assert(BLOCK_TILE_SIZE_Y % WARP_TILE_SIZE_Y == 0);
+        constexpr size_t NUM_WARPS_PER_BLOCK_Y{BLOCK_TILE_SIZE_Y / WARP_TILE_SIZE_Y};
+        static_assert(BLOCK_TILE_SIZE_Y % WARP_TILE_SIZE_Y == 0);
 
         // so total amount of warp tiles in a block would be
         // NUM_WARPS_PER_BLOCK_X * NUM_WARPS_PER_BLOCK_Y
@@ -1143,10 +1143,10 @@ namespace cobraml::core {
         // since we have more caches we will have more intermediates (values computed per thread)
         // as well, so we add extra dimensions here as well reflecting this
         T intermediates[NUM_CACHES_PER_WARP_Y][NUM_CACHES_PER_WARP_X][THREAD_TILE_SIZE_Y][
-            THREAD_TILE_SIZE_X];
+            THREAD_TILE_SIZE_X] = {static_cast<T>(0)};
 
         // now we can also easily calculate the total threads per block, needed for loading data
-        constexpr size_t THREADS_PER_BLOCK{NUM_THREADS_PER_WARP_X * NUM_THREADS_PER_WARP_Y * 32};
+        constexpr size_t THREADS_PER_BLOCK{NUM_WARPS_PER_BLOCK_X * NUM_WARPS_PER_BLOCK_Y * 32};
 
         // this kernel should be launched with a 1d block so the linear dimension is just the threadidx.x
         const size_t thread_linear_idx{threadIdx.x};
@@ -1278,7 +1278,7 @@ namespace cobraml::core {
                             T one_cache_value{one_cache[y_cache_idx][one_cache_idx]};
                             // #pragma unroll
                             for (size_t two_cache_index{0}; two_cache_index < THREAD_TILE_SIZE_X; ++two_cache_index) {
-                                intermediates[y_cache_idx][x_cache_idx][one_cache_idx][two_cache_index] =
+                                intermediates[y_cache_idx][x_cache_idx][one_cache_idx][two_cache_index] +=
                                         one_cache_value * two_cache[x_cache_idx][two_cache_index];
                             }
                         }
@@ -1310,7 +1310,7 @@ namespace cobraml::core {
                     };
 
                     auto dest_ptr{&matrix_dest[dest_row * row_stride_dest + dest_column]};
-                    T * tile_ptr{&intermediates[y_cache_idx][x_cache_idx][one_cache_idx][0]};
+                    T *tile_ptr{&intermediates[y_cache_idx][x_cache_idx][one_cache_idx][0]};
 
                     // #pragma unroll
                     for (size_t two_cache_vec_idx{0}; two_cache_vec_idx < vectorized_thread_tile_size_x; ++
@@ -1606,7 +1606,7 @@ namespace cobraml::core {
                 return;
             }
             case 6: {
-                                // mainly dictates how much shared memory we use
+                // mainly dictates how much shared memory we use
                 constexpr uint BLOCK_TILE_SIZE_X{128};
                 constexpr uint BLOCK_TILE_SIZE_Y{128};
                 constexpr uint BLOCK_TILE_SIZE_K{16};
@@ -1662,7 +1662,8 @@ namespace cobraml::core {
                         row_stride_two,
                         row_stride_dest);
                 } else {
-                    gemm_2DBT_2DTT_vload2<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_X,
+                    gemm_2DBT_2DTT_vload2<T, BLOCK_TILE_SIZE_X, BLOCK_TILE_SIZE_Y, BLOCK_TILE_SIZE_K, THREAD_TILE_SIZE_X
+                        ,
                         THREAD_TILE_SIZE_Y><<<grid_dim, block_dim>>>(
                         matrix_one,
                         matrix_two,

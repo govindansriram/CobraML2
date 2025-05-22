@@ -33,6 +33,36 @@ namespace cobraml::core {
         }
     }
 
+    void gemm_cublas(
+        const float *matrix_one,
+        const float *matrix_two,
+        float *matrix_dest,
+        const float alpha,
+        const float beta,
+        const size_t mat_one_rows,
+        const size_t mat_two_columns,
+        const size_t shared,
+        const size_t row_stride_one,
+        const size_t row_stride_two,
+        const size_t row_stride_dest) {
+
+        cublasSgemm(
+            get_handle(),
+            CUBLAS_OP_T,
+            CUBLAS_OP_T,
+            static_cast<int>(mat_two_columns),
+            static_cast<int>(mat_one_rows),
+            static_cast<int>(shared),
+            &alpha,
+            matrix_two,
+            static_cast<int>(row_stride_two),
+            matrix_one,
+            static_cast<int>(row_stride_one),
+            &beta,
+            matrix_dest,
+            static_cast<int>(row_stride_dest));
+    }
+
     template<typename T>
     __global__ void gemm_tiled(
         const T *matrix_one,
@@ -1208,7 +1238,7 @@ namespace cobraml::core {
             // #pragma unroll
             for (size_t k{0}; k < BLOCK_TILE_SIZE_K; ++k) {
                 // we need to start filling the one matrix cache
-                // #pragma unroll
+#pragma unroll
                 for (size_t y_cache_idx{0}; y_cache_idx < NUM_CACHES_PER_WARP_Y; ++y_cache_idx) {
                     // Here we calculate the row in the shared block based on the warp coordinates
                     // and the thread coordinates
@@ -1242,12 +1272,12 @@ namespace cobraml::core {
                     };
 
                     // load into register cache one[y_cache_idx] with vectorized loads
-#pragma unroll
+                    // #pragma unroll
                     for (size_t vy_iter{0}; vy_iter < vectorized_thread_tile_size_y; ++vy_iter)
                         tile_ptr[vy_iter] = one_shared_ptr[vy_iter];
                 }
 
-                // #pragma unroll
+#pragma unroll
                 for (size_t x_cache_id{0}; x_cache_id < NUM_CACHES_PER_WARP_X; ++x_cache_id) {
                     const size_t two_shared_col_idx{
                         warp_col_idx * WARP_TILE_SIZE_X +
@@ -1263,17 +1293,17 @@ namespace cobraml::core {
                         reinterpret_cast<int4 *>(&two_cache[x_cache_id])
                     };
 
-#pragma unroll
+                    // #pragma unroll
                     for (size_t vx_iter{0}; vx_iter < vectorized_thread_tile_size_x; ++vx_iter)
                         tile_ptr[vx_iter] = two_shared_ptr[vx_iter];
                 }
 
                 // compute intermediates
-                // #pragma unroll
+#pragma unroll
                 for (size_t y_cache_idx{0}; y_cache_idx < NUM_CACHES_PER_WARP_Y; ++y_cache_idx) {
                     // #pragma unroll
                     for (size_t x_cache_idx{0}; x_cache_idx < NUM_CACHES_PER_WARP_X; ++x_cache_idx) {
-                        // #pragma unroll
+#pragma unroll
                         for (size_t one_cache_idx{0}; one_cache_idx < THREAD_TILE_SIZE_Y; ++one_cache_idx) {
                             T one_cache_value{one_cache[y_cache_idx][one_cache_idx]};
                             // #pragma unroll
@@ -1289,9 +1319,9 @@ namespace cobraml::core {
         }
 
         // vectorized store back into the dest matrix
-        // #pragma unroll
+#pragma unroll
         for (size_t y_cache_idx{0}; y_cache_idx < NUM_CACHES_PER_WARP_Y; ++y_cache_idx) {
-            // #pragma unroll
+#pragma unroll
             for (size_t x_cache_idx{0}; x_cache_idx < NUM_CACHES_PER_WARP_X; ++x_cache_idx) {
                 // #pragma unroll
                 for (size_t one_cache_idx{0}; one_cache_idx < THREAD_TILE_SIZE_Y; ++one_cache_idx) {
@@ -1317,7 +1347,7 @@ namespace cobraml::core {
                          two_cache_vec_idx) {
                         if (dest_row < mat_one_rows && (
                                 dest_column + two_cache_vec_idx * units_per_vector < mat_two_columns)) {
-#pragma unroll
+                            // #pragma unroll
                             for (size_t tile_idx{0}; tile_idx < units_per_vector; ++tile_idx) {
                                 tile_ptr[tile_idx] = tile_ptr[tile_idx] * alpha + dest_ptr[tile_idx] * beta;
                             }
@@ -1688,7 +1718,7 @@ namespace cobraml::core {
 
                 // the size of the warp tile block, each warp is responsible for computing
                 // this many elements
-                constexpr unsigned int WARP_TILE_SIZE_X{32};
+                constexpr unsigned int WARP_TILE_SIZE_X{64};
                 constexpr unsigned int WARP_TILE_SIZE_Y{64};
 
                 // check if warp tile blocks fit evenly in the regular block
@@ -1711,7 +1741,7 @@ namespace cobraml::core {
 
                 // ensure each thread stores the same amount of data in their tiles
                 static_assert(WARP_TILE_SIZE_X % (THREAD_TILE_SIZE_X * NUM_THREADS_PER_WARP_X) == 0);
-                static_assert(WARP_TILE_SIZE_Y % (THREAD_TILE_SIZE_Y * NUM_THREADS_PER_WARP_Y) == 0U);
+                static_assert(WARP_TILE_SIZE_Y % (THREAD_TILE_SIZE_Y * NUM_THREADS_PER_WARP_Y) == 0);
 
                 const dim3 grid_dim{
                     ceil_div(static_cast<uint>(mat_two_columns), BLOCK_TILE_SIZE_X),
@@ -1738,7 +1768,7 @@ namespace cobraml::core {
                         row_stride_one,
                         row_stride_two,
                         row_stride_dest);
-                }else {
+                } else {
                     constexpr size_t NUM_THREADS_PER_BLOCK{32 * NUM_WARPS_PER_BLOCK_X * NUM_WARPS_PER_BLOCK_Y};
                     constexpr dim3 block_dim(NUM_THREADS_PER_BLOCK);
 
@@ -1753,21 +1783,41 @@ namespace cobraml::core {
                         THREAD_TILE_SIZE_Y,
                         NUM_THREADS_PER_WARP_X,
                         NUM_THREADS_PER_WARP_Y><<<grid_dim, block_dim>>>(
-                            matrix_one,
-                            matrix_two,
-                            matrix_dest,
-                            alpha,
-                            beta,
-                            mat_one_rows,
-                            mat_two_columns,
-                            shared,
-                            row_stride_one,
-                            row_stride_two,
-                            row_stride_dest
+                        matrix_one,
+                        matrix_two,
+                        matrix_dest,
+                        alpha,
+                        beta,
+                        mat_one_rows,
+                        mat_two_columns,
+                        shared,
+                        row_stride_one,
+                        row_stride_two,
+                        row_stride_dest
                     );
                 }
 
                 CUDA_CHECK(cudaGetLastError());
+                return;
+            }
+            case 8: {
+                if constexpr (std::is_same_v<T, float>) {
+                    gemm_cublas(
+                    matrix_one,
+                    matrix_two,
+                    matrix_dest,
+                    alpha,
+                    beta,
+                    mat_one_rows,
+                    mat_two_columns,
+                    shared,
+                    row_stride_one,
+                    row_stride_two,
+                    row_stride_dest);
+
+                    CUDA_CHECK(cudaGetLastError());
+                    return;
+                }
                 return;
             }
             default: {
@@ -1781,7 +1831,7 @@ namespace cobraml::core {
 
         // the size of the warp tile block, each warp is responsible for computing
         // this many elements
-        constexpr unsigned int WARP_TILE_SIZE_X{32};
+        constexpr unsigned int WARP_TILE_SIZE_X{64};
         constexpr unsigned int WARP_TILE_SIZE_Y{64};
 
         // check if warp tile blocks fit evenly in the regular block

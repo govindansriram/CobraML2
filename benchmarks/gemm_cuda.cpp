@@ -6,7 +6,7 @@
 #include <benchmark/benchmark.h>
 #include <random>
 #include "enums.h"
-#include "brarray.h"
+#include "brarray.cuh"
 
 void cuda_gemm(benchmark::State &st) {
     size_t length{static_cast<size_t>(st.range(0))};

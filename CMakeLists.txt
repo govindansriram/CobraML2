@@ -25,7 +25,7 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(
         test_brarray
-        tests/test_brarray.cpp
+        tests/test_brarray.cu
 )
 
 function(setup_cuda_target target_name)

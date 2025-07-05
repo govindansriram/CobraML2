@@ -5,7 +5,7 @@
 #include <benchmark/benchmark.h>
 #include <random>
 #include "enums.h"
-#include "brarray.h"
+#include "brarray.cuh"
 
 namespace {
 

@@ -3,7 +3,7 @@
 //
 #include <gtest/gtest.h>
 #include "test.h"
-#include "brarray.h"
+#include "brarray.cuh"
 
 TEST(ArrayTestFunctionals, test_dtype) {
 

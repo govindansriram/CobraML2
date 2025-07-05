@@ -4,218 +4,82 @@
 
 #ifndef BARRAY_H
 #define BARRAY_H
-#include <memory>
+
 #include <vector>
-#include "enums.h"
+#include <cute/layout.hpp>
+#include <thrust/device_vector.h>
+#include <utility>
 
-namespace cobraml::core {
-#define PRINT_LIMIT 30
+namespace cobraml {
+    using namespace cute;
 
-    /**
-     * The Cobraml Array
-     */
+    template<
+        typename Shape,
+        typename Stride,
+        size_t... Modes>
+    static constexpr size_t calculate_memory_span_impl(
+        const Layout<Shape, Stride> &layout,
+        std::index_sequence<Modes...>) {
+        return (((shape<Modes>(layout) - 1) * stride<Modes>(layout)) + ... + 1);
+    }
+
+    template<
+        typename Shape,
+        typename Stride>
+    static constexpr size_t calculate_memory_span(Layout<Shape, Stride> layout) {
+        auto flattened_layout = flatten(layout);
+        constexpr size_t flattend_rank = rank(flattened_layout);
+        return calculate_memory_span_impl(flattened_layout, std::make_index_sequence<flattend_rank>{});
+    }
+
+    template<
+        typename ArrayType,
+        typename LayoutShape,
+        typename LayoutStride
+    >
     class Brarray {
-    protected:
-        struct ArrayImpl;
-        std::unique_ptr<ArrayImpl> impl;
+        Layout<LayoutShape, LayoutStride> layout_;
+        thrust::device_vector<ArrayType> buffer_{};
+
+        ArrayType *get_ptr() {
+            return buffer_.data().get();
+        }
 
     public:
-        Brarray(Device device, Dtype dtype, std::vector<size_t> const &shape);
-
-        virtual ~Brarray();
-
-        Brarray();
-
-        Brarray(const Brarray &other);
-
-        Brarray &operator=(const Brarray &other);
-
-        Brarray(Brarray &&other) noexcept;
-        Brarray& operator=(Brarray&& other) noexcept;
-
-        [[nodiscard]] virtual std::string to_string() const;
-
-        [[nodiscard]] bool is_vector() const;
-
-        [[nodiscard]] bool is_scalar_equivalent() const;
-
-        [[nodiscard]] bool is_matrix() const;
-
-        [[nodiscard]] Brarray to(Device device) const;
-
         /**
-         * @return the dtype of the brarray
+         * This constructor takes complete ownership of a buffer, leaving the original buffer
+         * invalid
+         * @param layout The CuTe Layout of the buffer
+         * @param buffer The underlying buffer
          */
-        [[nodiscard]] Dtype get_dtype() const;
+        Brarray(
+            const Layout<LayoutShape, LayoutStride> &layout,
+            thrust::device_vector<ArrayType> &buffer
+        ): layout_(layout), buffer_(std::move(buffer)) {
+            // rounds to nearest alignment value
+            const size_t memory_span{calculate_memory_span(layout_)};
+
+            if (memory_span > buffer_.size()) {
+                std::stringstream stream;
+
+                stream << "buffer does not have enough data to support layout " << layout
+                << " minimum required bytes are " << memory_span * sizeof(ArrayType)
+                << ", " << buffer_.size() * sizeof(ArrayType) << " was provided";
+
+                throw std::runtime_error(stream.str());
+            }
+        }
 
         /**
-        * @return the Device of the brarray
-        */
-        [[nodiscard]] Device get_device() const;
-
-        /**
-         * @return the Device of the brarray
+         * Allocate based on provided Layout with data provided from vector
+         * @param layout The CuTe Layout of the buffer
+         * @param vector The data that will be copied to device
          */
-        [[nodiscard]] std::vector<size_t> get_shape() const;
-
-        /**
-         * @return get the stride of the brarray
-         */
-        [[nodiscard]] std::vector<size_t> get_stride() const;
-
-
-        // Gradient Descent
-        void requires_grad(bool state);
-        void retain_grad(bool state);
-        [[nodiscard]] bool retain_grad() const;
-        [[nodiscard]] bool requires_grad() const;
-        Brarray& get_gradient();
-        void backwards();
-
-
-        [[nodiscard]] Brarray shared_copy() const;
-        [[nodiscard]] Brarray permute(const std::vector<size_t>& dims, bool requires_grad=true) const;
-
-        /**
-         * Hadamard Product (Element WIse Multiplication)
-         * @param other the Multiplier
-         * @return the element wise product
-         */
-        Brarray operator*(const Brarray & other) const;
-        Brarray operator+(const Brarray & other) const;
-
-        template<typename Dtype>
-        Brarray operator*(Dtype other) const;
-
-        template<typename Dtype>
-        Brarray operator+(Dtype other) const;
-        // Brarray operator-(const Brarray & other) const;
-
-        bool operator==(const Brarray& other) const;
-
-
-        /**
-         * provides access to the underlying buffer
-         * @tparam T the type that the ptr should be cast too, it must match the Dtype
-         * @return the raw ptr buffer
-         */
-        template<typename T>
-        T *get_buffer() const;
-
-        template<typename Type>
-        Brarray(Device device, Dtype dtype, std::vector<size_t> const &shape, const std::vector<Type> &data);
-
-        // Start of the Friend API
-        template<typename T>
-        friend void gemv(
-            Brarray &result,
-            const Brarray &matrix,
-            const Brarray &vector,
-            T alpha,
-            T beta);
-
-        template<typename T>
-        friend Brarray gemv(
-            const Brarray &matrix,
-            const Brarray &vector,
-            T alpha,
-            T beta);
-
-        // Start of the Friend API
-        template<typename T>
-        friend void gemm(
-            Brarray &result,
-            const Brarray &matrix,
-            const Brarray &other_matrix,
-            T alpha,
-            T beta);
-
-        template<typename T>
-        friend Brarray gemm(
-            const Brarray &matrix,
-            const Brarray &other_matrix,
-            T alpha,
-            T beta);
-
-        friend Brarray mult(const Brarray &input, const Brarray &other, bool track_gradients);
-        friend Brarray add(const Brarray &input, const Brarray &other, bool track_gradients);
-
-        template<typename Dtype>
-        friend void imult(Brarray &input, Dtype other);
-        friend void imult(Brarray &input, const Brarray &other);
-
-        template<typename Dtype>
-        friend void iadd(Brarray &input, Dtype other);
-        friend void iadd(Brarray &input, const Brarray &other);
-
-        friend Brarray pow(const Brarray &brarray, const Brarray &exponent, bool track_gradients);
-        friend void ipow(const Brarray &brarray, const Brarray &exponent);
-
-        friend void iadd(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
-
-        friend Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
-        friend void isub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients);
-
-        friend std::ostream &operator<<(std::ostream &outs, const Brarray &b);
-
-        // End of the Friend API
-
-        /**
-         * Gets the tensor present at that specific dimension shares data with the original tensor
-         * @param index the tensor to copy at that specific index
-         * @return the tensor at that index
-         */
-        Brarray operator[](size_t index) const;
-
-        template<typename Type>
-        Type item() const;
-
-        template<typename T>
-        void set_item(T value);
+        Brarray(
+            const Layout<LayoutShape, LayoutStride> &layout,
+            const std::vector<ArrayType> &vector): layout_(layout), buffer_(thrust::device_vector<ArrayType>(vector)) {
+        }
     };
-
-    template<typename T>
-    void gemv(
-        Brarray &result,
-        const Brarray &matrix,
-        const Brarray &vector,
-        T alpha,
-        T beta);
-
-    template<typename T>
-    Brarray gemv(
-        const Brarray &matrix,
-        const Brarray &vector,
-        T alpha,
-        T beta);
-
-    template<typename T>
-    void gemm(
-    Brarray &result,
-    const Brarray &matrix,
-    const Brarray &other_matrix,
-    T alpha,
-    T beta);
-
-    template<typename T>
-    Brarray gemm(
-        const Brarray &matrix,
-        const Brarray &other_matrix,
-        T alpha,
-        T beta);
-
-    Brarray mult(const Brarray &input, const Brarray &other, bool track_gradients=true);
-    void imult(Brarray &input, const Brarray &other);
-    template<typename Dtype>
-    void imult(Brarray &input, Dtype other);
-
-    Brarray add(const Brarray &input, const Brarray &other, bool track_gradients);
-    void iadd(Brarray &input, const Brarray &other);
-    template<typename Dtype>
-    void iadd(Brarray &input, Dtype other);
-
-    // Brarray pow(const Brarray &brarray, const Brarray &exponent, bool track_gradients=true);
-    // Brarray sub(const Brarray &brarray_one, const Brarray &brarray_two, bool track_gradients=true);
 }
 
 #endif //BARRAY_H

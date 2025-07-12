@@ -99,11 +99,15 @@ namespace cobraml {
             }
         }
 
-        ArrayType *get_ptr() {
+        const ArrayType *get_ptr() const{
             return buffer_.data().get();
         }
 
-        thrust::host_vector<ArrayType> to_host() {
+        ArrayType *get_ptr() {
+            return thrust::raw_pointer_cast(buffer_.data());
+        }
+
+        thrust::host_vector<ArrayType> to_host() const {
             thrust::host_vector<ArrayType> host_buffer{buffer_};
             return host_buffer;
         }

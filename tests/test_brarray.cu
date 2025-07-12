@@ -6,6 +6,8 @@
 #include "brarray.cuh"
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
+#include <cute/tensor.hpp>
+#include "kernels/lovelace/gemm.cuh"
 
 using namespace cobraml;
 
@@ -100,6 +102,18 @@ TEST(BrarrayTest, constructor_from_vector) {
 
         ASSERT_THROW(Brarray br(static_layout_right, buffer), std::runtime_error);
     }
+}
+
+TEST(BrarrayTest, visualize) {
+    constexpr Layout<Shape<_512, _256>, Stride<_256, _1>> layout_1{};
+    constexpr Layout<Shape<_1024, _256>, Stride<_256, _1>> layout_2{};
+    constexpr Layout<Shape<_512, _1024>, Stride<_1024, _1>> layout_3{};
+
+    const Brarray a(layout_1, half_t(108.1f));
+    const Brarray b(layout_2, half_t(9.9f));
+    Brarray c(layout_3, half_t(10.01f));
+
+    runner_tn(a, b, c);
 }
 
 //modify and test gemv

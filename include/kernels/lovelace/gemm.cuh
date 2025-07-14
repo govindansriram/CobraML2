@@ -91,45 +91,104 @@ namespace cobraml {
         Tensor global_tile_b{local_tile(global_tensor_b, cta_tiler, cta_coord, Step<X, _1, _1>{})};    // Shape: (BLK_N, BLK_K, k)
 
         // since K is X we omit it, and here we say we want blockIdx.x for m and blockIdx.y for n
-        Tensor global_tile_x{local_tile(global_tensor_c, cta_tiler, cta_coord, Step<_1, _1, X>{})};    // Shape: (BLK_M, BLK_N)
+        Tensor global_tile_c{local_tile(global_tensor_c, cta_tiler, cta_coord, Step<_1, _1, X>{})};    // Shape: (BLK_M, BLK_N)
 
         using SharedStorage = SharedStorage<half_t, half_t, SmemLayoutA, SmemLayoutB>;
-        SharedStorage& smem = *reinterpret_cast<SharedStorage*>(shared_memory);
-        Tensor sA = make_tensor(make_smem_ptr(smem.A.begin()), smem_layout_a);                         // (BLK_M,BLK_K,PIPE)
-        Tensor sB = make_tensor(make_smem_ptr(smem.B.begin()), smem_layout_b);                         // (BLK_N,BLK_K,PIPE)
+        SharedStorage& smem{*reinterpret_cast<SharedStorage*>(shared_memory)};
+        Tensor shared_a{make_tensor(make_smem_ptr(smem.A.begin()), smem_layout_a)};                    // (BLK_M,BLK_K,PIPE)
+        Tensor shared_b{make_tensor(make_smem_ptr(smem.B.begin()), smem_layout_b)};                    // (BLK_N,BLK_K,PIPE)
 
         // CopyA is the TiledCopyAtom, the get slice methods slices the
         // copy atom to encompass the copy responsibilities of a single thread,
         // that is what thr_copy_a does
-        ThrCopy thr_copy_a = copy_a.get_slice(threadIdx.x);
+        ThrCopy thr_copy_a{copy_a.get_slice(threadIdx.x)};
 
         // this is the source partition, we partition the source
-        // Tensor which is hte global tile a getting the tensor that
+        // Tensor which is the global tile a getting the tensor that
         // thread is responsible for
 
         // here's what the partition shape will look like
-        // k will be the same value as k in the parent tensor
-        // being partitioned as this represents the actual
-        // number of repetitions
+        // (CPY, CPY_Y, CPY_X, k)
 
-        // the Tiled Copy Layout may be smaller than the block size
-        // so CPY represents how many times the copy has to repeat in
-        // the x and y direction
-        Tensor tAgA = thr_copy_a.partition_S(global_tile_a);                                           // (CPY,CPY_M,CPY_K,k)
-        Tensor tAsA = thr_copy_a.partition_D(sA);                                                      // (CPY,CPY_M,CPY_K,PIPE)
+        // CPY represents the amount of elements being copied this is typically
+        // determined by the value layout
+
+        // if the TiledCopy Layout is smaller than the tile_layout it will need
+        // to be repeated in the x and y direction. That is what CPY_Y and CPY_X
+        // represents
+
+        // k will be the same value as the last dim in the parent tensor
+        Tensor thread_part_glob_a{thr_copy_a.partition_S(global_tile_a)};                              // (CPY, CPY_M, CPY_K, k)
+        Tensor thread_part_shared_a{thr_copy_a.partition_D(shared_a)};                                 // (CPY, CPY_M, CPY_K, PIPE)
+
+        ThrCopy thr_copy_b{copy_b.get_slice(threadIdx.x)};
+        Tensor thread_part_glob_b{thr_copy_b.partition_S(global_tile_b)};                              // (CPY, CPY_N, CPY_K, k)
+        Tensor thread_part_shared_b{thr_copy_b.partition_D(shared_b)};                                 // (CPY, CPY_N, CPY_K, PIPE)
+
+        CUTE_STATIC_ASSERT_V(size<1>(thread_part_glob_a) == size<1>(thread_part_shared_a));
+        CUTE_STATIC_ASSERT_V(size<2>(thread_part_glob_a) == size<2>(thread_part_shared_a));
+
+        CUTE_STATIC_ASSERT_V(size<1>(thread_part_glob_b) == size<1>(thread_part_shared_b));
+        CUTE_STATIC_ASSERT_V(size<2>(thread_part_glob_b) == size<2>(thread_part_shared_b));
+
+        auto K_PIPE_MAX{size<3>(thread_part_shared_a)};
+        int k_tile_count{size<3>(thread_part_glob_a)};
+        int k_tile_next{0};
+
+        CUTE_UNROLL
+        for (int k_pipe{0}; k_pipe < K_PIPE_MAX - 1; ++k_pipe) {
+            copy(copy_a, thread_part_glob_a(_, _, _, k_tile_next), thread_part_shared_a(_, _, _, k_pipe));
+            copy(copy_b, thread_part_glob_b(_, _, _, k_tile_next), thread_part_shared_b(_, _, _, k_pipe));
+            cp_async_fence();
+            --k_tile_count;
+            // cant use breaks inside loop
+            if (k_tile_count > 0){++k_tile_next;}
+        }
+
+        ThrMMA thr_mma{mma.get_slice(threadIdx.x)};
+
+        // this partitions global tensor c based on the mma atom
+        // it uses the same underlying buffer as the tensor
+        // it will be of size (MMA,MMA_M,MMA_N)
+        // MMA represents the shape of the data being held
+        // MMA_M is how many times the MMA repeats in the M Mode
+        // MMA_N is how many times the MMA repeats in the N Mode
+        // This is determined  by the Atom Layout, the larger the
+        // layout the fewer repetitions
+        Tensor thread_part_view_global_c{thr_mma.partition_C(global_tile_c)};
+
+        // fragments live in register and are allocated using the Array datatype
+        // partition fragment creates a fragment with the specified partition shape,
+        // since this is a fragment the underlying buffer is also an Array. The shape
+        // will be the same but all the data will be contiguous
+        Tensor thread_fragment_a{thr_mma.partition_fragment_A(shared_a(_, _, 0))};
+        Tensor thread_fragment_b{thr_mma.partition_fragment_B(shared_b(_, _, 0))};
+
+        // create a fragment the same size as the view
+        Tensor thread_accum_c{thr_mma.make_fragment_C(thread_part_view_global_c)};
+
+        clear(thread_accum_c);
+
+        CUTE_STATIC_ASSERT_V(shape(thread_accum_c) == shape(thread_part_view_global_c));          // (MMA, MMA_M, MMA_N)
+        CUTE_STATIC_ASSERT_V(size<1>(thread_part_view_global_c) == size<1>(thread_fragment_a));
+        CUTE_STATIC_ASSERT_V(size<2>(thread_part_view_global_c) == size<1>(thread_fragment_b));
 
 
 
         if ((blockIdx.x + blockIdx.y == 0) && (threadIdx.x + threadIdx.y == 0)) {
-            print(global_tensor_a);
+            print(shared_a);
             printf("\n");
-            print(sA);
+            print(shared_b);
             printf("\n");
-            print(global_tile_a);
+            print(shape(thread_accum_c));
             printf("\n");
-            print(tAgA);
+            print(shape(thread_fragment_a));
             printf("\n");
-            print(tAsA);
+            print(shape(thread_fragment_b));
+            // print(take<0, 3>(shape(thread_part_view_global_c)));
+            // print(thr_mma.partition_A(shared_a(_, _, 0)));
+            // printf("\n");
+            // print(thread_fragment_a);
         }
     }
 
@@ -152,7 +211,7 @@ namespace cobraml {
         constexpr auto bM{_128{}};
         constexpr auto bN{_128{}};
         constexpr auto bK{_64{}};
-        constexpr auto bP = Int<3>{}; // Pipeline
+        constexpr auto bP = _3{}; // Pipeline
 
         constexpr auto cta_tiler{make_shape(bM, bN, bK)};
 
@@ -166,7 +225,7 @@ namespace cobraml {
         auto s_b = tile_to_shape(swizzle_atom, make_shape(bN, bK, bP));
         auto s_c = make_layout(make_shape(bM, bN));
 
-
+        // make tiled_mma takes in 2 arguments
         constexpr TiledMMA mmaC = make_tiled_mma(SM80_16x8x8_F16F16F16F16_TN{},
                                                  Layout<Shape<_2, _2> >{}, // 2x2x1 MMA Atoms
                                                  Tile<_32, _32, _16>{}); // 32x32x16 Tiled MMA for LDSM
@@ -183,6 +242,9 @@ namespace cobraml {
         auto copy_b{CopyOp::get_tiled_copy_B()};
 
         int smem_size = int(sizeof(SharedStorage<half_t, half_t, decltype(s_a), decltype(s_b)>));
+
+        const Copy_Atom<SM75_U32x4_LDSM_N, half_t> shared_to_register_atom_a;
+        const Copy_Atom<SM75_U32x4_LDSM_N, half_t> shared_to_register_atom_b;
 
         dim3 dimBlock(size(mmaC));
         dim3 dimGrid(size(ceil_div(size<0>(prob_shape), bM)),
@@ -229,6 +291,11 @@ namespace cobraml {
         );
 
         CUTE_CHECK_LAST();
+
+        // print(make_tiled_mma(SM80_16x8x8_F16F16F16F16_TN{}));
+        // printf("\n");
+        // print_latex(make_tiled_mma(SM80_16x8x8_F16F16F16F16_TN{}));
+        // print_latex(make_tiled_mma(SM80_16x8x8_F16F16F16F16_TN{}));
 
         // print_latex(copyA);
         // print_latex(copyB);

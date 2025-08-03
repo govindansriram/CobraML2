@@ -105,16 +105,64 @@ TEST(BrarrayTest, constructor_from_vector) {
     }
 }
 
+template<typename Dtype>
+void init(
+    thrust::host_vector<Dtype> &vector,
+    const int x,
+    const int y,
+    const bool row_major=true,
+    const int start=0) {
+
+    // std::random_device rd;
+    std::mt19937 gen(108);
+
+    std::uniform_int_distribution distrib_bottom(1, 10);
+    std::uniform_int_distribution distrib_top(0, 9);
+
+    for (int i{0}; i < x; ++i) {
+        for (int j{0}; j < y; ++j) {
+            const auto top{static_cast<float>(distrib_top(gen))};
+            const auto bottom{static_cast<float>(distrib_bottom(gen))};
+
+            Dtype val{static_cast<Dtype>(top / bottom)};
+
+            int pos{row_major ?  i * y + j : i + j * x};
+            vector[pos] = val;
+        }
+    }
+
+}
+
 TEST(BrarrayTest, visualize) {
-    constexpr Layout<Shape<_512, _256>, Stride<_256, _1>> layout_1{};
-    constexpr Layout<Shape<_1024, _256>, Stride<_256, _1>> layout_2{};
-    constexpr Layout<Shape<_512, _1024>, Stride<_1024, _1>> layout_3{};
 
-    const Brarray a(layout_1, half_t(108.1f));
-    const Brarray b(layout_2, half_t(9.9f));
-    Brarray c(layout_3, half_t(10.01f));
+    const int m{512};
+    const int n{1024};
+    const int k{256};
 
-    runner_tn(a, b, c);
+    thrust::host_vector<half_t> host_a(m * k);
+    thrust::host_vector<half_t> host_b(k * n);
+    thrust::host_vector<half_t> host_c(m * n, half_t(0));
+
+    init(host_a, m, k);
+    init(host_b, k, n, false);
+
+    thrust::device_vector<half_t> device_a{host_a};
+    thrust::device_vector<half_t> device_b{host_b};
+    thrust::device_vector<half_t> device_c{host_c};
+
+    runner_tn(
+        m,
+        n,
+        k,
+        half_t(1),
+        thrust::raw_pointer_cast(device_a.data()),
+        k,
+        thrust::raw_pointer_cast(device_b.data()),
+        k,
+        half_t(0),
+        thrust::raw_pointer_cast(device_c.data()),
+        n
+    );
 }
 
 //modify and test gemv

@@ -14,28 +14,6 @@ namespace cobraml {
     using namespace cute;
 
     template<
-        typename TypeA,
-        typename TypeB,
-        typename TypeC,
-        typename ShapeA,
-        typename ShapeB,
-        typename ShapeC,
-        typename StrideA,
-        typename StrideB,
-        typename StrideC
-    >
-    void gemm(
-        const TypeA *a,
-        const TypeB *b,
-        TypeC *c,
-        Layout<ShapeA, StrideA> layout_a,
-        Layout<ShapeB, StrideB> layout_b,
-        Layout<ShapeC, StrideC> layout_c
-    ) {
-        return;
-    }
-
-    template<
         typename ElementA,
         typename ElementB,
         typename SmemLayoutA,
@@ -44,6 +22,48 @@ namespace cobraml {
         ArrayEngine<ElementA, cosize_v<SmemLayoutA> > A;
         ArrayEngine<ElementB, cosize_v<SmemLayoutB> > B;
     };
+
+    template<
+        typename ProblemShape,
+        typename CtaTiler,
+        typename TA,
+        typename AStride,
+        typename ASmemLayout,
+        typename TiledCopyA,
+        typename S2RAtomA,
+        typename TB,
+        typename BStride,
+        typename BSmemLayout,
+        typename TiledCopyB,
+        typename S2RAtomB,
+        typename TC,
+        typename CStride,
+        typename CSmemLayout,
+        typename TiledMma,
+        class Alpha,
+        class Beta
+    >
+    __global__ static __launch_bounds__(decltype(size(TiledMma{}))::value) void gemm_device(
+        ProblemShape shape_MNK,
+        CtaTiler cta_tiler,
+        TA const *A,
+        AStride dA,
+        ASmemLayout sA_layout,
+        TiledCopyA copy_a,
+        S2RAtomA s2r_atom_a,
+        TB const *B,
+        BStride dB,
+        BSmemLayout sB_layout,
+        TiledCopyB copy_b,
+        S2RAtomB s2r_atom_b,
+        TC *C,
+        CStride dC,
+        CSmemLayout,
+        TiledMma mma,
+        Alpha alpha,
+        Beta beta) {
+
+    }
 
     template<
         typename CtaTiler,
@@ -55,9 +75,11 @@ namespace cobraml {
         typename TiledCopyB,
         typename LayoutC,
         typename SmemLayoutC,
-        typename TiledMMA
+        typename TiledMMA,
+        typename SharedToRegisterA,
+        typename SharedToRegisterB
     >
-    __global__ void gemm_device(
+    __global__ void gemm_device_2(
         CtaTiler cta_tiler,
         const half_t *a,
         const LayoutA layout_a,
@@ -70,13 +92,15 @@ namespace cobraml {
         half_t *c,
         const LayoutC layout_c,
         SmemLayoutC smem_layout_c,
-        TiledMMA mma
+        TiledMMA mma,
+        SharedToRegisterA shared_to_register_copy_atom_a,
+        SharedToRegisterB shared_to_register_copy_atom_b
     ) {
         extern __shared__ char shared_memory[];
 
-        Tensor global_tensor_a{make_tensor(make_gmem_ptr(a), layout_a)};                            // a global memory tensor for matrix A
-        Tensor global_tensor_b{make_tensor(make_gmem_ptr(b), layout_b)};                            // a global memory tensor for matrix B
-        Tensor global_tensor_c{make_tensor(make_gmem_ptr(c), layout_c)};                            // a global memory tensor for matrix C
+        Tensor global_tensor_a{make_tensor(make_gmem_ptr(a), layout_a)}; // a global memory tensor for matrix A
+        Tensor global_tensor_b{make_tensor(make_gmem_ptr(b), layout_b)}; // a global memory tensor for matrix B
+        Tensor global_tensor_c{make_tensor(make_gmem_ptr(c), layout_c)}; // a global memory tensor for matrix C
 
         // here we get the coordinate of which matrix block we want to start at
         // for each global tensor notice blockIdx.x represents the x-axis (which is M),
@@ -85,18 +109,21 @@ namespace cobraml {
         auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);
 
         // since N is X we omit it, and here we say we want blockIdx.x for m and all K
-        Tensor global_tile_a{local_tile(global_tensor_a, cta_tiler, cta_coord, Step<_1, X, _1>{})};    // Shape: (BLK_M, BLK_K, k)
+        Tensor global_tile_a{local_tile(global_tensor_a, cta_tiler, cta_coord, Step<_1, X, _1>{})};
+        // Shape: (BLK_M, BLK_K, k)
 
         // since M is X we omit it, and here we say we want blockIdx.y for n and all K
-        Tensor global_tile_b{local_tile(global_tensor_b, cta_tiler, cta_coord, Step<X, _1, _1>{})};    // Shape: (BLK_N, BLK_K, k)
+        Tensor global_tile_b{local_tile(global_tensor_b, cta_tiler, cta_coord, Step<X, _1, _1>{})};
+        // Shape: (BLK_N, BLK_K, k)
 
         // since K is X we omit it, and here we say we want blockIdx.x for m and blockIdx.y for n
-        Tensor global_tile_c{local_tile(global_tensor_c, cta_tiler, cta_coord, Step<_1, _1, X>{})};    // Shape: (BLK_M, BLK_N)
+        Tensor global_tile_c{local_tile(global_tensor_c, cta_tiler, cta_coord, Step<_1, _1, X>{})};
+        // Shape: (BLK_M, BLK_N)
 
         using SharedStorage = SharedStorage<half_t, half_t, SmemLayoutA, SmemLayoutB>;
-        SharedStorage& smem{*reinterpret_cast<SharedStorage*>(shared_memory)};
-        Tensor shared_a{make_tensor(make_smem_ptr(smem.A.begin()), smem_layout_a)};                    // (BLK_M,BLK_K,PIPE)
-        Tensor shared_b{make_tensor(make_smem_ptr(smem.B.begin()), smem_layout_b)};                    // (BLK_N,BLK_K,PIPE)
+        SharedStorage &smem{*reinterpret_cast<SharedStorage *>(shared_memory)};
+        Tensor shared_a{make_tensor(make_smem_ptr(smem.A.begin()), smem_layout_a)}; // (BLK_M,BLK_K,PIPE)
+        Tensor shared_b{make_tensor(make_smem_ptr(smem.B.begin()), smem_layout_b)}; // (BLK_N,BLK_K,PIPE)
 
         // CopyA is the TiledCopyAtom, the get slice methods slices the
         // copy atom to encompass the copy responsibilities of a single thread,
@@ -118,12 +145,12 @@ namespace cobraml {
         // represents
 
         // k will be the same value as the last dim in the parent tensor
-        Tensor thread_part_glob_a{thr_copy_a.partition_S(global_tile_a)};                              // (CPY, CPY_M, CPY_K, k)
-        Tensor thread_part_shared_a{thr_copy_a.partition_D(shared_a)};                                 // (CPY, CPY_M, CPY_K, PIPE)
+        Tensor thread_part_glob_a{thr_copy_a.partition_S(global_tile_a)}; // (CPY, CPY_M, CPY_K, k)
+        Tensor thread_part_shared_a{thr_copy_a.partition_D(shared_a)}; // (CPY, CPY_M, CPY_K, PIPE)
 
         ThrCopy thr_copy_b{copy_b.get_slice(threadIdx.x)};
-        Tensor thread_part_glob_b{thr_copy_b.partition_S(global_tile_b)};                              // (CPY, CPY_N, CPY_K, k)
-        Tensor thread_part_shared_b{thr_copy_b.partition_D(shared_b)};                                 // (CPY, CPY_N, CPY_K, PIPE)
+        Tensor thread_part_glob_b{thr_copy_b.partition_S(global_tile_b)}; // (CPY, CPY_N, CPY_K, k)
+        Tensor thread_part_shared_b{thr_copy_b.partition_D(shared_b)}; // (CPY, CPY_N, CPY_K, PIPE)
 
         CUTE_STATIC_ASSERT_V(size<1>(thread_part_glob_a) == size<1>(thread_part_shared_a));
         CUTE_STATIC_ASSERT_V(size<2>(thread_part_glob_a) == size<2>(thread_part_shared_a));
@@ -142,7 +169,7 @@ namespace cobraml {
             cp_async_fence();
             --k_tile_count;
             // cant use breaks inside loop
-            if (k_tile_count > 0){++k_tile_next;}
+            if (k_tile_count > 0) { ++k_tile_next; }
         }
 
         ThrMMA thr_mma{mma.get_slice(threadIdx.x)};
@@ -167,28 +194,32 @@ namespace cobraml {
         // create a fragment the same size as the view
         Tensor thread_accum_c{thr_mma.make_fragment_C(thread_part_view_global_c)};
 
+        // all partitions of fragments are dominantly determined by the atom layout not the
+        // permutations
+
         clear(thread_accum_c);
 
-        CUTE_STATIC_ASSERT_V(shape(thread_accum_c) == shape(thread_part_view_global_c));          // (MMA, MMA_M, MMA_N)
+        CUTE_STATIC_ASSERT_V(shape(thread_accum_c) == shape(thread_part_view_global_c)); // (MMA, MMA_M, MMA_N)
         CUTE_STATIC_ASSERT_V(size<1>(thread_part_view_global_c) == size<1>(thread_fragment_a));
         CUTE_STATIC_ASSERT_V(size<2>(thread_part_view_global_c) == size<1>(thread_fragment_b));
 
+        TiledCopy shared_2_register_tiled_copy_a{make_tiled_copy_A(shared_to_register_copy_atom_a, mma)};
+        TiledCopy shared_2_register_tiled_copy_b{make_tiled_copy_B(shared_to_register_copy_atom_b, mma)};
 
+        ThrCopy shared_2_register_thread_copy_a{shared_2_register_tiled_copy_a.get_slice(threadIdx.x)};
 
-        if ((blockIdx.x + blockIdx.y == 0) && (threadIdx.x + threadIdx.y == 0)) {
-            print(shared_a);
-            printf("\n");
-            print(shared_b);
-            printf("\n");
-            print(shape(thread_accum_c));
-            printf("\n");
-            print(shape(thread_fragment_a));
-            printf("\n");
-            print(shape(thread_fragment_b));
-            // print(take<0, 3>(shape(thread_part_view_global_c)));
-            // print(thr_mma.partition_A(shared_a(_, _, 0)));
-            // printf("\n");
+        Tensor shared_part_for_reg_a{shared_2_register_thread_copy_a.partition_S(shared_a)};
+
+        if (thread0()) {
+            // print_latex(shared_2_register_tiled_copy_b);
             // print(thread_fragment_a);
+            // printf("\n");
+            // print(shared_part_for_reg_a);
+            // printf("\n");
+            // print(shape(thread_accum_c));
+            // printf("\n");
+            // print(shape(thread_fragment_a));
+            // printf("\n");
         }
     }
 
@@ -250,7 +281,27 @@ namespace cobraml {
         dim3 dimGrid(size(ceil_div(size<0>(prob_shape), bM)),
                      size(ceil_div(size<1>(prob_shape), bN)));
 
+        TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, cute::half_t>{},
+                                          Layout<Shape<_16, _8>, Stride<_8, _1> >{}, // Thr layout 16x8 k-major
+                                          Layout<Shape<_1, _8> >{});
+
+        // print_latex(make_tiled_mma(SM80_16x8x8_F16F16F16F16_TN{},
+        //                      Layout<Shape<_2,_2>>{},
+        //                      Tile<_32,_16,_8>{})); // 32x32x16 Tiled MMA for LDSM);
+
+        printf("%d, %d, %d", dimBlock.x, dimBlock.y, dimBlock.z);
+
+        // print_layout(Layout<Shape<_8, Shape<_8, _8> >,
+        //     Stride<_8, Stride<_1, _64> > >{});
+        //
+        // printf("\n");
+        // print_layout(swizzle_atom);
+
+        // auto zipped_layout = zipped_divide(s_a, make_shape(bM, bK, _1{}));
         // const half_t *  = a.get_ptr();
+
+        // printf("\n");
+        // print(select<0, 1>(layout<0>(zipped_layout)));
 
         auto kernel_fptr{
             gemm_device<
@@ -263,7 +314,10 @@ namespace cobraml {
                 decltype(copy_b),
                 Layout<ShapeC, StrideC>,
                 decltype(s_c),
-                decltype(mmaC)>
+                decltype(mmaC),
+                decltype(shared_to_register_atom_a),
+                decltype(shared_to_register_atom_b)
+            >
         };
 
         cudaFuncSetAttribute(
@@ -287,7 +341,9 @@ namespace cobraml {
             c.get_ptr(),
             Layout<ShapeC, StrideC>{},
             s_c,
-            mmaC
+            mmaC,
+            shared_to_register_atom_a,
+            shared_to_register_atom_b
         );
 
         CUTE_CHECK_LAST();

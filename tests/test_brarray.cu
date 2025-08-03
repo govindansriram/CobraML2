@@ -8,6 +8,7 @@
 #include <thrust/host_vector.h>
 #include <cute/tensor.hpp>
 #include "kernels/lovelace/gemm.cuh"
+#include "cutlass/numeric_conversion.h"
 
 using namespace cobraml;
 

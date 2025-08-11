@@ -145,6 +145,8 @@ TEST(BrarrayTest, visualize) {
 
     init(host_a, m, k);
     init(host_b, k, n, false);
+    init(host_c, m, n, false);
+
 
     thrust::device_vector<half_t> device_a{host_a};
     thrust::device_vector<half_t> device_b{host_b};
@@ -161,8 +163,10 @@ TEST(BrarrayTest, visualize) {
         k,
         half_t(0),
         thrust::raw_pointer_cast(device_c.data()),
-        n
+        m
     );
+
+    CUTE_CHECK_LAST();
 }
 
 //modify and test gemv

@@ -13,55 +13,30 @@
 namespace cobraml {
     using namespace cute;
 
-    template<
-        typename ElementA,
-        typename ElementB,
-        typename SmemLayoutA,
-        typename SmemLayoutB>
+    template<class ElementA,
+        class ElementB,
+        class SmemLayoutA,
+        class SmemLayoutB>
     struct SharedStorage {
-        ArrayEngine<ElementA, cosize_v<SmemLayoutA> > A;
-        ArrayEngine<ElementB, cosize_v<SmemLayoutB> > B;
+        cute::ArrayEngine<ElementA, cute::cosize_v<SmemLayoutA> > A;
+        cute::ArrayEngine<ElementB, cute::cosize_v<SmemLayoutB> > B;
     };
 
-    template<
-        typename ProblemShape,
-        typename CtaTiler,
-        typename TA,
-        typename AStride,
-        typename ASmemLayout,
-        typename TiledCopyA,
-        typename S2RAtomA,
-        typename TB,
-        typename BStride,
-        typename BSmemLayout,
-        typename TiledCopyB,
-        typename S2RAtomB,
-        typename TC,
-        typename CStride,
-        typename CSmemLayout,
-        typename TiledMma,
-        class Alpha,
-        class Beta
-    >
-    __global__ static __launch_bounds__(decltype(size(TiledMma{}))::value) void gemm_device(
-        ProblemShape shape_MNK,
-        CtaTiler cta_tiler,
-        TA const *A,
-        AStride dA,
-        ASmemLayout sA_layout,
-        TiledCopyA copy_a,
-        S2RAtomA s2r_atom_a,
-        TB const *B,
-        BStride dB,
-        BSmemLayout sB_layout,
-        TiledCopyB copy_b,
-        S2RAtomB s2r_atom_b,
-        TC *C,
-        CStride dC,
-        CSmemLayout,
-        TiledMma mma,
-        Alpha alpha,
-        Beta beta) {
+    template<class ProblemShape, class CtaTiler,
+        class TA, class AStride, class ASmemLayout, class TiledCopyA, class S2RAtomA,
+        class TB, class BStride, class BSmemLayout, class TiledCopyB, class S2RAtomB,
+        class TC, class CStride, class CSmemLayout, class TiledMma,
+        class Alpha, class Beta>
+    __global__ static
+    __launch_bounds__(decltype(size(TiledMma{}))::value)
+    void
+    gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
+                TA const *A, AStride dA, ASmemLayout sA_layout, TiledCopyA copy_a, S2RAtomA s2r_atom_a,
+                TB const *B, BStride dB, BSmemLayout sB_layout, TiledCopyB copy_b, S2RAtomB s2r_atom_b,
+                TC *C, CStride dC, CSmemLayout, TiledMma mma,
+                Alpha alpha, Beta beta) {
+        using namespace cute;
+
         // Preconditions
         CUTE_STATIC_ASSERT_V(rank(shape_MNK) == Int<3>{}); // (M, N, K)
         CUTE_STATIC_ASSERT_V(rank(cta_tiler) == Int<3>{}); // (BLK_M, BLK_N, BLK_K)
@@ -179,39 +154,79 @@ namespace cobraml {
         Tensor tXrB = s2r_thr_copy_b.retile_D(tCrB); // (CPY,MMA_N,MMA_K)
 
 #if 0
-          if(thread0()) {
-            print("  mA : "); print(  mA); print("\n");
-            print("  gA : "); print(  gA); print("\n");
-            print("  sA : "); print(  sA); print("\n");
-            print("tAgA : "); print(tAgA); print("\n");
-            print("tAsA : "); print(tAsA); print("\n");
-          }
+        if (thread0()) {
+            print("  mA : ");
+            print(mA);
+            print("\n");
+            print("  gA : ");
+            print(gA);
+            print("\n");
+            print("  sA : ");
+            print(sA);
+            print("\n");
+            print("tAgA : ");
+            print(tAgA);
+            print("\n");
+            print("tAsA : ");
+            print(tAsA);
+            print("\n");
+        }
 #endif
 
 #if 0
-          if(thread0()) {
-            print("  mB : "); print(  mB); print("\n");
-            print("  gB : "); print(  gB); print("\n");
-            print("  sB : "); print(  sB); print("\n");
-            print("tBgB : "); print(tBgB); print("\n");
-            print("tBsB : "); print(tBsB); print("\n");
-          }
+        if (thread0()) {
+            print("  mB : ");
+            print(mB);
+            print("\n");
+            print("  gB : ");
+            print(gB);
+            print("\n");
+            print("  sB : ");
+            print(sB);
+            print("\n");
+            print("tBgB : ");
+            print(tBgB);
+            print("\n");
+            print("tBsB : ");
+            print(tBsB);
+            print("\n");
+        }
 #endif
 
 #if 0
-          if(thread0()) {
-            print("  mC : "); print(  mC); print("\n");
-            print("  gC : "); print(  gC); print("\n");
-            print("tCgC : "); print(tCgC); print("\n");
-            print("tCrA : "); print(tCrA); print("\n");
-            print("tCrB : "); print(tCrB); print("\n");
-            print("tCrC : "); print(tCrC); print("\n");
+        if (thread0()) {
+            print("  mC : ");
+            print(mC);
+            print("\n");
+            print("  gC : ");
+            print(gC);
+            print("\n");
+            print("tCgC : ");
+            print(tCgC);
+            print("\n");
+            print("tCrA : ");
+            print(tCrA);
+            print("\n");
+            print("tCrB : ");
+            print(tCrB);
+            print("\n");
+            print("tCrC : ");
+            print(tCrC);
+            print("\n");
 
-            print("tXsA : "); print(tXsA); print("\n");
-            print("tXrA : "); print(tXrA); print("\n");
-            print("tXsB : "); print(tXsB); print("\n");
-            print("tXrB : "); print(tXrB); print("\n");
-          }
+            print("tXsA : ");
+            print(tXsA);
+            print("\n");
+            print("tXrA : ");
+            print(tXrA);
+            print("\n");
+            print("tXsB : ");
+            print(tXsB);
+            print("\n");
+            print("tXrB : ");
+            print(tXrB);
+            print("\n");
+        }
 #endif
 
 #if 1
@@ -528,18 +543,18 @@ namespace cobraml {
         Copy_Atom<SM75_U32x4_LDSM_N, half_t> s2r_atom_B;
 
 #if 0
-  print(copyA);
-  print(copyB);
-  print(mmaC);
+        print(copyA);
+        print(copyB);
+        print(mmaC);
 #endif
 
 #if 0
-  print_latex(copyA);
-  print_latex(copyB);
-  print_latex(mmaC);
+        print_latex(copyA);
+        print_latex(copyB);
+        print_latex(mmaC);
 #endif
 
-        int smem_size = int(sizeof(SharedStorage<half_t, half_t, decltype(sA), decltype(sB)>));
+        int smem_size = int(sizeof(SharedStorage<cute::half_t, cute::half_t, decltype(sA), decltype(sB)>));
         dim3 dimBlock(size(mmaC));
         dim3 dimGrid(size(ceil_div(M, bM)),
                      size(ceil_div(N, bN)));

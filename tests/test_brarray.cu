@@ -7,8 +7,8 @@
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 #include <cute/tensor.hpp>
-#include "kernels/lovelace/gemm.cuh"
-#include "cutlass/numeric_conversion.h"
+#include "kernels/ampere/gemm.cuh"
+#include "kernels/naive_matmul.cuh"
 
 using namespace cobraml;
 
@@ -133,6 +133,12 @@ void init(
 
 }
 
+template<typename DType>
+bool approx_equal(DType a, DType b, float epsilon = 1e-2f) {
+    float rel_err = std::abs(a - b) / std::max(std::abs(b), 1e-6f);
+    return rel_err < epsilon;
+}
+
 TEST(BrarrayTest, visualize) {
 
     const int m{512};
@@ -142,15 +148,17 @@ TEST(BrarrayTest, visualize) {
     thrust::host_vector<half_t> host_a(m * k);
     thrust::host_vector<half_t> host_b(k * n);
     thrust::host_vector<half_t> host_c(m * n, half_t(0));
+    thrust::host_vector<half_t> host_c_ref(m * n, half_t(0));
 
     init(host_a, m, k);
     init(host_b, k, n, false);
     init(host_c, m, n, false);
-
+    init(host_c_ref, m, n, false);
 
     thrust::device_vector<half_t> device_a{host_a};
     thrust::device_vector<half_t> device_b{host_b};
     thrust::device_vector<half_t> device_c{host_c};
+    thrust::device_vector<half_t> device_c_ref{host_c_ref};
 
     runner_tn(
         m,
@@ -166,6 +174,20 @@ TEST(BrarrayTest, visualize) {
         m
     );
 
+    thrust::copy(device_c.begin(), device_c.end(), host_c.begin());
+    naive_matmul_TNN<half_t, half_t><<<1, 1>>>(
+        m,
+        n,
+        k,
+        thrust::raw_pointer_cast(device_a.data()),
+        thrust::raw_pointer_cast(device_b.data()),
+        thrust::raw_pointer_cast(device_c_ref.data()));
+
+    thrust::copy(device_c_ref.begin(), device_c_ref.end(), host_c_ref.begin());
+
+    for (size_t i{0}; i < m * n; ++i) {
+        ASSERT_TRUE(approx_equal(host_c[i], host_c_ref[i]));
+    }
     CUTE_CHECK_LAST();
 }
 

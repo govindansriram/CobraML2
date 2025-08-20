@@ -9,7 +9,7 @@
 #include <set>
 #include <stack>
 
-#include "brarray.h"
+#include "brarray.cuh"
 
 namespace cobraml::core {
 

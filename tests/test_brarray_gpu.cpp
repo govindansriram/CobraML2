@@ -2,7 +2,7 @@
 // Created by sriram on 4/21/25.
 //
 #include <gtest/gtest.h>
-#include "brarray.h"
+#include "brarray.cuh"
 
 TEST(CudaArrayTestFunctionals, test_device) {
     const std::vector<float> vec{

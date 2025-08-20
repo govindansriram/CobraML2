@@ -4,7 +4,7 @@
 
 #include <random>
 #include <gtest/gtest.h>
-#include "brarray.h"
+#include "brarray.cuh"
 #include <cmath>
 
 

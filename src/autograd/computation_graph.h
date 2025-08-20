@@ -7,7 +7,7 @@
 #include <memory>
 #include <vector>
 
-#include "brarray.h"
+#include "brarray.cuh"
 
 namespace cobraml::core {
     class Brarray;

@@ -2,7 +2,7 @@
 // Created by sriram on 1/25/25.
 //
 
-#include "brarray.h"
+#include "brarray.cuh"
 #include <iostream>
 #include <iomanip>
 #include "math_dis.h"

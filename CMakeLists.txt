@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-set(CMAKE_CUDA_ARCHITECTURES "89;89-virtual") # reduce build times to incorporate more archs add 52 60 75
+set(CMAKE_CUDA_ARCHITECTURES 120) # reduce build times to incorporate more archs add 52 60 75
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 project(cobraml VERSION 0.0.0 LANGUAGES CXX CUDA)
@@ -8,8 +8,8 @@ project(cobraml VERSION 0.0.0 LANGUAGES CXX CUDA)
 find_package(benchmark REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 
-include_directories(/home/sriram/Applications/cutlass/cutlass/include)
-include_directories(/home/sriram/Applications/cutlass/cutlass/tools/util/include)
+include_directories(/opt/cutlass/include)
+include_directories(/opt/cutlass/include)
 include_directories(include)
 include_directories(CUDA::toolkit)
 
@@ -31,6 +31,7 @@ add_executable(
 add_executable(
         benchmark_ampere
         benchmarks/benchmark_ampere.cu
+        include/kernels/blackwell/gemm.cuh
 )
 
 function(setup_cuda_target target_name)

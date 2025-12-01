@@ -1,0 +1,66 @@
+# Build directories
+build/
+cmake-build-*/
+out/
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# CUDA compiled
+*.cubin
+*.fatbin
+*.ptx
+*.gpu
+*.o
+*.obj
+
+# C++ compiled
+*.a
+*.so
+*.so.*
+*.dylib
+*.lib
+*.dll
+*.exe
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.cproject
+.settings/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# GoogleTest/FetchContent
+_deps/
+
+# CUDA profiling
+*.nvvp
+*.qdrep
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+
+# Logs
+*.log
+
+# Temporary
+tmp/
+temp/
+*.tmp

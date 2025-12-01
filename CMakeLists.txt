@@ -39,7 +39,7 @@ target_include_directories(cobraml2 INTERFACE external/cutlass/tools/util/includ
 find_package(CUDAToolkit REQUIRED)
 target_link_libraries(cobraml2 INTERFACE CUDA::toolkit)
 
-option(COBRAML2_BUILD_TESTS "Build tests" ON)
+option(COBRAML2_BUILD_TESTS "Build tests" OFF)
 if(COBRAML2_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

@@ -225,8 +225,8 @@ struct MHA{
         DType * K,
         DType * V,
         DType * O,
-        int batch_size,
-        int N
+        uint32_t batch_size,
+        uint32_t N
     ){
         dim3 grid_dim{
             head_count,

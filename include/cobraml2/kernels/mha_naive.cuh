@@ -124,6 +124,16 @@ namespace naive{
     }
 }
 
+/**
+ * @brief 
+ * 
+ * @tparam head_count
+ * @tparam head_dim the length of each head
+ * @tparam B_r how many sequences of q to process at once
+ * @tparam B_c how many sequences of K and V to process at once
+ * @tparam DType 
+ * @tparam thread_count 
+ */
 template<
     int head_count, 
     int head_dim, 

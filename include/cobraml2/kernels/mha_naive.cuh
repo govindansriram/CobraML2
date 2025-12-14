@@ -24,13 +24,21 @@ namespace naive{
      * @param N sequence length: tokens per sequence
      * @return void 
      */
-    template<typename MHAType>
+    template<
+        typename MHAType,
+        typename TiledCopyQType,
+        typename TiledCopyKType,
+        typename TiledCopyVType
+    >
     __global__ void mha_kernel(
         const typename MHAType::TensorDType * __restrict__ Q, 
         const typename MHAType::TensorDType * __restrict__ K, 
         const typename MHAType::TensorDType * __restrict__ V,
         typename MHAType::TensorDType * __restrict__ O,
-        const int N
+        const int N,
+        TiledCopyQType tc_q,
+        TiledCopyKType tc_k,
+        TiledCopyVType tc_v
     ){
 
         using DType = typename MHAType::TensorDType;
@@ -57,6 +65,26 @@ namespace naive{
         const auto v_head{v_tensor(blockIdx.y, blockIdx.x, _, _)};
         const auto o_head{o_tensor(blockIdx.y, blockIdx.x, _, _)};
 
+        extern __shared__ char shared_memory[];
+        using SharedStorageType = typename MHAType::SharedStorage;
+        SharedStorageType * shared_storage{reinterpret_cast<SharedStorageType *>(shared_memory)};
+
+        auto shared_q_ptr{make_smem_ptr(shared_storage->Q.begin())};
+        auto shared_k_ptr{make_smem_ptr(shared_storage->K.begin())};
+        auto shared_v_ptr{make_smem_ptr(shared_storage->V.begin())};
+
+        Tensor shared_q{
+            make_tensor(shared_q_ptr, typename SharedStorageType::QLayoutType{})
+        };
+
+        Tensor shared_k{
+            make_tensor(shared_k_ptr, typename SharedStorageType::KVLayoutType{})
+        };
+
+        Tensor shared_v{
+            make_tensor(shared_k_ptr, typename SharedStorageType::KVLayoutType{})
+        };
+
         // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
 
         constexpr typename MHAType::HeadDimType d{};
@@ -69,29 +97,28 @@ namespace naive{
         auto kv_tiler{make_shape(B_c, d)};
 
         Tensor q_iterator{local_tile(q_head, q_tiler, coord)};  // (B_r, d, floor(N / B_r))
-        Tensor k_iterator{local_tile(k_head, kv_tiler, coord)}; // (B_r, d, floor(N / B_c))
-        Tensor v_iterator{local_tile(v_head, kv_tiler, coord)}; // (B_r, d, floor(N / B_c))
+        Tensor k_iterator{local_tile(k_head, kv_tiler, coord)}; // (B_c, d, floor(N / B_c))
+        Tensor v_iterator{local_tile(v_head, kv_tiler, coord)}; // (B_c, d, floor(N / B_c))
 
-        auto q_iters{size<2>(q_iterator)};
         auto kv_iters{size<2>(k_iterator)};
 
+        Tensor q_slice{q_iterator(_, _, blockIdx.z)};
+
+        // move q to shared memory
+
+        // t prefix means unique to this thread
+        ThrCopy thr_copy_q{tc_q.get_slice(threadIdx.x)};
+        Tensor tQ_global_part{thr_copy_q.partition_S(q_slice)};
+
         if (thread0()){
-            print(q_tensor);
+            print(q_slice);
             print("\n");
-            print(q_iterator);
-            print("\n");
-            print(q_iters);
-            print("\n");
-            print(kv_iters);
+            print(shared_q);
         }
 
-        for (size_t i{0}; i < q_iters; ++i){
-
-            Tensor q_slice{q_iterator(_, _, i)};
-            for (size_t j{0}; j < kv_iters; ++j){
-                Tensor k_slice{k_iterator(_, _, i)};
-                Tensor v_slice{v_iterator(_, _, i)};
-            }
+        for (size_t j{0}; j < kv_iters; ++j){
+            Tensor k_slice{k_iterator(_, _, j)};
+            Tensor v_slice{v_iterator(_, _, j)};
         }
         
     }
@@ -116,6 +143,19 @@ struct MHA{
     using KVColsType = Int<B_c>;
 
     using VectorizedLoadType = uint128_t;
+
+    struct SharedStorage{
+        ArrayEngine<DType, B_r * head_dim> Q;
+        ArrayEngine<DType, B_c * head_dim> K;
+        ArrayEngine<DType, B_c * head_dim> V;
+
+        using QLayoutType = Layout<Shape<QueryRowsType, HeadDimType>, Stride<HeadDimType, _1>>;
+        using KVLayoutType = Layout<Shape<KVColsType, HeadDimType>, Stride<HeadDimType, _1>>;
+
+        static constexpr size_t smem_size(){
+            return cosize_v<QLayoutType> + cosize_v<KVLayoutType>;
+        }
+    };
 
     static constexpr int threads_per_block{thread_count};
 
@@ -198,17 +238,26 @@ struct MHA{
             thread_count
         };
 
-        auto tc_q{get_tiled_copy()};
-        auto tc_k{get_tiled_copy()};
-        auto tc_v{get_tiled_copy()};
+        const auto tc_q{get_tiled_copy()};
+        const auto tc_k{get_tiled_copy()};
+        const auto tc_v{get_tiled_copy()};
 
-        naive::mha_kernel<Self><<<grid_dim, block_dim>>>(
-            Q, K, V, O, N
+        auto kernel_fptr{
+            naive::mha_kernel<
+                Self,
+                decltype(tc_q),
+                decltype(tc_k),
+                decltype(tc_v)
+            >
+        };
+
+        kernel_fptr<<<grid_dim, block_dim, SharedStorage::smem_size()>>>(
+            Q, K, V, O, N,
+            tc_q, tc_k, tc_v
         );
 
         // print(tc_q);
-
-        print_latex(tc_q);
+        // print_latex(tc_q);
     }
     
 };

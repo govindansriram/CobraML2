@@ -109,12 +109,16 @@ namespace naive{
         // t prefix means unique to this thread
         ThrCopy thr_copy_q{tc_q.get_slice(threadIdx.x)};
         Tensor tQ_global_part{thr_copy_q.partition_S(q_slice)};
+        Tensor tQ_shared_part{thr_copy_q.partition_D(shared_q)};
 
-        if (thread0()){
-            print(q_slice);
-            print("\n");
-            print(shared_q);
-        }
+        copy(tc_q, tQ_global_part, tQ_shared_part);
+        __syncthreads();
+
+        // if (thread0()){
+        //     print_tensor(q_slice);
+        //     print("--------------------------------------------\n");
+        //     print_tensor(shared_q);
+        // }
 
         for (size_t j{0}; j < kv_iters; ++j){
             Tensor k_slice{k_iterator(_, _, j)};
@@ -261,7 +265,7 @@ struct MHA{
             >
         };
 
-        kernel_fptr<<<grid_dim, block_dim, SharedStorage::smem_size()>>>(
+        kernel_fptr<<<grid_dim, block_dim, sizeof(SharedStorage)>>>(
             Q, K, V, O, N,
             tc_q, tc_k, tc_v
         );

@@ -52,7 +52,7 @@ TEST(MHA_TEST, kernel) {
     constexpr int B_c{64};
 
     int batch_size{56};
-    int sequence_length{100};
+    int sequence_length{128};
 
     using MHAType = MHA<head_count, head_dim, B_r, B_c, float>;
 

@@ -64,3 +64,5 @@ _deps/
 tmp/
 temp/
 *.tmp
+
+dump.*

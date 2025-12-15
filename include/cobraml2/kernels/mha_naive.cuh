@@ -28,7 +28,8 @@ namespace naive{
         typename MHAType,
         typename TiledCopyQType,
         typename TiledCopyKType,
-        typename TiledCopyVType
+        typename TiledCopyVType,
+        typename TiledMMA
     >
     __global__ void mha_kernel(
         const typename MHAType::TensorDType * __restrict__ Q, 
@@ -38,7 +39,8 @@ namespace naive{
         const int N,
         TiledCopyQType tc_q,
         TiledCopyKType tc_k,
-        TiledCopyVType tc_v
+        TiledCopyVType tc_v,
+        TiledMMA t_mma_qk
     ){
 
         using DType = typename MHAType::TensorDType;
@@ -100,7 +102,7 @@ namespace naive{
         Tensor k_iterator{local_tile(k_head, kv_tiler, coord)}; // (B_c, d, floor(N / B_c))
         Tensor v_iterator{local_tile(v_head, kv_tiler, coord)}; // (B_c, d, floor(N / B_c))
 
-        auto kv_iters{size<2>(k_iterator)};
+        auto iters{size<2>(k_iterator)};
 
         Tensor q_slice{q_iterator(_, _, blockIdx.z)};
 
@@ -111,18 +113,25 @@ namespace naive{
         Tensor tQ_global_part{thr_copy_q.partition_S(q_slice)};
         Tensor tQ_shared_part{thr_copy_q.partition_D(shared_q)};
 
+        ThrMMA thr_mma_q{
+            t_mma_qk.get_slice(threadIdx.x)
+        };
+
+        Tensor q_mma(thr_mma_q.partition_A(shared_q));
+        Tensor k_mma(thr_mma_q.partition_B(shared_k));
+
         copy(tc_q, tQ_global_part, tQ_shared_part);
         __syncthreads();
 
-        // if (thread0()){
-        //     print_tensor(q_slice);
-        //     print("--------------------------------------------\n");
-        //     print_tensor(shared_q);
-        // }
+        if (thread0()){
+            print(q_mma(0, _, _));
+            print("--------------------------------------------\n");
+            print(k_mma(0, _, _));
+        }
 
-        for (size_t j{0}; j < kv_iters; ++j){
-            Tensor k_slice{k_iterator(_, _, j)};
-            Tensor v_slice{v_iterator(_, _, j)};
+        for (size_t iter{0}; iter < iters; ++iter){
+            Tensor k_slice{k_iterator(_, _, iter)};
+            Tensor v_slice{v_iterator(_, _, iter)};
         }
         
     }
@@ -232,6 +241,18 @@ struct MHA{
         );
     }
 
+    static constexpr auto get_tiled_mma(){
+
+        using RowType = Int<thread_count / 32>;
+
+        TiledMMA t_mma = make_tiled_mma(
+            UniversalFMA<DType,DType,DType>{},
+            Layout<Shape<RowType,_32>, Stride<_32, _1>>{}
+        );  // 16x16x1 UniversalFMA
+        
+        return t_mma;
+    }
+
     static_assert(B_c % B_r == 0, "B_c must be a multiple of B_r");
 
     void operator()(
@@ -255,19 +276,22 @@ struct MHA{
         const auto tc_q{get_tiled_copy()};
         const auto tc_k{get_tiled_copy()};
         const auto tc_v{get_tiled_copy()};
+        const auto t_mma{get_tiled_mma()};
 
         auto kernel_fptr{
             naive::mha_kernel<
                 Self,
                 decltype(tc_q),
                 decltype(tc_k),
-                decltype(tc_v)
+                decltype(tc_v),
+                decltype(t_mma)
             >
         };
 
         kernel_fptr<<<grid_dim, block_dim, sizeof(SharedStorage)>>>(
             Q, K, V, O, N,
-            tc_q, tc_k, tc_v
+            tc_q, tc_k, tc_v,
+            t_mma
         );
 
         // print(tc_q);

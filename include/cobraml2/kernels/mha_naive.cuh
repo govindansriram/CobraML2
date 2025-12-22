@@ -136,20 +136,9 @@ namespace naive{
         copy(tc_q, tQ_global_part, tQ_shared_part);
         __syncthreads(); // redundant
 
-        // if (thread0()){
-        //     // print_tensor(s_mma_r(0, 0, _));
-        //     print("--------------------------------------------\n");
-        // }
-
-        // if (thread0()){
-        //     print(tc_q);
-        //     print("--------------------------------------------\n");
-        // }
-
         // start with the lowest possible value
-        DType m{
-            cuda::std::numeric_limits<DType>::lowest()
-        };
+        Tensor m{make_tensor<DType>(mma_m)};
+        fill(m, cuda::std::numeric_limits<DType>::lowest());
 
         for (size_t iter{0}; iter < iters; ++iter){
             Tensor k_slice{k_iterator(_, _, iter)};
@@ -162,10 +151,12 @@ namespace naive{
 
             gemm(t_mma_qk, q_mma, k_mma, s_mma_r);
 
-            if (thread0()){
-                print(s_mma_r);
-                print("--------------------------------------------\n");
-            }
+            // if (thread0()){
+            //     print(m);
+            //     print("--------------------------------------------\n");
+            // }
+
+            MHAType::row_max(m, s_mma_r);
         }
         
     }
@@ -299,20 +290,20 @@ struct MHA{
         typename ScoresTensorLayoutType
     >
     __device__ static void row_max(
-        Tensor<MaxTensorEngineType, MaxTensorLayoutType> const &max_tensor, 
+        Tensor<MaxTensorEngineType, MaxTensorLayoutType> &max_tensor, 
         Tensor<ScoresTensorEngineType, ScoresTensorLayoutType> const &scores){
 
             static_assert(
-                cosize_v<ScoresTensorLayoutType>() == 3,
+                rank_v<ScoresTensorLayoutType> == 3,
                 "Per Register Attention scores must be 3 dimensional (mma, mma_m, mma_n)"
             );
 
             static_assert(
-                cosize_v<MaxTensorLayoutType>() == 1,
+                rank_v<MaxTensorLayoutType> == 1,
                 "Per register, row maxes, muse be 1 dimensional"
             );
 
-            constexpr size_t mma_m{size(get<2>(ScoresTensorLayoutType{}))};
+            constexpr size_t mma_m{size(get<1>(ScoresTensorLayoutType{}))};
             constexpr Layout mma_shape{get<0>(ScoresTensorLayoutType{})};
             
             CUTE_UNROLL
@@ -333,7 +324,9 @@ struct MHA{
                     }
 
                     current_max = warp_max(current_max);
-                    print(current_max);
+                    // if (thread(31) && m == 0){
+                    //     print(current_max);
+                    // }
                 }
 
             }

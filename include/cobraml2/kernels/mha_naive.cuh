@@ -119,18 +119,17 @@ namespace naive{
         Tensor tQ_shared_part{thr_copy_q.partition_D(shared_q)};
         Tensor tK_shared_part{thr_copy_k.partition_D(shared_k)};
 
-        ThrMMA thr_mma_q{
+        ThrMMA thr_mma_qk{
             t_mma_qk.get_slice(threadIdx.x)
         };
 
-        Tensor q_mma{thr_mma_q.partition_A(shared_q)};
-        Tensor k_mma{thr_mma_q.partition_B(shared_k)};
+        Tensor q_mma{thr_mma_qk.partition_A(shared_q)};
+        Tensor k_mma{thr_mma_qk.partition_B(shared_k)};
 
         auto mma_m{select<1>(q_mma.shape())};
         auto mma_n{select<1>(k_mma.shape())};
 
-        constexpr auto s_mma_layout{flatten(make_layout(make_shape(_1{}, mma_m, mma_n), LayoutRight{}))};
-        Tensor s_mma_r{make_tensor<DType>(s_mma_layout)};
+        Tensor s_mma_r{make_tensor<DType>(flatten(make_shape(_1{}, mma_m, mma_n)))};
         clear(s_mma_r);  // Zero the accumulator
 
         copy(tc_q, tQ_global_part, tQ_shared_part);
@@ -324,9 +323,10 @@ struct MHA{
                     }
 
                     current_max = warp_max(current_max);
-                    // if (thread(31) && m == 0){
-                    //     print(current_max);
-                    // }
+                    if (thread(31)){
+                        print(current_max);
+                        print("\n");
+                    }
                 }
 
             }

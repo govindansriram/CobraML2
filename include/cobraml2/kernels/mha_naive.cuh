@@ -1,6 +1,9 @@
 #pragma once
-#include "cute/tensor.hpp"
-#include "cute/layout.hpp"
+#include <cute/tensor.hpp>
+#include <cute/layout.hpp>
+#include <cub/cub.cuh>
+#include "../algos.cuh"
+
 
 namespace cobraml::kernels{
 
@@ -110,28 +113,59 @@ namespace naive{
 
         // t prefix means unique to this thread
         ThrCopy thr_copy_q{tc_q.get_slice(threadIdx.x)};
+        ThrCopy thr_copy_k{tc_k.get_slice(threadIdx.x)};
+
         Tensor tQ_global_part{thr_copy_q.partition_S(q_slice)};
         Tensor tQ_shared_part{thr_copy_q.partition_D(shared_q)};
+        Tensor tK_shared_part{thr_copy_k.partition_D(shared_k)};
 
         ThrMMA thr_mma_q{
             t_mma_qk.get_slice(threadIdx.x)
         };
 
-        Tensor q_mma(thr_mma_q.partition_A(shared_q));
-        Tensor k_mma(thr_mma_q.partition_B(shared_k));
+        Tensor q_mma{thr_mma_q.partition_A(shared_q)};
+        Tensor k_mma{thr_mma_q.partition_B(shared_k)};
+
+        auto mma_m{select<1>(q_mma.shape())};
+        auto mma_n{select<1>(k_mma.shape())};
+
+        constexpr auto s_mma_layout{flatten(make_layout(make_shape(_1{}, mma_m, mma_n), LayoutRight{}))};
+        Tensor s_mma_r{make_tensor<DType>(s_mma_layout)};
+        clear(s_mma_r);  // Zero the accumulator
 
         copy(tc_q, tQ_global_part, tQ_shared_part);
-        __syncthreads();
+        __syncthreads(); // redundant
 
-        if (thread0()){
-            print(q_mma(0, _, _));
-            print("--------------------------------------------\n");
-            print(k_mma(0, _, _));
-        }
+        // if (thread0()){
+        //     // print_tensor(s_mma_r(0, 0, _));
+        //     print("--------------------------------------------\n");
+        // }
+
+        // if (thread0()){
+        //     print(tc_q);
+        //     print("--------------------------------------------\n");
+        // }
+
+        // start with the lowest possible value
+        DType m{
+            cuda::std::numeric_limits<DType>::lowest()
+        };
 
         for (size_t iter{0}; iter < iters; ++iter){
             Tensor k_slice{k_iterator(_, _, iter)};
             Tensor v_slice{v_iterator(_, _, iter)};
+            Tensor tK_global_part{thr_copy_k.partition_S(k_slice)};
+
+            copy(tc_q, tK_global_part, tK_shared_part);
+
+            __syncthreads();
+
+            gemm(t_mma_qk, q_mma, k_mma, s_mma_r);
+
+            if (thread0()){
+                print(s_mma_r);
+                print("--------------------------------------------\n");
+            }
         }
         
     }
@@ -174,10 +208,6 @@ struct MHA{
 
         using QLayoutType = Layout<Shape<QueryRowsType, HeadDimType>, Stride<HeadDimType, _1>>;
         using KVLayoutType = Layout<Shape<KVColsType, HeadDimType>, Stride<HeadDimType, _1>>;
-
-        static constexpr size_t smem_size(){
-            return cosize_v<QLayoutType> + cosize_v<KVLayoutType>;
-        }
     };
 
     static constexpr int threads_per_block{thread_count};
@@ -243,7 +273,14 @@ struct MHA{
 
     static constexpr auto get_tiled_mma(){
 
+        static_assert(
+            thread_count % 32 == 0,
+            "thread_count must be a multiple of warp_size" 
+        );
+
         using RowType = Int<thread_count / 32>;
+
+        // one warp computes one row
 
         TiledMMA t_mma = make_tiled_mma(
             UniversalFMA<DType,DType,DType>{},
@@ -254,6 +291,53 @@ struct MHA{
     }
 
     static_assert(B_c % B_r == 0, "B_c must be a multiple of B_r");
+
+    template<
+        typename MaxTensorEngineType,
+        typename ScoresTensorEngineType, 
+        typename MaxTensorLayoutType,
+        typename ScoresTensorLayoutType
+    >
+    __device__ static void row_max(
+        Tensor<MaxTensorEngineType, MaxTensorLayoutType> const &max_tensor, 
+        Tensor<ScoresTensorEngineType, ScoresTensorLayoutType> const &scores){
+
+            static_assert(
+                cosize_v<ScoresTensorLayoutType>() == 3,
+                "Per Register Attention scores must be 3 dimensional (mma, mma_m, mma_n)"
+            );
+
+            static_assert(
+                cosize_v<MaxTensorLayoutType>() == 1,
+                "Per register, row maxes, muse be 1 dimensional"
+            );
+
+            constexpr size_t mma_m{size(get<2>(ScoresTensorLayoutType{}))};
+            constexpr Layout mma_shape{get<0>(ScoresTensorLayoutType{})};
+            
+            CUTE_UNROLL
+            for(size_t m{0}; m < mma_m; ++m){
+
+                auto score_slice{scores(_, m, _)};
+
+                if constexpr (rank(mma_shape) > 1){
+
+                } else{
+                    auto& current_max{max_tensor(m)};
+                    constexpr size_t slice_size{size(score_slice)};
+
+                    CUTE_UNROLL
+                    for (size_t idx{0}; idx < slice_size; ++idx){
+                        // uses hardware unit, removes warp divergence from branch checks
+                        current_max = cuda::std::max(score_slice(idx), current_max);
+                    }
+
+                    current_max = warp_max(current_max);
+                    print(current_max);
+                }
+
+            }
+    }
 
     void operator()(
         DType * Q,
@@ -288,7 +372,18 @@ struct MHA{
             >
         };
 
-        kernel_fptr<<<grid_dim, block_dim, sizeof(SharedStorage)>>>(
+        size_t smem_size{sizeof(SharedStorage)};
+
+        // Set L1 to be SMEM only
+        cudaFuncSetAttribute(
+            kernel_fptr,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+
+        cudaFuncSetAttribute(
+            kernel_fptr,
+            cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+
+        kernel_fptr<<<grid_dim, block_dim, smem_size>>>(
             Q, K, V, O, N,
             tc_q, tc_k, tc_v,
             t_mma

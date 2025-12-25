@@ -102,10 +102,6 @@ namespace naive{
             make_tensor(shared_p_ptr, typename SharedStorageType::PLayoutType{})
         };
 
-        Tensor shared_o{
-            make_tensor(shared_o_ptr, typename SharedStorageType::QOLayoutType{})
-        };
-
         // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
 
         constexpr typename MHAType::HeadDimType d{};
@@ -120,10 +116,12 @@ namespace naive{
         Tensor q_iterator{local_tile(q_head, q_tiler, coord)};  // (B_r, d, floor(N / B_r))
         Tensor k_iterator{local_tile(k_head, kv_tiler, coord)}; // (B_c, d, floor(N / B_c))
         Tensor v_iterator{local_tile(v_head, kv_tiler, coord)}; // (B_c, d, floor(N / B_c))
+        Tensor o_iterator{local_tile(o_head, q_tiler, coord)}; // (B_c, d, floor(N / B_c))
 
         auto iters{size<2>(k_iterator)};
 
         Tensor q_slice{q_iterator(_, _, blockIdx.z)};
+        Tensor out_slice{o_iterator(_, _, blockIdx.z)};
 
         // move q to shared memory
 
@@ -151,7 +149,8 @@ namespace naive{
 
         Tensor p_mma2{thr_mma_pv.partition_A(shared_p)};
         Tensor v_mma{thr_mma_pv.partition_B(trans_shared_v)};
-        Tensor o_mma{thr_mma_pv.partition_C(shared_o)};
+        Tensor g_out_mma{thr_mma_pv.partition_C(out_slice)};
+        Tensor r_out_mma{thr_mma_pv.make_fragment_C(g_out_mma)};
 
         auto mma_m{select<1>(q_mma.shape())};
 
@@ -179,13 +178,32 @@ namespace naive{
             __syncthreads();
 
             gemm(t_mma_qk, q_mma, k_mma, r_scores_mma);
-            MHAType::update_statistics(m, l, r_scores_mma, p_mma, o_mma);
+            MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma);
             copy(tc_v, tV_global_part, tV_shared_part);
 
             __syncthreads();
 
-            gemm(t_mma_pv, p_mma2, v_mma, thr_mma_pv.make_fragment_C(o_mma));
+            gemm(t_mma_pv, p_mma2, v_mma, r_out_mma);
         }
+
+        constexpr Layout mma_shape{get<0>(r_out_mma.layout())};
+        constexpr size_t m_rows{size(get<1>(r_out_mma.layout()))};
+
+        static_assert(rank(mma_shape) == 1, "only rank 1 mma shape is currently supported");
+
+        CUTE_UNROLL
+        for (size_t m_row{0}; m_row < m_rows; ++m_row){
+            auto out_slice{r_out_mma(_, m_row, _)};
+
+            CUTE_UNROLL
+            for(size_t idx{0}; idx < size(out_slice); ++idx){
+                out_slice(idx) = out_slice(idx) / l(m_row);
+            }
+        }
+
+        // scale
+
+        copy(r_out_mma, g_out_mma);
         
     }
 }

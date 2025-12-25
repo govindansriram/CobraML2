@@ -137,7 +137,9 @@ namespace naive{
 
         // start with the lowest possible value
         Tensor m{make_tensor<DType>(mma_m)};
+        Tensor l{make_tensor<DType>(mma_m)};
         fill(m, cuda::std::numeric_limits<DType>::lowest());
+        fill(l, static_cast<DType>(0));
 
         for (size_t iter{0}; iter < iters; ++iter){
             Tensor k_slice{k_iterator(_, _, iter)};
@@ -149,13 +151,12 @@ namespace naive{
             __syncthreads();
 
             gemm(t_mma_qk, q_mma, k_mma, s_mma_r);
+            MHAType::update_statistics(m, l, s_mma_r);
 
-            // if (thread0()){
-            //     print(m);
-            //     print("--------------------------------------------\n");
+            // if (thread(32)){
+            //     print_tensor(tK_shared_part);
+            //     print_tensor(m);
             // }
-
-            MHAType::row_max(m, s_mma_r);
         }
         
     }
@@ -288,9 +289,10 @@ struct MHA{
         typename MaxTensorLayoutType,
         typename ScoresTensorLayoutType
     >
-    __device__ static void row_max(
+    __device__ static void update_statistics(
         Tensor<MaxTensorEngineType, MaxTensorLayoutType> &max_tensor, 
-        Tensor<ScoresTensorEngineType, ScoresTensorLayoutType> const &scores){
+        Tensor<MaxTensorEngineType, MaxTensorLayoutType> &sum_tensor, 
+        Tensor<ScoresTensorEngineType, ScoresTensorLayoutType> &scores){
 
             static_assert(
                 rank_v<ScoresTensorLayoutType> == 3,
@@ -310,25 +312,42 @@ struct MHA{
 
                 auto score_slice{scores(_, m, _)};
 
-                if constexpr (rank(mma_shape) > 1){
+                if constexpr (rank(mma_shape) > 1)
+                    static_assert(rank(mma_shape) > 1, "not yet implemented");  
 
-                } else{
-                    auto& current_max{max_tensor(m)};
-                    constexpr size_t slice_size{size(score_slice)};
+                auto& current_max{max_tensor(m)};
+                auto old_max{current_max};
+                auto &current_sum{sum_tensor(m)};
 
-                    CUTE_UNROLL
-                    for (size_t idx{0}; idx < slice_size; ++idx){
-                        // uses hardware unit, removes warp divergence from branch checks
-                        current_max = cuda::std::max(score_slice(idx), current_max);
-                    }
+                constexpr size_t slice_size{size(score_slice)};
 
-                    current_max = warp_max(current_max);
-                    if (thread(31)){
-                        print(current_max);
-                        print("\n");
-                    }
+                CUTE_UNROLL
+                for (size_t idx{0}; idx < slice_size; ++idx){
+                    // uses hardware unit, removes warp divergence from branch checks
+                    // each thread may hold multiple values from each row, we find the 
+                    // local maximum first
+                    current_max = cuda::std::max(score_slice(idx), current_max);
                 }
 
+                current_max = warp_max(current_max);
+
+                // Compute scaling factor for old values
+                auto scale_old = expf(old_max - current_max);
+
+                // scale the sum
+                current_sum = current_sum * scale_old;
+
+                DType local_sum{0};
+
+                CUTE_UNROLL
+                for (size_t idx{0}; idx < slice_size; ++idx){
+                    auto& p_score{score_slice(idx)};
+                    p_score = expf(p_score - current_max);
+                    local_sum += p_score;
+                }
+
+                current_sum += warp_sum(local_sum);
+                
             }
     }
 

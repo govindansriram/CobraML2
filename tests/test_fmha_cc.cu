@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include <cobraml2/kernels/mha_naive.cuh>
+#include <cobraml2/kernels/fmha_cc.cuh>
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 #include <curand.h>

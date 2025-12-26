@@ -4,6 +4,9 @@
 #include <cub/cub.cuh>
 #include "../algos.cuh"
 
+// Fused Multi Head Attention, that runs purely on cuda cores
+// Based on the Flash Attention 1 algorithm.
+
 
 namespace cobraml::kernels{
 

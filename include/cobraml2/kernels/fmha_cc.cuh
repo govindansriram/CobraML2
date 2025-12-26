@@ -229,10 +229,10 @@ template<
     typename DType,
     int thread_count = 128
 >
-struct MHA{
+struct FMHA{
 
     using TensorDType = DType;
-    using Self = MHA<head_count, head_dim, B_r, B_c, DType, thread_count>;
+    using Self = FMHA<head_count, head_dim, B_r, B_c, DType, thread_count>;
 
     using NumHeadsType = Int<head_count>;
     using HeadDimType = Int<head_dim>;

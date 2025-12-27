@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include <cobraml2/kernels/mha.cuh>
+#include <cobraml2/kernels/fmha_cc.cuh>
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 #include <curand.h>
@@ -57,9 +57,7 @@ TEST(MHA_PURE_CUDA_TEST, kernel_launch_no_errors) {
         B, H, N, d, seeded_fill_fn(1)
     );
 
-    thrust::device_vector<float> v_device = create_projection<float>(
-        B, H, N, d, seeded_fill_fn(2)
-    );
+    using MHAType = FMHA<head_count, head_dim, B_r, B_c, float>;
 
     // Create output tensor initialized to zero
     auto fill_zero_fn = fill_zero<float>;

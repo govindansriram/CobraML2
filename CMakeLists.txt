@@ -26,6 +26,7 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xnvlink=--verbose -Xptxas=--verbose -
 # Full template error messages, Allow type punning, Silence ABI warnings, Pass unknown flags to gcc
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=-Wno-psabi -Xcompiler=-fno-strict-aliasing")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -forward-unknown-to-host-compiler -ftemplate-backtrace-limit=0")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --keep")
 
 add_library(cobraml2 INTERFACE)
 target_include_directories(cobraml2 INTERFACE 
@@ -39,7 +40,7 @@ target_include_directories(cobraml2 INTERFACE external/cutlass/tools/util/includ
 find_package(CUDAToolkit REQUIRED)
 target_link_libraries(cobraml2 INTERFACE CUDA::toolkit)
 
-option(COBRAML2_BUILD_TESTS "Build tests" OFF)
+option(COBRAML2_BUILD_TESTS "Build tests" ON)
 if(COBRAML2_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

@@ -12,4 +12,13 @@ __device__ DType warp_max(DType val) {
     return val;
 }
 
+template <typename DType>
+__device__ DType warp_sum(DType val) {
+
+    CUTE_UNROLL
+    for (int offset = 16; offset > 0; offset /= 2)
+        val += __shfl_xor_sync(0xffffffff, val, offset);
+    return val;
+}
+
 }

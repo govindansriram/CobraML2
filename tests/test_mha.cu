@@ -3,6 +3,8 @@
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 #include <curand.h>
+#include <vector>
+#include <cmath>
 
 
 using namespace cobraml::kernels;
@@ -45,6 +47,56 @@ auto seeded_fill_fn(int seed) {
     return [=](float* data, int length) {
         fill_random_uniform(data, length, seed);
     };
+}
+
+// CPU reference implementation for correctness verification
+// Computes: O = softmax(Q @ K^T / sqrt(d)) @ V
+// All tensors have shape [B, H, N, d]
+void cpu_attention(
+    float* Q, float* K, float* V, float* O,
+    int B, int H, int N, int d
+) {
+    for (int b = 0; b < B; b++) {
+        for (int h = 0; h < H; h++) {
+            // Get pointers for this (batch, head)
+            float* q = Q + (b * H + h) * N * d;
+            float* k = K + (b * H + h) * N * d;
+            float* v = V + (b * H + h) * N * d;
+            float* o = O + (b * H + h) * N * d;
+
+            for (int i = 0; i < N; i++) {
+                // Step 1: Compute scores for query i against all keys
+                float max_score = -INFINITY;
+                std::vector<float> scores(N);
+
+                for (int j = 0; j < N; j++) {
+                    float score = 0;
+                    for (int k_idx = 0; k_idx < d; k_idx++) {
+                        score += q[i * d + k_idx] * k[j * d + k_idx];
+                    }
+                    score /= sqrtf((float)d);
+                    scores[j] = score;
+                    max_score = std::max(max_score, score);
+                }
+
+                // Step 2: Softmax with numerical stability (subtract max)
+                float sum_exp = 0;
+                for (int j = 0; j < N; j++) {
+                    scores[j] = expf(scores[j] - max_score);
+                    sum_exp += scores[j];
+                }
+
+                // Step 3: Weighted sum of values
+                for (int k_idx = 0; k_idx < d; k_idx++) {
+                    float out = 0;
+                    for (int j = 0; j < N; j++) {
+                        out += (scores[j] / sum_exp) * v[j * d + k_idx];
+                    }
+                    o[i * d + k_idx] = out;
+                }
+            }
+        }
+    }
 }
 
 TEST(MHA_NAIVE_TEST, forward_pass) {
@@ -96,4 +148,31 @@ TEST(MHA_NAIVE_TEST, forward_pass) {
     cudaDeviceSynchronize();
     cudaError_t err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
+    // Copy inputs to host for CPU reference
+    thrust::host_vector<float> q_host = q_device;
+    thrust::host_vector<float> k_host = k_device;
+    thrust::host_vector<float> v_host = v_device;
+    thrust::host_vector<float> o_gpu = o_device;  // GPU output
+    
+    // Compute CPU reference
+    int total_output = batch_size * head_count * sequence_length * head_dim;
+    std::vector<float> o_cpu(total_output, 0.0f);
+    
+    cpu_attention(
+        q_host.data(), k_host.data(), v_host.data(), o_cpu.data(),
+        batch_size, head_count, sequence_length, head_dim
+    );
+    
+    // Compare GPU vs CPU with tolerance
+    float max_diff = 0.0f;
+    float tolerance = 1e-4f;
+    for (int i = 0; i < total_output; i++) {
+        float diff = std::fabs(o_gpu[i] - o_cpu[i]);
+        max_diff = std::max(max_diff, diff);
+        ASSERT_NEAR(o_gpu[i], o_cpu[i], tolerance)
+            << "Mismatch at index " << i
+            << ": GPU=" << o_gpu[i] << ", CPU=" << o_cpu[i];
+    }
+    
+    std::cout << "Max diff: " << max_diff << std::endl;
 }

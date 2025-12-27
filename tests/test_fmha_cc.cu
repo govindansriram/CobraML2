@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include <cobraml2/kernels/mha_naive.cuh>
+#include <cobraml2/kernels/fmha_cc.cuh>
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 #include <curand.h>
@@ -54,7 +54,7 @@ TEST(MHA_TEST, kernel) {
     int batch_size{56};
     int sequence_length{128};
 
-    using MHAType = MHA<head_count, head_dim, B_r, B_c, float>;
+    using MHAType = FMHA<head_count, head_dim, B_r, B_c, float>;
 
     thrust::device_vector<float> q_device{
         create_projection<float>(

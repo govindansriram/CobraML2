@@ -44,6 +44,7 @@ namespace naive{
         const typename MHAType::TensorDType * __restrict__ V,
         typename MHAType::TensorDType * __restrict__ O,
         const int N,
+        const typename MHAType::TensorDType scale,
         TiledCopyQType tc_q,
         TiledCopyKType tc_k,
         TiledCopyVType tc_v,
@@ -181,7 +182,7 @@ namespace naive{
             __syncthreads();
 
             gemm(t_mma_qk, q_mma, k_mma, r_scores_mma);
-            MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma);
+            MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma, scale);
             copy(tc_v, tV_global_part, tV_shared_part);
 
             __syncthreads();
@@ -346,12 +347,13 @@ struct FMHA{
         typename ProbTensorLayoutType,
         typename OutTensorLayoutType
     >
-    __device__ static void update_statistics(
+    __device__ inline static void update_statistics(
         Tensor<MaxTensorEngineType, MaxTensorLayoutType> &max_tensor, 
         Tensor<MaxTensorEngineType, MaxTensorLayoutType> &sum_tensor, 
         Tensor<RScoresTensorEngineType, ScoresTensorLayoutType> &r_scores,
         Tensor<ProbTensorEngineType, ProbTensorLayoutType> &prob_tensor,
-        Tensor<OutTensorEngineType, OutTensorLayoutType> &out_tensor
+        Tensor<OutTensorEngineType, OutTensorLayoutType> &out_tensor,
+        const DType scale
     ){
 
             static_assert(
@@ -387,6 +389,7 @@ struct FMHA{
                     // uses hardware unit, removes warp divergence from branch checks
                     // each thread may hold multiple values from each row, we find the 
                     // local maximum first
+                    r_score_slice(idx) = r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
                     current_max = cuda::std::max(r_score_slice(idx), current_max);
                 }
 
@@ -438,6 +441,10 @@ struct FMHA{
             thread_count
         };
 
+        DType scale{
+            rsqrt(static_cast<DType>(head_dim))
+        };
+
         const auto tc_q{get_tiled_copy()};
         const auto tc_k{get_tiled_copy()};
         const auto tc_v{get_tiled_copy()};
@@ -467,7 +474,7 @@ struct FMHA{
             cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
         kernel_fptr<<<grid_dim, block_dim, smem_size>>>(
-            Q, K, V, O, N,
+            Q, K, V, O, N, scale,
             tc_q, tc_k, tc_v,
             qk_mma, pv_mma
         );

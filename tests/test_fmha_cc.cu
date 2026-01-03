@@ -3,8 +3,6 @@
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 #include <test_common/mha.cuh>
-#include <curand.h>
-
 
 using namespace cobraml;
 using namespace cute;
@@ -59,7 +57,32 @@ void test_fmha(int batch_size, int sequence_length){
 
     cudaDeviceSynchronize();
     cudaError_t err = cudaGetLastError();
-    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+    ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
+        
+    thrust::host_vector<float> q_host = q_device;
+    thrust::host_vector<float> k_host = k_device;
+    thrust::host_vector<float> v_host = v_device;
+    thrust::host_vector<float> o_gpu = o_device;  // GPU output
+    
+    // Compute CPU reference
+    int total_output = batch_size * head_count * sequence_length * head_dim;
+    std::vector<float> o_cpu(total_output, 0.0f);
+    
+    test_helpers::cpu_mha(
+        q_host.data(), k_host.data(), v_host.data(), o_cpu.data(),
+        batch_size, head_count, sequence_length, head_dim
+    );
+    
+    // Compare GPU vs CPU with tolerance
+    float max_diff = 0.0f;
+    float tolerance = 1e-4f;
+    for (int i = 0; i < total_output; i++) {
+        float diff = std::fabs(o_gpu[i] - o_cpu[i]);
+        max_diff = std::max(max_diff, diff);
+        ASSERT_NEAR(o_gpu[i], o_cpu[i], tolerance)
+            << "Mismatch at index " << i
+            << ": GPU=" << o_gpu[i] << ", CPU=" << o_cpu[i];
+    }    
 }
 
 TEST(FMHA_CC, H16_Hd64_Br64_Bc64_Bs56_Sq128) {

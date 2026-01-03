@@ -2,87 +2,45 @@
 #include <cobraml2/kernels/fmha_cc.cuh>
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
-#include <curand.h>
+#include <test_common/mha.cuh>
 
-
-using namespace cobraml::kernels;
+using namespace cobraml;
 using namespace cute;
 
-template<typename DType>
-void fill_zero(float * data, int length){
-    cudaMemset(data, 0, length * sizeof(DType));    
-    cudaDeviceSynchronize(); 
-}
-
-void fill_projection_random_uniform(float * data, int length, int seed){
-    curandGenerator_t gen;
-    curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
-    curandSetPseudoRandomGeneratorSeed(gen, seed);
-    curandGenerateUniform(gen, data, length);
-    curandDestroyGenerator(gen);
-    cudaDeviceSynchronize(); 
-}
-
-template<typename DType>
-thrust::device_vector<DType> create_projection(
-    int head_count, 
-    int head_dim, 
-    int batch_size, 
-    int sequence_length,
-    auto fill_fn
-){
-    int total_length{head_count * head_dim * batch_size * sequence_length};
-    thrust::device_vector<DType> device_vec(total_length);
-    fill_fn(thrust::raw_pointer_cast(device_vec.data()), total_length);
-
-    return device_vec;
-}
-
-auto seeded_fill_fn(int seed) {
-    return [=](float * data, int length){
-        fill_projection_random_uniform(data, length, seed);
-    };
-}
-
-TEST(MHA_TEST, kernel) {
-
-    constexpr int head_count{16};
-    constexpr int head_dim{64};
-    constexpr int B_r{64};
-    constexpr int B_c{64};
-
-    int batch_size{56};
-    int sequence_length{128};
-
-    using MHAType = FMHA<head_count, head_dim, B_r, B_c, float>;
+template<
+    int head_count,
+    int head_dim,
+    int B_r,
+    int B_c
+>
+void test_fmha(int batch_size, int sequence_length){
+    using MHAType = kernels::FMHA<head_count, head_dim, B_r, B_c, float>;
 
     thrust::device_vector<float> q_device{
-        create_projection<float>(
+        test_helpers::create_projection<float>(
             head_count, head_dim, batch_size, sequence_length,
-            seeded_fill_fn(0)
+            test_helpers::seeded_fill_random_uniform<float>(0)
         )
     };
 
     thrust::device_vector<float> k_device{
-        create_projection<float>(
+        test_helpers::create_projection<float>(
             head_count, head_dim, batch_size, sequence_length,
-            seeded_fill_fn(1)
+            test_helpers::seeded_fill_random_uniform<float>(1)
         )
     };
 
     thrust::device_vector<float> v_device{
-        create_projection<float>(
+        test_helpers::create_projection<float>(
             head_count, head_dim, batch_size, sequence_length,
-            seeded_fill_fn(2)
+            test_helpers::seeded_fill_random_uniform<float>(2)
         )
     };
 
-    auto fill_zero_ptr{fill_zero<float>};
-
     thrust::device_vector<float> o_device{
-        create_projection<float>(
+        test_helpers::create_projection<float>(
             head_count, head_dim, batch_size, sequence_length,
-            fill_zero_ptr
+            test_helpers::fill_zero<float>
         )
     };
 
@@ -99,5 +57,35 @@ TEST(MHA_TEST, kernel) {
 
     cudaDeviceSynchronize();
     cudaError_t err = cudaGetLastError();
-    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+    ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
+        
+    thrust::host_vector<float> q_host = q_device;
+    thrust::host_vector<float> k_host = k_device;
+    thrust::host_vector<float> v_host = v_device;
+    thrust::host_vector<float> o_host = o_device;  // GPU output
+    
+    // Compute CPU reference
+    std::vector<float> o_ref(o_host.size(), 0.0f);
+        
+    test_helpers::cpu_mha(
+        q_host.data(), k_host.data(), v_host.data(), o_ref.data(),
+        batch_size, head_count, sequence_length, head_dim
+    );
+
+    std::vector<float> o_vec(o_host.begin(), o_host.end());
+    test_helpers::check_output(
+        o_vec,
+        o_ref,
+        batch_size,
+        head_count,
+        sequence_length,
+        head_dim,
+        1e-4f
+    );  
+}
+
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B56_N128) {
+    test_fmha<16, 64, 64, 64>(
+        56, 128
+    );
 }

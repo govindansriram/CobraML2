@@ -374,6 +374,7 @@ struct FMHA{
 
                 auto r_score_slice{r_scores(_, m, _)};
                 auto p_slice{(prob_tensor(_, m, _))};
+                auto o_slice{(out_tensor(_, m, _))};
 
                 if constexpr (rank(mma_shape) > 1)
                     static_assert(rank(mma_shape) > 1, "not yet implemented");  
@@ -417,8 +418,8 @@ struct FMHA{
                 current_sum += warp_sum(local_sum);
 
                 CUTE_UNROLL
-                for (size_t i{0}; i < size(out_tensor); i++){
-                    out_tensor(i) *= scale_old;
+                for (size_t i{0}; i < size(o_slice); i++){
+                    o_slice(i) *= scale_old;
                 }
             }
     }

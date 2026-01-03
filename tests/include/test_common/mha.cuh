@@ -1,5 +1,6 @@
 #pragma once
 #include "./initialize.cuh"
+#include <gtest/gtest.h>
 
 namespace cobraml::test_helpers{
 
@@ -65,4 +66,35 @@ namespace cobraml::test_helpers{
         return create_tensor<DType>(total_length, fill_fn);
     }
 
+
+    void check_output(
+        const std::vector<float> &result,
+        const std::vector<float> &expected,
+        int b,
+        int h,
+        int N,
+        int d,
+        float tolerance
+    ){
+        // float tolerance = 1e-4f;
+
+        ASSERT_EQ(result.size(), expected.size()) << "expected and result are incomparable, vector lengths are not the same";
+
+        for (int i = 0; i < expected.size(); i++) {
+
+            int batch{i / (h * N * d)};
+            int leftover{i % (h * N * d)};
+            int head{leftover / (N * d)};
+            leftover = leftover % (N * d);
+            int seq{leftover / d};
+            int idx{leftover % d};
+
+            ASSERT_NEAR(result[i], expected[i], tolerance)
+            << "Mismatch at batch: " << batch
+            << ", head: " << head
+            << ", sequence: " << seq
+            << ", idx: " << idx
+            << " ----- result=" << result[i] << ", expected=" << expected[i];
+        }
+    }  
 }

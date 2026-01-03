@@ -6,13 +6,11 @@
 
 using namespace cobraml;
 
-TEST(MHA_NAIVE_TEST, forward_pass) {
-    // Test configuration
-    constexpr int head_count = 16;   // H
-    constexpr int head_dim = 64;     // d
-    int batch_size = 56;             // B
-    int sequence_length = 128;       // N
-
+template<
+    int head_count,
+    int head_dim
+>
+void test_mha(int batch_size, int sequence_length){
     // Create Q tensor [B, H, N, d]
     thrust::device_vector<float> q_device{
         test_helpers::create_projection<float>(
@@ -64,25 +62,31 @@ TEST(MHA_NAIVE_TEST, forward_pass) {
     thrust::host_vector<float> q_host = q_device;
     thrust::host_vector<float> k_host = k_device;
     thrust::host_vector<float> v_host = v_device;
-    thrust::host_vector<float> o_gpu = o_device;  // GPU output
+    thrust::host_vector<float> o_host = o_device;  // GPU output
     
     // Compute CPU reference
-    int total_output = batch_size * head_count * sequence_length * head_dim;
-    std::vector<float> o_cpu(total_output, 0.0f);
+    std::vector<float> o_ref(o_host.size(), 0.0f);
     
     test_helpers::cpu_mha(
-        q_host.data(), k_host.data(), v_host.data(), o_cpu.data(),
+        q_host.data(), k_host.data(), v_host.data(), o_ref.data(),
         batch_size, head_count, sequence_length, head_dim
     );
     
-    // Compare GPU vs CPU with tolerance
-    float max_diff = 0.0f;
-    float tolerance = 1e-4f;
-    for (int i = 0; i < total_output; i++) {
-        float diff = std::fabs(o_gpu[i] - o_cpu[i]);
-        max_diff = std::max(max_diff, diff);
-        ASSERT_NEAR(o_gpu[i], o_cpu[i], tolerance)
-            << "Mismatch at index " << i
-            << ": GPU=" << o_gpu[i] << ", CPU=" << o_cpu[i];
-    }    
+    std::vector<float> o_vec(o_host.begin(), o_host.end());
+    test_helpers::check_output(
+        o_vec,
+        o_ref,
+        batch_size,
+        head_count,
+        sequence_length,
+        head_dim,
+        1e-4f
+    );     
+}
+
+TEST(MHA, H16_D64_B56_N128) {
+    test_mha<16, 64>(
+        56,
+        128
+    );
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include <cute/config.hpp>
+#include <cuda/std/functional>
 
 namespace cobraml{
 

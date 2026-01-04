@@ -9,6 +9,8 @@ BENCHMARK=OFF
 TARGET=""
 RUN_TARGET=""
 RUN_ALL=false
+FORMAT=false
+FORMAT_FILE=""
 RUN_ARGS=()
 
 usage() {
@@ -21,6 +23,7 @@ usage() {
     echo "  -t, --target <target>     Build specific target (e.g., test_mha)"
     echo "  -r, --run <target>        Build and run specific target"
     echo "  -a, --run-all             Build and run all tests (ctest)"
+    echo "  -f, --format [file]       Format all files, or specific file if provided"
     echo "  --no-tests                Disable building tests"
     echo "  --                        Remaining args passed to executable/ctest"
     echo ""
@@ -30,9 +33,10 @@ usage() {
     echo "  $0 -t test_mha            # Build only test_mha"
     echo "  $0 -r test_mha            # Build and run test_mha"
     echo "  $0 -a                     # Build and run all tests"
+    echo "  $0 -f                     # Format all source files"
+    echo "  $0 -f src/main.cu         # Format specific file"
     echo "  $0 -c -b -r test_mha      # Clean build with benchmarking, then run"
     echo "  $0 -r test_mha -- --gtest_filter=*Perf*"
-    echo "  $0 -a -- --verbose        # Run all tests with verbose output"
 }
 
 # Parse arguments
@@ -63,6 +67,15 @@ while [[ $# -gt 0 ]]; do
             RUN_ALL=true
             shift
             ;;
+        -f|--format)
+            FORMAT=true
+            # Check if next arg is a file (not another flag)
+            if [[ $# -gt 1 && ! "$2" =~ ^- ]]; then
+                FORMAT_FILE="$2"
+                shift
+            fi
+            shift
+            ;;
         --no-tests)
             TESTS=OFF
             shift
@@ -80,11 +93,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Format if requested
+if [ "$FORMAT" = true ]; then
+    if [ -n "$FORMAT_FILE" ]; then
+        echo "Formatting: $FORMAT_FILE"
+        clang-format -i "$FORMAT_FILE"
+    else
+        echo "Formatting all source files..."
+        find include tests -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' | xargs clang-format -i
+    fi
+    echo "Done formatting."
+    # Exit if only formatting was requested
+    if [ "$CLEAN" = false ] && [ -z "$TARGET" ] && [ -z "$RUN_TARGET" ] && [ "$RUN_ALL" = false ]; then
+        exit 0
+    fi
+fi
+
 # Clean if requested
 if [ "$CLEAN" = true ]; then
     echo "Cleaning build directory..."
     rm -rf "$BUILD_DIR"
 fi
+
+mkdir -p "$BUILD_DIR"
 
 # Configure
 echo "Configuring (BENCHMARK=${BENCHMARK})..."

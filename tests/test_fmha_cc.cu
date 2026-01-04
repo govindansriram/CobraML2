@@ -29,12 +29,13 @@ void test_fmha(int batch_size, int sequence_length) {
 
   MHAType mha{};
 
-  cudaEvent_t start, stop;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
-
+#ifdef BENCHMARK
   constexpr size_t warmup_iters{2};
   constexpr size_t total_iters{10};
+#else
+  constexpr size_t warmup_iters{1};
+#endif
+
   for (size_t i{0}; i < warmup_iters; ++i) {
     mha(thrust::raw_pointer_cast(q_device.data()),
         thrust::raw_pointer_cast(k_device.data()),
@@ -43,8 +44,13 @@ void test_fmha(int batch_size, int sequence_length) {
   }
   cudaDeviceSynchronize();
 
+#ifdef BENCHMARK
   float total_time_ms{0};
   float ms;
+
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
 
   for (size_t i{0}; i < total_iters; ++i) {
     cudaEventRecord(start);
@@ -73,6 +79,10 @@ void test_fmha(int batch_size, int sequence_length) {
                                               sequence_length, head_dim,
                                               average_time_ms)
             << " GFLOPs\n";
+#else
+  cudaError_t err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
+#endif
 
   thrust::host_vector<float> q_host = q_device;
   thrust::host_vector<float> k_host = k_device;

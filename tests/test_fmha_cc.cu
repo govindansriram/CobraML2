@@ -29,14 +29,50 @@ void test_fmha(int batch_size, int sequence_length) {
 
   MHAType mha{};
 
-  mha(thrust::raw_pointer_cast(q_device.data()),
-      thrust::raw_pointer_cast(k_device.data()),
-      thrust::raw_pointer_cast(v_device.data()),
-      thrust::raw_pointer_cast(o_device.data()), batch_size, sequence_length);
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
 
+  constexpr size_t warmup_iters{2};
+  constexpr size_t total_iters{10};
+  for (size_t i{0}; i < warmup_iters; ++i) {
+    mha(thrust::raw_pointer_cast(q_device.data()),
+        thrust::raw_pointer_cast(k_device.data()),
+        thrust::raw_pointer_cast(v_device.data()),
+        thrust::raw_pointer_cast(o_device.data()), batch_size, sequence_length);
+  }
   cudaDeviceSynchronize();
+
+  float total_time_ms{0};
+  float ms;
+
+  for (size_t i{0}; i < total_iters; ++i) {
+    cudaEventRecord(start);
+    mha(thrust::raw_pointer_cast(q_device.data()),
+        thrust::raw_pointer_cast(k_device.data()),
+        thrust::raw_pointer_cast(v_device.data()),
+        thrust::raw_pointer_cast(o_device.data()), batch_size, sequence_length);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&ms, start, stop);
+    total_time_ms += ms;
+  }
+
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+
   cudaError_t err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
+
+  float average_time_ms{total_time_ms / total_iters};
+
+  // Calculate GFLOPs
+  std::cout << "Avg Kernel execution time: " << average_time_ms << " ms\n";
+  std::cout << "Achieved performance: "
+            << test_helpers::calculate_gflops(batch_size, head_count,
+                                              sequence_length, head_dim,
+                                              average_time_ms)
+            << " GFLOPs\n";
 
   thrust::host_vector<float> q_host = q_device;
   thrust::host_vector<float> k_host = k_device;

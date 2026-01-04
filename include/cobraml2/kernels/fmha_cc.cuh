@@ -40,23 +40,14 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
            TiledMMAPV t_mma_pv) {
 
   using DType = typename MHAType::TensorDType;
-
-  auto q_ptr{make_gmem_ptr<DType>(Q)};
-  auto k_ptr{make_gmem_ptr<DType>(K)};
-  auto v_ptr{make_gmem_ptr<DType>(V)};
-  auto o_ptr{make_gmem_ptr<DType>(O)};
-
   size_t batch_size{gridDim.y};
 
-  const auto q_layout{MHAType::get_tensor_layout(batch_size, N)};
-  const auto k_layout{MHAType::get_tensor_layout(batch_size, N)};
-  const auto v_layout{MHAType::get_tensor_layout(batch_size, N)};
-  const auto o_layout{MHAType::get_tensor_layout(batch_size, N)};
+  const auto head_layout{MHAType::get_tensor_layout(batch_size, N)};
 
-  const auto q_tensor{make_tensor(q_ptr, q_layout)};
-  const auto k_tensor{make_tensor(k_ptr, k_layout)};
-  const auto v_tensor{make_tensor(v_ptr, v_layout)};
-  const auto o_tensor{make_tensor(o_ptr, o_layout)};
+  const auto q_tensor{make_tensor(make_gmem_ptr<DType>(Q), head_layout)};
+  const auto k_tensor{make_tensor(make_gmem_ptr<DType>(K), head_layout)};
+  const auto v_tensor{make_tensor(make_gmem_ptr<DType>(V), head_layout)};
+  const auto o_tensor{make_tensor(make_gmem_ptr<DType>(O), head_layout)};
 
   const auto q_head{q_tensor(blockIdx.y, blockIdx.x, _, _)};
   const auto k_head{k_tensor(blockIdx.y, blockIdx.x, _, _)};
@@ -68,26 +59,20 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   SharedStorageType *shared_storage{
       reinterpret_cast<SharedStorageType *>(shared_memory)};
 
-  auto shared_q_ptr{make_smem_ptr(shared_storage->Q.begin())};
-  auto shared_k_ptr{make_smem_ptr(shared_storage->K.begin())};
-  auto shared_v_ptr{make_smem_ptr(shared_storage->V.begin())};
-  auto shared_p_ptr{make_smem_ptr(shared_storage->P.begin())};
-  auto shared_o_ptr{make_smem_ptr(shared_storage->O.begin())};
-
   Tensor shared_q{
-      make_tensor(shared_q_ptr, typename SharedStorageType::QOLayoutType{})};
+      make_tensor(make_smem_ptr(shared_storage->Q.begin()), typename SharedStorageType::QLayoutType{})};
 
   Tensor shared_k{
-      make_tensor(shared_k_ptr, typename SharedStorageType::KVLayoutType{})};
+      make_tensor(make_smem_ptr(shared_storage->K.begin()), typename SharedStorageType::KVLayoutType{})};
 
   Tensor shared_v{
-      make_tensor(shared_k_ptr, typename SharedStorageType::KVLayoutType{})};
+      make_tensor(make_smem_ptr(shared_storage->V.begin()), typename SharedStorageType::KVLayoutType{})};
 
   Tensor trans_shared_v{make_tensor(
-      shared_k_ptr, typename SharedStorageType::VTransposedLayoutType{})};
+      make_smem_ptr(shared_storage->V.begin()), typename SharedStorageType::VTransposedLayoutType{})};
 
   Tensor shared_p{
-      make_tensor(shared_p_ptr, typename SharedStorageType::PLayoutType{})};
+      make_tensor(make_smem_ptr(shared_storage->P.begin()), typename SharedStorageType::PLayoutType{})};
 
   // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
 
@@ -224,9 +209,8 @@ struct FMHA {
     ArrayEngine<DType, B_c * head_dim> K;
     ArrayEngine<DType, B_c * head_dim> V;
     ArrayEngine<DType, B_r * B_c> P;
-    ArrayEngine<DType, B_r * head_dim> O;
 
-    using QOLayoutType =
+    using QLayoutType =
         Layout<Shape<QueryRowsType, HeadDimType>, Stride<HeadDimType, _1>>;
     using KVLayoutType =
         Layout<Shape<KVColsType, HeadDimType>, Stride<HeadDimType, _1>>;

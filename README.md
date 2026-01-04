@@ -6,7 +6,7 @@ Built from scratch, documenting every step along the way.
 
 ## Installation
 
-So far all code has only been tested on systems with CUDA >= 12.8 and Ubuntu 22.04.
+So far all code has only been tested on systems with `CUDA >= 12.8` and `Ubuntu 22.04`
 
 ### Build from source
 ```bash
@@ -46,7 +46,7 @@ And run them using:
 
 ### Linting
 
-All files must be formatted to follow the style specified by `.clang-format`.
+All files must be formatted to follow the style specified by `clang-format`.
 
 Ensure clang-format is installed by running `clang-format --version`.
 
@@ -57,4 +57,5 @@ Formatting can be applied to all files by running:
 
 Or to a single file:
 ```bash
-./runner.
+./runner.sh -f /path/to/my/file.cuh
+```

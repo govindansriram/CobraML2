@@ -84,4 +84,10 @@ void check_output(const std::vector<float> &result,
         << " ----- result=" << result[i] << ", expected=" << expected[i];
   }
 }
+
+float calculate_gflops(size_t b, size_t h, size_t N, size_t d, float ms){
+  size_t flops{4 * b * h * N * N * d};
+  float seconds = ms / 1000.0f;
+  return flops / seconds / 1e9;
+}
 } // namespace cobraml::test_helpers

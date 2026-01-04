@@ -24,6 +24,10 @@ void test_mha(int batch_size, int sequence_length) {
   thrust::device_vector<float> o_device{test_helpers::create_projection<float>(
       head_count, head_dim, batch_size, sequence_length,
       test_helpers::fill_zero<float>)};
+
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
       
   constexpr size_t warmup_iters{2};
   constexpr size_t total_iters{10};
@@ -41,8 +45,12 @@ void test_mha(int batch_size, int sequence_length) {
 
   // Sync and check for CUDA errors
   cudaDeviceSynchronize();
-  auto start = std::chrono::high_resolution_clock::now();
+  
+  float total_time_ms{0};
+  float ms;
+
   for (size_t i{0}; i < total_iters; ++i){
+    cudaEventRecord(start);
     kernels::mha_forward(thrust::raw_pointer_cast(q_device.data()),
                         thrust::raw_pointer_cast(k_device.data()),
                         thrust::raw_pointer_cast(v_device.data()),
@@ -52,19 +60,25 @@ void test_mha(int batch_size, int sequence_length) {
                         sequence_length, // N
                         head_dim         // d
     );
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&ms, start, stop);
+    total_time_ms += ms;
   }
-  cudaDeviceSynchronize();
-  auto end = std::chrono::high_resolution_clock::now();
+  
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
 
   cudaError_t err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
+  
+  float average_time_ms{total_time_ms / total_iters};
 
-  std::chrono::duration<double> diff = end - start;
-  double useconds = diff.count() * 1e6 / total_iters;
-  // Copy inputs to host for CPU reference
-
-  // Calculate TFLOPs
-  std::cout << "Avg Kernel execution time: " << useconds << " us\n";
+  // Calculate GFLOPs
+  std::cout << "Avg Kernel execution time: " << average_time_ms << " ms\n";
+  std::cout << "Achieved performance: " << test_helpers::calculate_gflops(
+    batch_size, head_count, sequence_length, head_dim, average_time_ms
+  ) << " GFLOPs\n";
 
   thrust::host_vector<float> q_host = q_device;
   thrust::host_vector<float> k_host = k_device;

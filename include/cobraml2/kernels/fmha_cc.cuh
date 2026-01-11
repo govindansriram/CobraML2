@@ -28,31 +28,22 @@ namespace naive {
  * @param N sequence length: tokens per sequence
  * @return void
  */
-template <typename MHAType, typename TiledCopyQType, typename TiledCopyKType,
-          typename TiledCopyVType, typename TiledMMAQK, typename TiledMMAPV>
+template <typename MHAType, typename TiledCopyType, typename TiledMMAQK, typename TiledMMAPV>
 __global__ void
 mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
            const typename MHAType::TensorDType *__restrict__ K,
            const typename MHAType::TensorDType *__restrict__ V,
            typename MHAType::TensorDType *__restrict__ O, const int N,
-           const typename MHAType::TensorDType scale, TiledCopyQType tc_q,
-           TiledCopyKType tc_k, TiledCopyVType tc_v, TiledMMAQK t_mma_qk,
-           TiledMMAPV t_mma_pv) {
+           const typename MHAType::TensorDType scale, TiledCopyType tc,
+           TiledMMAQK t_mma_qk, TiledMMAPV t_mma_pv) {
 
   using DType = typename MHAType::TensorDType;
   size_t batch_size{gridDim.y};
 
-  const auto head_layout{MHAType::get_tensor_layout(batch_size, N)};
-
-  const auto q_tensor{make_tensor(make_gmem_ptr<DType>(Q), head_layout)};
-  const auto k_tensor{make_tensor(make_gmem_ptr<DType>(K), head_layout)};
-  const auto v_tensor{make_tensor(make_gmem_ptr<DType>(V), head_layout)};
-  const auto o_tensor{make_tensor(make_gmem_ptr<DType>(O), head_layout)};
-
-  const auto q_head{q_tensor(blockIdx.y, _, blockIdx.x, _)};
-  const auto k_head{k_tensor(blockIdx.y, _, blockIdx.x, _)};
-  const auto v_head{v_tensor(blockIdx.y, _, blockIdx.x, _)};
-  const auto o_head{o_tensor(blockIdx.y, _, blockIdx.x, _)};
+  const Tensor q_head{MHAType::slice_head(Q, batch_size, N)};
+  const Tensor k_head{MHAType::slice_head(K, batch_size, N)};
+  const Tensor v_head{MHAType::slice_head(V, batch_size, N)};
+  Tensor o_head{MHAType::slice_head(O, batch_size, N)};
 
   extern __shared__ char shared_memory[];
   using SharedStorageType = typename MHAType::SharedStorage;
@@ -86,13 +77,13 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   auto kv_tiler{make_shape(B_c, d)};
 
   Tensor q_iterator{
-      local_tile(q_head, q_tiler, coord)}; // (B_r, d, floor(N / B_r))
+      local_tile(q_head, q_tiler, coord)}; // (B_r, d, ceil(N / B_r))
   Tensor k_iterator{
-      local_tile(k_head, kv_tiler, coord)}; // (B_c, d, floor(N / B_c))
+      local_tile(k_head, kv_tiler, coord)}; // (B_c, d, ceil(N / B_c))
   Tensor v_iterator{
-      local_tile(v_head, kv_tiler, coord)}; // (B_c, d, floor(N / B_c))
+      local_tile(v_head, kv_tiler, coord)}; // (B_c, d, ceil(N / B_c))
   Tensor o_iterator{
-      local_tile(o_head, q_tiler, coord)}; // (B_c, d, floor(N / B_c))
+      local_tile(o_head, q_tiler, coord)}; // (B_c, d, ceil(N / B_r))
 
   auto iters{size<2>(k_iterator)};
 
@@ -102,14 +93,12 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   // move q to shared memory
 
   // t prefix means unique to this thread
-  ThrCopy thr_copy_q{tc_q.get_slice(threadIdx.x)};
-  ThrCopy thr_copy_k{tc_k.get_slice(threadIdx.x)};
-  ThrCopy thr_copy_v{tc_v.get_slice(threadIdx.x)};
+  ThrCopy thr_copy_qkv{tc.get_slice(threadIdx.x)};
 
-  Tensor tQ_global_part{thr_copy_q.partition_S(q_slice)};
-  Tensor tQ_shared_part{thr_copy_q.partition_D(shared_q)};
-  Tensor tK_shared_part{thr_copy_k.partition_D(shared_k)};
-  Tensor tV_shared_part{thr_copy_v.partition_D(shared_v)};
+  Tensor tQ_global_part{thr_copy_qkv.partition_S(q_slice)};
+  Tensor tQ_shared_part{thr_copy_qkv.partition_D(shared_q)};
+  Tensor tK_shared_part{thr_copy_qkv.partition_D(shared_k)};
+  Tensor tV_shared_part{thr_copy_qkv.partition_D(shared_v)};
 
   ThrMMA thr_mma_qk{t_mma_qk.get_slice(threadIdx.x)};
 
@@ -129,7 +118,7 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
   clear(r_scores_mma); // Zero the accumulator
 
-  copy(tc_q, tQ_global_part, tQ_shared_part);
+  copy(tc, tQ_global_part, tQ_shared_part);
   __syncthreads(); // redundant
 
   // start with the lowest possible value
@@ -142,16 +131,16 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
     Tensor k_slice{k_iterator(_, _, iter)};
     Tensor v_slice{v_iterator(_, _, iter)};
 
-    Tensor tK_global_part{thr_copy_k.partition_S(k_slice)};
-    Tensor tV_global_part{thr_copy_v.partition_S(v_slice)};
+    Tensor tK_global_part{thr_copy_qkv.partition_S(k_slice)};
+    Tensor tV_global_part{thr_copy_qkv.partition_S(v_slice)};
 
-    copy(tc_k, tK_global_part, tK_shared_part);
+    copy(tc, tK_global_part, tK_shared_part);
 
     __syncthreads();
 
     gemm(t_mma_qk, q_mma, k_mma, r_scores_mma);
     MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma, scale);
-    copy(tc_v, tV_global_part, tV_shared_part);
+    copy(tc, tV_global_part, tV_shared_part);
 
     __syncthreads();
 
@@ -226,20 +215,34 @@ struct FMHA {
                        LayoutRight{});
   }
 
-  CUTE_HOST_DEVICE static constexpr int get_total_threads() {
-    constexpr int elements_per_load{sizeof(VectorizedLoadType) / sizeof(DType)};
-    constexpr int threads_per_row{head_dim / elements_per_load};
+  template<typename PtrType>
+  __forceinline__ __device__ static auto slice_head(PtrType g_ptr, int batch_size, int N){
 
-    static_assert(head_dim % elements_per_load == 0,
-                  "head dimension in bytes must be a multiple of 128");
+    using BaseType = std::decay_t<std::remove_pointer_t<PtrType>>;
+    static_assert(std::is_pointer_v<PtrType>, "Must be a pointer");
+    static_assert(std::is_same_v<std::remove_cv_t<std::remove_pointer_t<PtrType>>, DType>, 
+              "Must point to DType");
 
-    constexpr int total_threads{B_r * threads_per_row};
 
-    static_assert(total_threads % 32 == 0,
-                  "block size requires an odd number of threads");
-
-    return total_threads;
+    const auto head_layout{get_tensor_layout(batch_size, N)};
+    const Tensor projection{make_tensor(make_gmem_ptr<DType>(g_ptr), head_layout)};
+    return projection(blockIdx.y, _, blockIdx.x, _);
   }
+
+  // CUTE_HOST_DEVICE static constexpr int get_total_threads() {
+  //   constexpr int elements_per_load{sizeof(VectorizedLoadType) / sizeof(DType)};
+  //   constexpr int threads_per_row{head_dim / elements_per_load};
+
+  //   static_assert(head_dim % elements_per_load == 0,
+  //                 "head dimension in bytes must be a multiple of 128");
+
+  //   constexpr int total_threads{B_r * threads_per_row};
+
+  //   static_assert(total_threads % 32 == 0,
+  //                 "block size requires an odd number of threads");
+
+  //   return total_threads;
+  // }
 
   static constexpr auto get_tiled_copy() {
 
@@ -290,7 +293,7 @@ struct FMHA {
             typename ProbTensorEngineType, typename OutTensorEngineType,
             typename MaxTensorLayoutType, typename ScoresTensorLayoutType,
             typename ProbTensorLayoutType, typename OutTensorLayoutType>
-  __device__ inline static void update_statistics(
+  __forceinline__ __device__ static void update_statistics(
       Tensor<MaxTensorEngineType, MaxTensorLayoutType> &max_tensor,
       Tensor<MaxTensorEngineType, MaxTensorLayoutType> &sum_tensor,
       Tensor<RScoresTensorEngineType, ScoresTensorLayoutType> &r_scores,
@@ -377,9 +380,7 @@ struct FMHA {
     const auto qk_mma{get_tiled_mma()};
     const auto pv_mma{get_tiled_mma()};
 
-    auto kernel_fptr{
-        naive::mha_kernel<Self, decltype(tc_q), decltype(tc_k), decltype(tc_v),
-                          decltype(qk_mma), decltype(pv_mma)>};
+    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc_q), decltype(qk_mma), decltype(pv_mma)>};
 
     size_t smem_size{sizeof(SharedStorage)};
 
@@ -390,8 +391,7 @@ struct FMHA {
     cudaFuncSetAttribute(kernel_fptr,
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc_q,
-                                                    tc_k, tc_v, qk_mma, pv_mma);
+    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc_q, qk_mma, pv_mma);
 
     // print(tc_q);
     // print_latex(tc_q);

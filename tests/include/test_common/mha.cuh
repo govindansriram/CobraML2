@@ -6,17 +6,11 @@ namespace cobraml::test_helpers {
 
 // CPU reference implementation for correctness verification
 // Computes: O = softmax(Q @ K^T / sqrt(d)) @ V
-// All tensors have shape [B, H, N, d]
-void cpu_mha(float *Q, float *K, float *V, float *O, int B, int H, int N,
+// All tensors have shape [B, N, H, d] (BSHD layout)
+void cpu_mha(float *Q, float *K, float *V, float *O, int B, int N, int H,
              int d) {
   for (int b = 0; b < B; b++) {
     for (int h = 0; h < H; h++) {
-      // Get pointers for this (batch, head)
-      float *q = Q + (b * H + h) * N * d;
-      float *k = K + (b * H + h) * N * d;
-      float *v = V + (b * H + h) * N * d;
-      float *o = O + (b * H + h) * N * d;
-
       for (int i = 0; i < N; i++) {
         // Step 1: Compute scores for query i against all keys
         float max_score = -INFINITY;
@@ -25,7 +19,10 @@ void cpu_mha(float *Q, float *K, float *V, float *O, int B, int H, int N,
         for (int j = 0; j < N; j++) {
           float score = 0;
           for (int k_idx = 0; k_idx < d; k_idx++) {
-            score += q[i * d + k_idx] * k[j * d + k_idx];
+            // BSHD: index is b * (N*H*d) + seq * (H*d) + h * d + k_idx
+            int q_idx = b * (N * H * d) + i * (H * d) + h * d + k_idx;
+            int k_idx_full = b * (N * H * d) + j * (H * d) + h * d + k_idx;
+            score += Q[q_idx] * K[k_idx_full];
           }
           score /= sqrtf((float)d);
           scores[j] = score;
@@ -43,9 +40,11 @@ void cpu_mha(float *Q, float *K, float *V, float *O, int B, int H, int N,
         for (int k_idx = 0; k_idx < d; k_idx++) {
           float out = 0;
           for (int j = 0; j < N; j++) {
-            out += (scores[j] / sum_exp) * v[j * d + k_idx];
+            int v_idx = b * (N * H * d) + j * (H * d) + h * d + k_idx;
+            out += (scores[j] / sum_exp) * V[v_idx];
           }
-          o[i * d + k_idx] = out;
+          int o_idx = b * (N * H * d) + i * (H * d) + h * d + k_idx;
+          O[o_idx] = out;
         }
       }
     }

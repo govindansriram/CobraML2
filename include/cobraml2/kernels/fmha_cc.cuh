@@ -21,10 +21,10 @@ namespace naive {
  * this allows the model to localize attention to that specific chunk
  * hence multi head attention.
  * @tparam d the length of each head
- * @param Q the query projection [batch, num_heads, N, d]
- * @param K the key projection [batch, num_heads, N, d]
- * @param V the value projection [batch, num_heads, N, d]
- * @param O the output [batch, num_heads, N, d]
+ * @param Q the query projection [batch, N, num_heads, d]
+ * @param K the key projection [batch, N, num_heads, d]
+ * @param V the value projection [batch, N, num_heads, d]
+ * @param O the output [batch, N, num_heads, d]
  * @param N sequence length: tokens per sequence
  * @return void
  */
@@ -49,10 +49,10 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   const auto v_tensor{make_tensor(make_gmem_ptr<DType>(V), head_layout)};
   const auto o_tensor{make_tensor(make_gmem_ptr<DType>(O), head_layout)};
 
-  const auto q_head{q_tensor(blockIdx.y, blockIdx.x, _, _)};
-  const auto k_head{k_tensor(blockIdx.y, blockIdx.x, _, _)};
-  const auto v_head{v_tensor(blockIdx.y, blockIdx.x, _, _)};
-  const auto o_head{o_tensor(blockIdx.y, blockIdx.x, _, _)};
+  const auto q_head{q_tensor(blockIdx.y, _, blockIdx.x, _)};
+  const auto k_head{k_tensor(blockIdx.y, _, blockIdx.x, _)};
+  const auto v_head{v_tensor(blockIdx.y, _, blockIdx.x, _)};
+  const auto o_head{o_tensor(blockIdx.y, _, blockIdx.x, _)};
 
   extern __shared__ char shared_memory[];
   using SharedStorageType = typename MHAType::SharedStorage;
@@ -222,7 +222,7 @@ struct FMHA {
   static constexpr int threads_per_block{thread_count};
 
   CUTE_HOST_DEVICE static auto get_tensor_layout(size_t batch_size, size_t N) {
-    return make_layout(make_shape(batch_size, NumHeadsType{}, N, HeadDimType{}),
+    return make_layout(make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}),
                        LayoutRight{});
   }
 

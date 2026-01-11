@@ -110,4 +110,4 @@ void test_mha(int batch_size, int sequence_length) {
                              sequence_length, head_dim, 1e-4f);
 }
 
-TEST(MHA, H16_D64_B56_N128) { test_mha<16, 64>(56, 128); }
+TEST(MHA, H16_D64_B56_N128) { test_mha<16, 64>(56, 512); }

@@ -1,5 +1,6 @@
 #pragma once
 #include "../algos.cuh"
+#include "../macros.cuh"
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
 
@@ -90,8 +91,6 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor q_slice{q_iterator(_, _, blockIdx.z)};
   Tensor out_slice{o_iterator(_, _, blockIdx.z)};
 
-  // move q to shared memory
-
   // t prefix means unique to this thread
   ThrCopy thr_copy_qkv{tc.get_slice(threadIdx.x)};
 
@@ -117,13 +116,34 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor g_out_mma{thr_mma_pv.partition_C(out_slice)};
   Tensor r_out_mma{thr_mma_pv.make_fragment_C(g_out_mma)};
 
+  Tensor head_idty{MHAType::identity_slice_head(batch_size, N)};
+
+  // make q identity tensor
+  Tensor q_iterator_idty{
+      local_tile(head_idty, q_tiler, coord)}; // (B_r, d, ceil(N / B_r))
+  Tensor q_head_slice_idty{q_iterator_idty(_, _, blockIdx.z)};
+  Tensor tQ_idty_part{thr_copy_qkv.partition_S(q_head_slice_idty)};
+
+  // predicated copy
+  MHAType::predicate_copy_tensor(
+    tQ_idty_part,
+    tQ_global_part,
+    tQ_shared_part,
+    tc,
+    DType(0),
+    N
+  );
+
   auto mma_m{select<1>(q_mma.shape())};
 
   Tensor r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
   clear(r_scores_mma); // Zero the accumulator
 
-  copy(tc, tQ_global_part, tQ_shared_part);
   __syncthreads(); // redundant
+
+  // if (threadIdx.x == 120 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 7){
+  //   print_tensor(shared_q);
+  // }
 
   // start with the lowest possible value
   Tensor m{make_tensor<DType>(mma_m)};
@@ -160,8 +180,6 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
       out_slice(idx) = out_slice(idx) / l(m_row);
     }
   }
-
-  // scale
 
   copy(r_out_mma, g_out_mma);
 }
@@ -208,13 +226,13 @@ struct FMHA {
 
   static constexpr int threads_per_block{thread_count};
 
-  CUTE_HOST_DEVICE static auto get_tensor_layout(size_t batch_size, size_t N) {
+  COBRA_S_DEVICE auto get_tensor_layout(size_t batch_size, size_t N) {
     return make_layout(make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}),
                        LayoutRight{});
   }
 
   template<typename PtrType>
-  __forceinline__ __device__ static auto slice_head(PtrType g_ptr, int batch_size, int N){
+  COBRA_S_DEVICE auto slice_head(PtrType g_ptr, int batch_size, int N){
 
     using BaseType = std::decay_t<std::remove_pointer_t<PtrType>>;
     static_assert(std::is_pointer_v<PtrType>, "Must be a pointer");
@@ -222,8 +240,14 @@ struct FMHA {
               "Must point to DType");
 
 
-    const auto head_layout{get_tensor_layout(batch_size, N)};
-    const Tensor projection{make_tensor(make_gmem_ptr<DType>(g_ptr), head_layout)};
+    const auto projection_layout{get_tensor_layout(batch_size, N)};
+    const Tensor projection{make_tensor(make_gmem_ptr<DType>(g_ptr), projection_layout)};
+    return projection(blockIdx.y, _, blockIdx.x, _);
+  }
+
+  COBRA_S_DEVICE auto identity_slice_head(int batch_size, int N){
+    const auto projection_layout{get_tensor_layout(batch_size, N)};
+    const Tensor projection{make_identity_tensor(projection_layout.shape())};
     return projection(blockIdx.y, _, blockIdx.x, _);
   }
 
@@ -287,11 +311,46 @@ struct FMHA {
 
   static_assert(B_c % B_r == 0, "B_c must be a multiple of B_r");
 
+  template<
+      typename IdentityTensorEngineType, 
+      typename IdentityTensorLayoutType,
+      typename SourceTensorEngineType, 
+      typename SourceTensorLayoutType,
+      typename DestinationTensorEngineType, 
+      typename DestinationTensorLayoutType,
+      typename TiledCopyType
+    >
+    COBRA_S_DEVICE void predicate_copy_tensor(
+      const Tensor<IdentityTensorEngineType, IdentityTensorLayoutType> &identity_tensor, 
+      const Tensor<SourceTensorEngineType, SourceTensorLayoutType> &source_tensor, 
+      Tensor<DestinationTensorEngineType, DestinationTensorLayoutType> &destination_tensor,
+      TiledCopyType tiled_copy,
+      DType fill_value, 
+      int bound){
+
+    constexpr int rows{size(get<1>(SourceTensorLayoutType{}))};
+
+    CUTE_UNROLL
+    for (int i{0}; i < rows; ++i){
+      auto seq_idx{get<1>(identity_tensor(0, i, 0))};
+
+      if (seq_idx < bound){
+        copy(
+          tiled_copy, 
+          source_tensor(_, i, _), 
+          destination_tensor(_, i, _)
+        );
+      }else{
+        fill(destination_tensor(_, i, _), fill_value);
+      }
+    }
+  }
+
   template <typename MaxTensorEngineType, typename RScoresTensorEngineType,
             typename ProbTensorEngineType, typename OutTensorEngineType,
             typename MaxTensorLayoutType, typename ScoresTensorLayoutType,
             typename ProbTensorLayoutType, typename OutTensorLayoutType>
-  __forceinline__ __device__ static void update_statistics(
+  COBRA_S_DEVICE void update_statistics(
       Tensor<MaxTensorEngineType, MaxTensorLayoutType> &max_tensor,
       Tensor<MaxTensorEngineType, MaxTensorLayoutType> &sum_tensor,
       Tensor<RScoresTensorEngineType, ScoresTensorLayoutType> &r_scores,
@@ -388,9 +447,6 @@ struct FMHA {
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
     kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc, qk_mma, pv_mma);
-
-    // print(tc_q);
-    // print_latex(tc_q);
   }
 };
 

@@ -95,9 +95,13 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   // t prefix means unique to this thread
   ThrCopy thr_copy_qkv{tc.get_slice(threadIdx.x)};
 
-  Tensor tQ_global_part{thr_copy_qkv.partition_S(q_slice)};
+  const Tensor tQ_global_part{thr_copy_qkv.partition_S(q_slice)};
   Tensor tQ_shared_part{thr_copy_qkv.partition_D(shared_q)};
+
+  const Tensor tK_global_part_iter{thr_copy_qkv.partition_S(k_iterator)};
   Tensor tK_shared_part{thr_copy_qkv.partition_D(shared_k)};
+
+  const Tensor tV_global_part_iter{thr_copy_qkv.partition_S(v_iterator)};
   Tensor tV_shared_part{thr_copy_qkv.partition_D(shared_v)};
 
   ThrMMA thr_mma_qk{t_mma_qk.get_slice(threadIdx.x)};
@@ -128,19 +132,13 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   clear(l); // zero the sums
 
   for (size_t iter{0}; iter < iters; ++iter) {
-    Tensor k_slice{k_iterator(_, _, iter)};
-    Tensor v_slice{v_iterator(_, _, iter)};
-
-    Tensor tK_global_part{thr_copy_qkv.partition_S(k_slice)};
-    Tensor tV_global_part{thr_copy_qkv.partition_S(v_slice)};
-
-    copy(tc, tK_global_part, tK_shared_part);
+    copy(tc, tK_global_part_iter(_, _, _, iter), tK_shared_part);
 
     __syncthreads();
 
     gemm(t_mma_qk, q_mma, k_mma, r_scores_mma);
+    copy(tc, tV_global_part_iter(_, _, _, iter), tV_shared_part);
     MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma, scale);
-    copy(tc, tV_global_part, tV_shared_part);
 
     __syncthreads();
 
@@ -374,13 +372,11 @@ struct FMHA {
 
     DType scale{rsqrt(static_cast<DType>(head_dim))};
 
-    const auto tc_q{get_tiled_copy()};
-    const auto tc_k{get_tiled_copy()};
-    const auto tc_v{get_tiled_copy()};
+    const auto tc{get_tiled_copy()};
     const auto qk_mma{get_tiled_mma()};
     const auto pv_mma{get_tiled_mma()};
 
-    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc_q), decltype(qk_mma), decltype(pv_mma)>};
+    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc), decltype(qk_mma), decltype(pv_mma)>};
 
     size_t smem_size{sizeof(SharedStorage)};
 
@@ -391,7 +387,7 @@ struct FMHA {
     cudaFuncSetAttribute(kernel_fptr,
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc_q, qk_mma, pv_mma);
+    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc, qk_mma, pv_mma);
 
     // print(tc_q);
     // print_latex(tc_q);

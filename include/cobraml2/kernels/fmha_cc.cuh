@@ -135,8 +135,8 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   // start with the lowest possible value
   Tensor m{make_tensor<DType>(mma_m)};
   Tensor l{make_tensor<DType>(mma_m)};
-  fill(m, cuda::std::numeric_limits<DType>::lowest());
-  fill(l, static_cast<DType>(0));
+  fill(m, -INFINITY);
+  clear(l); // zero the sums
 
   for (size_t iter{0}; iter < iters; ++iter) {
     Tensor k_slice{k_iterator(_, _, iter)};

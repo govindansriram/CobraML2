@@ -106,6 +106,6 @@ void test_fmha(int batch_size, int sequence_length) {
 //   test_fmha<16, 64, 64, 64>(56, 512);
 // }
 
-TEST(FMHA_CC, H16_D64_Br64_Bc64_B56_N128) {
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B56_N512) {
   test_fmha<2, 64, 64, 64>(56, 512);
 }

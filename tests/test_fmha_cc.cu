@@ -97,8 +97,8 @@ void test_fmha(int batch_size, int sequence_length) {
                         head_dim);
 
   std::vector<float> o_vec(o_host.begin(), o_host.end());
-  test_helpers::check_output(o_vec, o_ref, batch_size, head_count,
-                             sequence_length, head_dim, 1e-4f);
+  test_helpers::check_output(o_vec, o_ref, batch_size, sequence_length,
+                             head_count, head_dim, 1e-4f);
 }
 
 // even block size by sequence length

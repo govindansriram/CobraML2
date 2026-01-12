@@ -173,7 +173,7 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
                         kv_idty_part(_, _, _, iters - 1), t_mma, N);
 
   // do the rest of blocks that don't need predication
-  for (int iter{iters - 2}; iter > -1; --iter) {
+  for (int iter{static_cast<int>(iters) - 2}; iter > -1; --iter) {
     MHAType::matmul(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc,
                     q_mma, k_mma, r_scores_mma, kv_idty_part(_, _, _, iter),
                     t_mma, N);

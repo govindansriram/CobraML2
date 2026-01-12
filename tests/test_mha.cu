@@ -38,8 +38,8 @@ void test_mha(int batch_size, int sequence_length) {
                          thrust::raw_pointer_cast(v_device.data()),
                          thrust::raw_pointer_cast(o_device.data()),
                          batch_size,      // B
-                         head_count,      // H
                          sequence_length, // N
+                         head_count,      // H
                          head_dim         // d
     );
   }
@@ -62,8 +62,8 @@ void test_mha(int batch_size, int sequence_length) {
                          thrust::raw_pointer_cast(v_device.data()),
                          thrust::raw_pointer_cast(o_device.data()),
                          batch_size,      // B
-                         head_count,      // H
                          sequence_length, // N
+                         head_count,      // H
                          head_dim         // d
     );
     cudaEventRecord(stop);
@@ -102,12 +102,12 @@ void test_mha(int batch_size, int sequence_length) {
   std::vector<float> o_ref(o_host.size(), 0.0f);
 
   test_helpers::cpu_mha(q_host.data(), k_host.data(), v_host.data(),
-                        o_ref.data(), batch_size, head_count, sequence_length,
+                        o_ref.data(), batch_size, sequence_length, head_count,
                         head_dim);
 
   std::vector<float> o_vec(o_host.begin(), o_host.end());
-  test_helpers::check_output(o_vec, o_ref, batch_size, head_count,
-                             sequence_length, head_dim, 1e-4f);
+  test_helpers::check_output(o_vec, o_ref, batch_size, sequence_length,
+                             head_count, head_dim, 1e-4f);
 }
 
-TEST(MHA, H16_D64_B56_N128) { test_mha<16, 64>(56, 128); }
+TEST(MHA, H4_D64_B56_N512) { test_mha<4, 64>(56, 512); }

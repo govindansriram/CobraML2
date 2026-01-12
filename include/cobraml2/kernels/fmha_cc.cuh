@@ -1,5 +1,6 @@
 #pragma once
 #include "../algos.cuh"
+#include "../macros.cuh"
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
 
@@ -21,73 +22,50 @@ namespace naive {
  * this allows the model to localize attention to that specific chunk
  * hence multi head attention.
  * @tparam d the length of each head
- * @param Q the query projection [batch, num_heads, N, d]
- * @param K the key projection [batch, num_heads, N, d]
- * @param V the value projection [batch, num_heads, N, d]
- * @param O the output [batch, num_heads, N, d]
+ * @param Q the query projection [batch, N, num_heads, d]
+ * @param K the key projection [batch, N, num_heads, d]
+ * @param V the value projection [batch, N, num_heads, d]
+ * @param O the output [batch, N, num_heads, d]
  * @param N sequence length: tokens per sequence
  * @return void
  */
-template <typename MHAType, typename TiledCopyQType, typename TiledCopyKType,
-          typename TiledCopyVType, typename TiledMMAQK, typename TiledMMAPV>
-__global__ void
-mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
-           const typename MHAType::TensorDType *__restrict__ K,
-           const typename MHAType::TensorDType *__restrict__ V,
-           typename MHAType::TensorDType *__restrict__ O, const int N,
-           const typename MHAType::TensorDType scale, TiledCopyQType tc_q,
-           TiledCopyKType tc_k, TiledCopyVType tc_v, TiledMMAQK t_mma_qk,
-           TiledMMAPV t_mma_pv) {
+template <typename MHAType, typename TiledCopyType, typename TiledMMAType>
+__global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
+                           const typename MHAType::TensorDType *__restrict__ K,
+                           const typename MHAType::TensorDType *__restrict__ V,
+                           typename MHAType::TensorDType *__restrict__ O,
+                           const int N,
+                           const typename MHAType::TensorDType scale,
+                           TiledCopyType tc, TiledMMAType t_mma) {
 
   using DType = typename MHAType::TensorDType;
-
-  auto q_ptr{make_gmem_ptr<DType>(Q)};
-  auto k_ptr{make_gmem_ptr<DType>(K)};
-  auto v_ptr{make_gmem_ptr<DType>(V)};
-  auto o_ptr{make_gmem_ptr<DType>(O)};
-
   size_t batch_size{gridDim.y};
 
-  const auto q_layout{MHAType::get_tensor_layout(batch_size, N)};
-  const auto k_layout{MHAType::get_tensor_layout(batch_size, N)};
-  const auto v_layout{MHAType::get_tensor_layout(batch_size, N)};
-  const auto o_layout{MHAType::get_tensor_layout(batch_size, N)};
-
-  const auto q_tensor{make_tensor(q_ptr, q_layout)};
-  const auto k_tensor{make_tensor(k_ptr, k_layout)};
-  const auto v_tensor{make_tensor(v_ptr, v_layout)};
-  const auto o_tensor{make_tensor(o_ptr, o_layout)};
-
-  const auto q_head{q_tensor(blockIdx.y, blockIdx.x, _, _)};
-  const auto k_head{k_tensor(blockIdx.y, blockIdx.x, _, _)};
-  const auto v_head{v_tensor(blockIdx.y, blockIdx.x, _, _)};
-  const auto o_head{o_tensor(blockIdx.y, blockIdx.x, _, _)};
+  const Tensor q_head{MHAType::slice_head(Q, batch_size, N)};
+  const Tensor k_head{MHAType::slice_head(K, batch_size, N)};
+  const Tensor v_head{MHAType::slice_head(V, batch_size, N)};
+  Tensor o_head{MHAType::slice_head(O, batch_size, N)};
 
   extern __shared__ char shared_memory[];
   using SharedStorageType = typename MHAType::SharedStorage;
   SharedStorageType *shared_storage{
       reinterpret_cast<SharedStorageType *>(shared_memory)};
 
-  auto shared_q_ptr{make_smem_ptr(shared_storage->Q.begin())};
-  auto shared_k_ptr{make_smem_ptr(shared_storage->K.begin())};
-  auto shared_v_ptr{make_smem_ptr(shared_storage->V.begin())};
-  auto shared_p_ptr{make_smem_ptr(shared_storage->P.begin())};
-  auto shared_o_ptr{make_smem_ptr(shared_storage->O.begin())};
+  Tensor shared_q{make_tensor(make_smem_ptr(shared_storage->Q.begin()),
+                              typename SharedStorageType::QLayoutType{})};
 
-  Tensor shared_q{
-      make_tensor(shared_q_ptr, typename SharedStorageType::QOLayoutType{})};
+  Tensor shared_k{make_tensor(make_smem_ptr(shared_storage->K.begin()),
+                              typename SharedStorageType::KVLayoutType{})};
 
-  Tensor shared_k{
-      make_tensor(shared_k_ptr, typename SharedStorageType::KVLayoutType{})};
+  Tensor shared_v{make_tensor(make_smem_ptr(shared_storage->V.begin()),
+                              typename SharedStorageType::KVLayoutType{})};
 
-  Tensor shared_v{
-      make_tensor(shared_k_ptr, typename SharedStorageType::KVLayoutType{})};
+  Tensor trans_shared_v{
+      make_tensor(make_smem_ptr(shared_storage->V.begin()),
+                  typename SharedStorageType::VTransposedLayoutType{})};
 
-  Tensor trans_shared_v{make_tensor(
-      shared_k_ptr, typename SharedStorageType::VTransposedLayoutType{})};
-
-  Tensor shared_p{
-      make_tensor(shared_p_ptr, typename SharedStorageType::PLayoutType{})};
+  Tensor shared_p{make_tensor(make_smem_ptr(shared_storage->P.begin()),
+                              typename SharedStorageType::PLayoutType{})};
 
   // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
 
@@ -99,78 +77,113 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   auto q_tiler{make_shape(B_r, d)};
   auto kv_tiler{make_shape(B_c, d)};
+  auto scores_tiler{make_shape(B_r, B_c)};
 
   Tensor q_iterator{
-      local_tile(q_head, q_tiler, coord)}; // (B_r, d, floor(N / B_r))
+      local_tile(q_head, q_tiler, coord)}; // (B_r, d, ceil(N / B_r))
   Tensor k_iterator{
-      local_tile(k_head, kv_tiler, coord)}; // (B_c, d, floor(N / B_c))
+      local_tile(k_head, kv_tiler, coord)}; // (B_c, d, ceil(N / B_c))
   Tensor v_iterator{
-      local_tile(v_head, kv_tiler, coord)}; // (B_c, d, floor(N / B_c))
+      local_tile(v_head, kv_tiler, coord)}; // (B_c, d, ceil(N / B_c))
   Tensor o_iterator{
-      local_tile(o_head, q_tiler, coord)}; // (B_c, d, floor(N / B_c))
+      local_tile(o_head, q_tiler, coord)}; // (B_c, d, ceil(N / B_r))
 
   auto iters{size<2>(k_iterator)};
 
   Tensor q_slice{q_iterator(_, _, blockIdx.z)};
   Tensor out_slice{o_iterator(_, _, blockIdx.z)};
 
-  // move q to shared memory
-
   // t prefix means unique to this thread
-  ThrCopy thr_copy_q{tc_q.get_slice(threadIdx.x)};
-  ThrCopy thr_copy_k{tc_k.get_slice(threadIdx.x)};
-  ThrCopy thr_copy_v{tc_v.get_slice(threadIdx.x)};
+  ThrCopy thr_copy_qkv{tc.get_slice(threadIdx.x)};
 
-  Tensor tQ_global_part{thr_copy_q.partition_S(q_slice)};
-  Tensor tQ_shared_part{thr_copy_q.partition_D(shared_q)};
-  Tensor tK_shared_part{thr_copy_k.partition_D(shared_k)};
-  Tensor tV_shared_part{thr_copy_v.partition_D(shared_v)};
+  const Tensor tQ_global_part{thr_copy_qkv.partition_S(q_slice)};
+  Tensor tQ_shared_part{thr_copy_qkv.partition_D(shared_q)};
 
-  ThrMMA thr_mma_qk{t_mma_qk.get_slice(threadIdx.x)};
+  const Tensor tK_global_part_iter{thr_copy_qkv.partition_S(k_iterator)};
+  Tensor tK_shared_part{thr_copy_qkv.partition_D(shared_k)};
+
+  const Tensor tV_global_part_iter{thr_copy_qkv.partition_S(v_iterator)};
+  Tensor tV_shared_part{thr_copy_qkv.partition_D(shared_v)};
+
+  ThrMMA thr_mma_qk{t_mma.get_slice(threadIdx.x)};
 
   Tensor q_mma{thr_mma_qk.partition_A(shared_q)};
   Tensor k_mma{thr_mma_qk.partition_B(shared_k)};
   Tensor p_mma{thr_mma_qk.partition_C(shared_p)};
 
-  ThrMMA thr_mma_pv{t_mma_pv.get_slice(threadIdx.x)};
+  Tensor p_mma2{thr_mma_qk.partition_A(shared_p)};
+  Tensor v_mma{thr_mma_qk.partition_B(trans_shared_v)};
+  Tensor g_out_mma{thr_mma_qk.partition_C(out_slice)};
+  Tensor r_out_mma{thr_mma_qk.make_fragment_C(g_out_mma)};
 
-  Tensor p_mma2{thr_mma_pv.partition_A(shared_p)};
-  Tensor v_mma{thr_mma_pv.partition_B(trans_shared_v)};
-  Tensor g_out_mma{thr_mma_pv.partition_C(out_slice)};
-  Tensor r_out_mma{thr_mma_pv.make_fragment_C(g_out_mma)};
+  Tensor head_idty{MHAType::identity_slice_head(batch_size, N)};
+
+  // make q identity tensor
+  Tensor q_iterator_idty{
+      local_tile(head_idty, q_tiler, coord)}; // (B_r, d, ceil(N / B_r))
+  Tensor q_head_slice_idty{q_iterator_idty(_, _, blockIdx.z)};
+  Tensor tQ_idty_part{thr_copy_qkv.partition_S(q_head_slice_idty)};
+
+  // make kv identity tensor
+  Tensor kv_iterator_idty{local_tile(head_idty, kv_tiler, coord)};
+  Tensor kv_idty_part{thr_copy_qkv.partition_S(kv_iterator_idty)};
+
+  // scores identity tensor
+  Tensor scores_idty{make_identity_tensor(make_shape(N, N))};
+  Tensor scores_tile_idty{
+      local_tile(scores_idty, scores_tiler,
+                 make_coord(blockIdx.z, _))}; // (B_r, B_c, ceil(N / B_c))
+  Tensor scores_slice_idty{thr_mma_qk.partition_C(scores_tile_idty)};
+
+  // out identity tensor
+  Tensor o_iterator_idty{
+      local_tile(head_idty, q_tiler, coord)}; // (B_r, d, ceil(N / B_r))
+  Tensor o_head_slice_idty{o_iterator_idty(_, _, blockIdx.z)};
+  Tensor o_mma_idty{thr_mma_qk.partition_C(o_head_slice_idty)};
+
+  // predicated copy
+  MHAType::predicate_copy_tensor(tQ_idty_part, tQ_global_part, tQ_shared_part,
+                                 tc, DType(0), N);
 
   auto mma_m{select<1>(q_mma.shape())};
 
   Tensor r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
   clear(r_scores_mma); // Zero the accumulator
 
-  copy(tc_q, tQ_global_part, tQ_shared_part);
-  __syncthreads(); // redundant
+  // __syncthreads(); // redundant
 
   // start with the lowest possible value
   Tensor m{make_tensor<DType>(mma_m)};
   Tensor l{make_tensor<DType>(mma_m)};
-  fill(m, cuda::std::numeric_limits<DType>::lowest());
-  fill(l, static_cast<DType>(0));
+  fill(m, -INFINITY);
+  clear(l); // zero the sums
 
-  for (size_t iter{0}; iter < iters; ++iter) {
-    Tensor k_slice{k_iterator(_, _, iter)};
-    Tensor v_slice{v_iterator(_, _, iter)};
+  // Do the block that needs predication first
 
-    Tensor tK_global_part{thr_copy_k.partition_S(k_slice)};
-    Tensor tV_global_part{thr_copy_v.partition_S(v_slice)};
+  MHAType::matmul<true>(tK_global_part_iter(_, _, _, iters - 1), tK_shared_part,
+                        tc, q_mma, k_mma, r_scores_mma,
+                        kv_idty_part(_, _, _, iters - 1), t_mma, N);
 
-    copy(tc_k, tK_global_part, tK_shared_part);
+  MHAType::update_statistics<true>(m, l, r_scores_mma, p_mma, r_out_mma,
+                                   scores_slice_idty(_, _, _, iters - 1), scale,
+                                   N);
 
-    __syncthreads();
+  MHAType::matmul<true>(tV_global_part_iter(_, _, _, iters - 1), tV_shared_part,
+                        tc, p_mma2, v_mma, r_out_mma,
+                        kv_idty_part(_, _, _, iters - 1), t_mma, N);
 
-    gemm(t_mma_qk, q_mma, k_mma, r_scores_mma);
-    MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma, scale);
-    copy(tc_v, tV_global_part, tV_shared_part);
+  // do the rest of blocks that don't need predication
+  for (int iter{static_cast<int>(iters) - 2}; iter > -1; --iter) {
+    MHAType::matmul(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc,
+                    q_mma, k_mma, r_scores_mma, kv_idty_part(_, _, _, iter),
+                    t_mma, N);
 
-    __syncthreads();
+    MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma,
+                               scores_slice_idty(_, _, _, iter), scale, N);
 
-    gemm(t_mma_pv, p_mma2, v_mma, r_out_mma);
+    MHAType::matmul(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc,
+                    p_mma2, v_mma, r_out_mma, kv_idty_part(_, _, _, iter),
+                    t_mma, N);
   }
 
   constexpr Layout mma_shape{get<0>(r_out_mma.layout())};
@@ -189,9 +202,19 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
     }
   }
 
-  // scale
+  // if (threadIdx.x == 120 && blockIdx.x == 0 && blockIdx.y == 1 && blockIdx.z
+  // == 7){
+  // }
 
-  copy(r_out_mma, g_out_mma);
+  constexpr int write_rows{size(get<1>(g_out_mma.shape()))};
+
+  CUTE_UNROLL
+  for (size_t i{0}; i < write_rows; ++i) {
+    auto seq_idx{get<1>(o_mma_idty(0, i, 0))};
+
+    if (seq_idx < N)
+      copy(r_out_mma(_, i, _), g_out_mma(_, i, _));
+  }
 }
 } // namespace naive
 
@@ -224,9 +247,8 @@ struct FMHA {
     ArrayEngine<DType, B_c * head_dim> K;
     ArrayEngine<DType, B_c * head_dim> V;
     ArrayEngine<DType, B_r * B_c> P;
-    ArrayEngine<DType, B_r * head_dim> O;
 
-    using QOLayoutType =
+    using QLayoutType =
         Layout<Shape<QueryRowsType, HeadDimType>, Stride<HeadDimType, _1>>;
     using KVLayoutType =
         Layout<Shape<KVColsType, HeadDimType>, Stride<HeadDimType, _1>>;
@@ -237,24 +259,30 @@ struct FMHA {
 
   static constexpr int threads_per_block{thread_count};
 
-  CUTE_HOST_DEVICE static auto get_tensor_layout(size_t batch_size, size_t N) {
-    return make_layout(make_shape(batch_size, NumHeadsType{}, N, HeadDimType{}),
+  COBRA_S_DEVICE auto get_tensor_layout(size_t batch_size, size_t N) {
+    return make_layout(make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}),
                        LayoutRight{});
   }
 
-  CUTE_HOST_DEVICE static constexpr int get_total_threads() {
-    constexpr int elements_per_load{sizeof(VectorizedLoadType) / sizeof(DType)};
-    constexpr int threads_per_row{head_dim / elements_per_load};
+  template <typename PtrType>
+  COBRA_S_DEVICE auto slice_head(PtrType g_ptr, int batch_size, int N) {
 
-    static_assert(head_dim % elements_per_load == 0,
-                  "head dimension in bytes must be a multiple of 128");
+    using BaseType = std::decay_t<std::remove_pointer_t<PtrType>>;
+    static_assert(std::is_pointer_v<PtrType>, "Must be a pointer");
+    static_assert(
+        std::is_same_v<std::remove_cv_t<std::remove_pointer_t<PtrType>>, DType>,
+        "Must point to DType");
 
-    constexpr int total_threads{B_r * threads_per_row};
+    const auto projection_layout{get_tensor_layout(batch_size, N)};
+    const Tensor projection{
+        make_tensor(make_gmem_ptr<DType>(g_ptr), projection_layout)};
+    return projection(blockIdx.y, _, blockIdx.x, _);
+  }
 
-    static_assert(total_threads % 32 == 0,
-                  "block size requires an odd number of threads");
-
-    return total_threads;
+  COBRA_S_DEVICE auto identity_slice_head(int batch_size, int N) {
+    const auto projection_layout{get_tensor_layout(batch_size, N)};
+    const Tensor projection{make_identity_tensor(projection_layout.shape())};
+    return projection(blockIdx.y, _, blockIdx.x, _);
   }
 
   static constexpr auto get_tiled_copy() {
@@ -302,17 +330,76 @@ struct FMHA {
 
   static_assert(B_c % B_r == 0, "B_c must be a multiple of B_r");
 
-  template <typename MaxTensorEngineType, typename RScoresTensorEngineType,
-            typename ProbTensorEngineType, typename OutTensorEngineType,
-            typename MaxTensorLayoutType, typename ScoresTensorLayoutType,
-            typename ProbTensorLayoutType, typename OutTensorLayoutType>
-  __device__ inline static void update_statistics(
+  template <typename IdentityTensorEngineType,
+            typename IdentityTensorLayoutType, typename SourceTensorEngineType,
+            typename SourceTensorLayoutType,
+            typename DestinationTensorEngineType,
+            typename DestinationTensorLayoutType, typename TiledCopyType>
+  COBRA_S_DEVICE void predicate_copy_tensor(
+      const Tensor<IdentityTensorEngineType, IdentityTensorLayoutType>
+          &identity_tensor,
+      const Tensor<SourceTensorEngineType, SourceTensorLayoutType>
+          &source_tensor,
+      Tensor<DestinationTensorEngineType, DestinationTensorLayoutType>
+          &destination_tensor,
+      TiledCopyType tiled_copy, DType fill_value, int bound) {
+
+    constexpr int rows{size(get<1>(SourceTensorLayoutType{}))};
+
+    CUTE_UNROLL
+    for (int i{0}; i < rows; ++i) {
+      auto seq_idx{get<1>(identity_tensor(0, i, 0))};
+
+      if (seq_idx < bound) {
+        copy(tiled_copy, source_tensor(_, i, _), destination_tensor(_, i, _));
+      } else {
+        fill(destination_tensor(_, i, _), fill_value);
+      }
+    }
+  }
+
+  template <bool predicate = false, typename SourceEngineTypeTC,
+            typename SourceLayoutTypeTC, typename DestEngineTypeTC,
+            typename DestLayoutTypeTC, typename TiledCopyType, typename MMAType,
+            typename AEngineTypeMMA, typename ALayoutTypeMMA,
+            typename BEngineTypeMMA, typename BLayoutTypeMMA,
+            typename CEngineTypeMMA, typename CLayoutTypeMMA,
+            typename IdentityEngineType, typename IdentityLayoutType>
+  COBRA_S_DEVICE void
+  matmul(const Tensor<SourceEngineTypeTC, SourceLayoutTypeTC> &source_slice_cp,
+         Tensor<DestEngineTypeTC, DestLayoutTypeTC> &dest_slice_cp,
+         const TiledCopyType &tc,
+         const Tensor<AEngineTypeMMA, ALayoutTypeMMA> &a_mma_slice,
+         const Tensor<BEngineTypeMMA, BLayoutTypeMMA> &b_mma_slice,
+         Tensor<CEngineTypeMMA, CLayoutTypeMMA> &c_frag,
+         const Tensor<IdentityEngineType, IdentityLayoutType> &b_identity,
+         const MMAType &mma, int N) {
+
+    if constexpr (predicate) {
+      predicate_copy_tensor(b_identity, source_slice_cp, dest_slice_cp, tc,
+                            DType(0), N);
+    } else {
+      copy(tc, source_slice_cp, dest_slice_cp);
+    }
+    __syncthreads();
+    gemm(mma, a_mma_slice, b_mma_slice, c_frag);
+  }
+
+  template <bool predicate = false, typename MaxTensorEngineType,
+            typename RScoresTensorEngineType, typename ProbTensorEngineType,
+            typename OutTensorEngineType, typename MaxTensorLayoutType,
+            typename ScoresTensorLayoutType, typename ProbTensorLayoutType,
+            typename OutTensorLayoutType, typename ScoresIdentityEngineType,
+            typename ScoresIdentityLayoutType>
+  COBRA_S_DEVICE void update_statistics(
       Tensor<MaxTensorEngineType, MaxTensorLayoutType> &max_tensor,
       Tensor<MaxTensorEngineType, MaxTensorLayoutType> &sum_tensor,
       Tensor<RScoresTensorEngineType, ScoresTensorLayoutType> &r_scores,
       Tensor<ProbTensorEngineType, ProbTensorLayoutType> &prob_tensor,
       Tensor<OutTensorEngineType, OutTensorLayoutType> &out_tensor,
-      const DType scale) {
+      const Tensor<ScoresIdentityEngineType, ScoresIdentityLayoutType>
+          &scores_idty_tensor,
+      const DType scale, const int bound) {
 
     static_assert(rank_v<ScoresTensorLayoutType> == 3,
                   "Per Register Attention scores must be 3 dimensional (mma, "
@@ -328,6 +415,7 @@ struct FMHA {
     for (size_t m{0}; m < mma_m; ++m) {
 
       auto r_score_slice{r_scores(_, m, _)};
+      auto scores_idty_slice{scores_idty_tensor(_, m, _)};
       auto p_slice{(prob_tensor(_, m, _))};
       auto o_slice{(out_tensor(_, m, _))};
 
@@ -345,7 +433,19 @@ struct FMHA {
         // uses hardware unit, removes warp divergence from branch checks
         // each thread may hold multiple values from each row, we find the
         // local maximum first
-        r_score_slice(idx) = r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
+        if constexpr (predicate) {
+          auto n{get<1>(scores_idty_slice(idx))};
+          if (n < bound) {
+            r_score_slice(idx) =
+                r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
+          } else {
+            r_score_slice(idx) = -INFINITY;
+          }
+        } else {
+          r_score_slice(idx) =
+              r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
+        }
+
         current_max = cuda::std::max(r_score_slice(idx), current_max);
       }
 
@@ -358,6 +458,8 @@ struct FMHA {
       current_sum = current_sum * scale_old;
 
       DType local_sum{0};
+
+      // TODO experiment with efficent copies
 
       CUTE_UNROLL
       for (size_t idx{0}; idx < slice_size; ++idx) {
@@ -387,15 +489,10 @@ struct FMHA {
 
     DType scale{rsqrt(static_cast<DType>(head_dim))};
 
-    const auto tc_q{get_tiled_copy()};
-    const auto tc_k{get_tiled_copy()};
-    const auto tc_v{get_tiled_copy()};
-    const auto qk_mma{get_tiled_mma()};
-    const auto pv_mma{get_tiled_mma()};
+    const auto tc{get_tiled_copy()};
+    const auto tmma{get_tiled_mma()};
 
-    auto kernel_fptr{
-        naive::mha_kernel<Self, decltype(tc_q), decltype(tc_k), decltype(tc_v),
-                          decltype(qk_mma), decltype(pv_mma)>};
+    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc), decltype(tmma)>};
 
     size_t smem_size{sizeof(SharedStorage)};
 
@@ -406,11 +503,8 @@ struct FMHA {
     cudaFuncSetAttribute(kernel_fptr,
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc_q,
-                                                    tc_k, tc_v, qk_mma, pv_mma);
-
-    // print(tc_q);
-    // print_latex(tc_q);
+    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc,
+                                                    tmma);
   }
 };
 

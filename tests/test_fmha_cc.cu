@@ -93,14 +93,22 @@ void test_fmha(int batch_size, int sequence_length) {
   std::vector<float> o_ref(o_host.size(), 0.0f);
 
   test_helpers::cpu_mha(q_host.data(), k_host.data(), v_host.data(),
-                        o_ref.data(), batch_size, head_count, sequence_length,
+                        o_ref.data(), batch_size, sequence_length, head_count,
                         head_dim);
 
   std::vector<float> o_vec(o_host.begin(), o_host.end());
-  test_helpers::check_output(o_vec, o_ref, batch_size, head_count,
-                             sequence_length, head_dim, 1e-4f);
+  test_helpers::check_output(o_vec, o_ref, batch_size, sequence_length,
+                             head_count, head_dim, 1e-4f);
 }
 
-TEST(FMHA_CC, H16_D64_Br64_Bc64_B56_N128) {
-  test_fmha<16, 64, 64, 64>(56, 128);
-}
+// even block size by sequence length
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B56_N128) { test_fmha<16, 64, 64, 64>(4, 512); }
+
+// uneven block size by sequence length (requires predication)
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B56_N490) { test_fmha<2, 64, 64, 64>(56, 490); }
+
+// 1 block only and even
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N64) { test_fmha<16, 64, 64, 64>(8, 64); }
+
+// 1 block only and uneven
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N59) { test_fmha<16, 64, 64, 64>(8, 59); }

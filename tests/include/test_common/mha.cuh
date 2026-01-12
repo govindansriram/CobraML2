@@ -53,7 +53,7 @@ void cpu_mha(float *Q, float *K, float *V, float *O, int B, int N, int H,
 
 template <typename DType>
 thrust::device_vector<DType>
-create_projection(int batch_size, int sequence_length, int head_count, 
+create_projection(int batch_size, int sequence_length, int head_count,
                   int head_dim, auto fill_fn) {
   int total_length{batch_size * sequence_length * head_count * head_dim};
   return create_tensor<DType>(total_length, fill_fn);

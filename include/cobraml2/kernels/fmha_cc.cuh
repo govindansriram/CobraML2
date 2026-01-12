@@ -29,7 +29,8 @@ namespace naive {
  * @param N sequence length: tokens per sequence
  * @return void
  */
-template <typename MHAType, typename TiledCopyType, typename TiledMMAQK, typename TiledMMAPV>
+template <typename MHAType, typename TiledCopyType, typename TiledMMAQK,
+          typename TiledMMAPV>
 __global__ void
 mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
            const typename MHAType::TensorDType *__restrict__ K,
@@ -51,20 +52,21 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   SharedStorageType *shared_storage{
       reinterpret_cast<SharedStorageType *>(shared_memory)};
 
-  Tensor shared_q{
-      make_tensor(make_smem_ptr(shared_storage->Q.begin()), typename SharedStorageType::QLayoutType{})};
+  Tensor shared_q{make_tensor(make_smem_ptr(shared_storage->Q.begin()),
+                              typename SharedStorageType::QLayoutType{})};
 
-  Tensor shared_k{
-      make_tensor(make_smem_ptr(shared_storage->K.begin()), typename SharedStorageType::KVLayoutType{})};
+  Tensor shared_k{make_tensor(make_smem_ptr(shared_storage->K.begin()),
+                              typename SharedStorageType::KVLayoutType{})};
 
-  Tensor shared_v{
-      make_tensor(make_smem_ptr(shared_storage->V.begin()), typename SharedStorageType::KVLayoutType{})};
+  Tensor shared_v{make_tensor(make_smem_ptr(shared_storage->V.begin()),
+                              typename SharedStorageType::KVLayoutType{})};
 
-  Tensor trans_shared_v{make_tensor(
-      make_smem_ptr(shared_storage->V.begin()), typename SharedStorageType::VTransposedLayoutType{})};
+  Tensor trans_shared_v{
+      make_tensor(make_smem_ptr(shared_storage->V.begin()),
+                  typename SharedStorageType::VTransposedLayoutType{})};
 
-  Tensor shared_p{
-      make_tensor(make_smem_ptr(shared_storage->P.begin()), typename SharedStorageType::PLayoutType{})};
+  Tensor shared_p{make_tensor(make_smem_ptr(shared_storage->P.begin()),
+                              typename SharedStorageType::PLayoutType{})};
 
   // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
 
@@ -132,24 +134,19 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   // scores identity tensor
   Tensor scores_idty{make_identity_tensor(make_shape(N, N))};
   Tensor scores_tile_idty{
-      local_tile(scores_idty, scores_tiler, make_coord(blockIdx.z, _))}; // (B_r, B_c, ceil(N / B_c))
+      local_tile(scores_idty, scores_tiler,
+                 make_coord(blockIdx.z, _))}; // (B_r, B_c, ceil(N / B_c))
   Tensor scores_slice_idty{thr_mma_qk.partition_C(scores_tile_idty)};
 
   // out identity tensor
   Tensor o_iterator_idty{
-    local_tile(head_idty, q_tiler, coord)}; // (B_r, d, ceil(N / B_r))
+      local_tile(head_idty, q_tiler, coord)}; // (B_r, d, ceil(N / B_r))
   Tensor o_head_slice_idty{o_iterator_idty(_, _, blockIdx.z)};
   Tensor o_mma_idty{thr_mma_pv.partition_C(o_head_slice_idty)};
 
   // predicated copy
-  MHAType::predicate_copy_tensor(
-    tQ_idty_part,
-    tQ_global_part,
-    tQ_shared_part,
-    tc,
-    DType(0),
-    N
-  );
+  MHAType::predicate_copy_tensor(tQ_idty_part, tQ_global_part, tQ_shared_part,
+                                 tc, DType(0), N);
 
   auto mma_m{select<1>(q_mma.shape())};
 
@@ -164,77 +161,29 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   fill(m, -INFINITY);
   clear(l); // zero the sums
 
-  MHAType::matmul<true>(
-    tK_global_part_iter(_, _, _, iters - 1),
-    tK_shared_part,
-    tc,
-    q_mma,
-    k_mma,
-    r_scores_mma,
-    kv_idty_part(_, _, _, iters - 1),
-    t_mma_qk,
-    N
-  );
+  MHAType::matmul<true>(tK_global_part_iter(_, _, _, iters - 1), tK_shared_part,
+                        tc, q_mma, k_mma, r_scores_mma,
+                        kv_idty_part(_, _, _, iters - 1), t_mma_qk, N);
 
-  MHAType::update_statistics<true>(
-    m, 
-    l, 
-    r_scores_mma, 
-    p_mma, 
-    r_out_mma, 
-    scores_slice_idty(_, _, _, iters - 1), 
-    scale, 
-    N
-  );
+  MHAType::update_statistics<true>(m, l, r_scores_mma, p_mma, r_out_mma,
+                                   scores_slice_idty(_, _, _, iters - 1), scale,
+                                   N);
 
-  MHAType::matmul<true>(
-    tV_global_part_iter(_, _, _, iters - 1),
-    tV_shared_part,
-    tc,
-    p_mma2,
-    v_mma,
-    r_out_mma,
-    kv_idty_part(_, _, _, iters - 1),
-    t_mma_pv,
-    N
-  );
-
+  MHAType::matmul<true>(tV_global_part_iter(_, _, _, iters - 1), tV_shared_part,
+                        tc, p_mma2, v_mma, r_out_mma,
+                        kv_idty_part(_, _, _, iters - 1), t_mma_pv, N);
 
   for (int iter{iters - 2}; iter > -1; --iter) {
-    MHAType::matmul(
-      tK_global_part_iter(_, _, _, iter),
-      tK_shared_part,
-      tc,
-      q_mma,
-      k_mma,
-      r_scores_mma,
-      kv_idty_part(_, _, _, iter),
-      t_mma_qk,
-      N
-    );
+    MHAType::matmul(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc,
+                    q_mma, k_mma, r_scores_mma, kv_idty_part(_, _, _, iter),
+                    t_mma_qk, N);
 
-    MHAType::update_statistics(
-      m, 
-      l, 
-      r_scores_mma, 
-      p_mma, 
-      r_out_mma, 
-      scores_slice_idty(_, _, _, iter), 
-      scale, 
-      N
-    );
+    MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma,
+                               scores_slice_idty(_, _, _, iter), scale, N);
 
-    MHAType::matmul(
-      tV_global_part_iter(_, _, _, iter),
-      tV_shared_part,
-      tc,
-      p_mma2,
-      v_mma,
-      r_out_mma,
-      kv_idty_part(_, _, _, iter),
-      t_mma_pv,
-      N
-    );
+    MHAType::matmul(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc,
+                    p_mma2, v_mma, r_out_mma, kv_idty_part(_, _, _, iter),
+                    t_mma_pv, N);
   }
 
   constexpr Layout mma_shape{get<0>(r_out_mma.layout())};
@@ -253,22 +202,20 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
     }
   }
 
-  // if (threadIdx.x == 120 && blockIdx.x == 0 && blockIdx.y == 1 && blockIdx.z == 7){
+  // if (threadIdx.x == 120 && blockIdx.x == 0 && blockIdx.y == 1 && blockIdx.z
+  // == 7){
   // }
 
-  constexpr int write_rows{
-    size(get<1>(g_out_mma.shape()))
-  };
+  constexpr int write_rows{size(get<1>(g_out_mma.shape()))};
 
   CUTE_UNROLL
-  for (size_t i{0}; i < write_rows; ++i){
+  for (size_t i{0}; i < write_rows; ++i) {
     auto seq_idx{get<1>(o_mma_idty(0, i, 0))};
 
-    if (seq_idx < N){
+    if (seq_idx < N) {
       copy(r_out_mma(_, i, _), g_out_mma(_, i, _));
     }
   }
-
 }
 } // namespace naive
 
@@ -318,21 +265,22 @@ struct FMHA {
                        LayoutRight{});
   }
 
-  template<typename PtrType>
-  COBRA_S_DEVICE auto slice_head(PtrType g_ptr, int batch_size, int N){
+  template <typename PtrType>
+  COBRA_S_DEVICE auto slice_head(PtrType g_ptr, int batch_size, int N) {
 
     using BaseType = std::decay_t<std::remove_pointer_t<PtrType>>;
     static_assert(std::is_pointer_v<PtrType>, "Must be a pointer");
-    static_assert(std::is_same_v<std::remove_cv_t<std::remove_pointer_t<PtrType>>, DType>, 
-              "Must point to DType");
-
+    static_assert(
+        std::is_same_v<std::remove_cv_t<std::remove_pointer_t<PtrType>>, DType>,
+        "Must point to DType");
 
     const auto projection_layout{get_tensor_layout(batch_size, N)};
-    const Tensor projection{make_tensor(make_gmem_ptr<DType>(g_ptr), projection_layout)};
+    const Tensor projection{
+        make_tensor(make_gmem_ptr<DType>(g_ptr), projection_layout)};
     return projection(blockIdx.y, _, blockIdx.x, _);
   }
 
-  COBRA_S_DEVICE auto identity_slice_head(int batch_size, int N){
+  COBRA_S_DEVICE auto identity_slice_head(int batch_size, int N) {
     const auto projection_layout{get_tensor_layout(batch_size, N)};
     const Tensor projection{make_identity_tensor(projection_layout.shape())};
     return projection(blockIdx.y, _, blockIdx.x, _);
@@ -383,94 +331,76 @@ struct FMHA {
 
   static_assert(B_c % B_r == 0, "B_c must be a multiple of B_r");
 
-  template<
-      typename IdentityTensorEngineType, 
-      typename IdentityTensorLayoutType,
-      typename SourceTensorEngineType, 
-      typename SourceTensorLayoutType,
-      typename DestinationTensorEngineType, 
-      typename DestinationTensorLayoutType,
-      typename TiledCopyType
-    >
-    COBRA_S_DEVICE void predicate_copy_tensor(
-      const Tensor<IdentityTensorEngineType, IdentityTensorLayoutType> &identity_tensor, 
-      const Tensor<SourceTensorEngineType, SourceTensorLayoutType> &source_tensor, 
-      Tensor<DestinationTensorEngineType, DestinationTensorLayoutType> &destination_tensor,
-      TiledCopyType tiled_copy,
-      DType fill_value, 
-      int bound){
+  template <typename IdentityTensorEngineType,
+            typename IdentityTensorLayoutType, typename SourceTensorEngineType,
+            typename SourceTensorLayoutType,
+            typename DestinationTensorEngineType,
+            typename DestinationTensorLayoutType, typename TiledCopyType>
+  COBRA_S_DEVICE void predicate_copy_tensor(
+      const Tensor<IdentityTensorEngineType, IdentityTensorLayoutType>
+          &identity_tensor,
+      const Tensor<SourceTensorEngineType, SourceTensorLayoutType>
+          &source_tensor,
+      Tensor<DestinationTensorEngineType, DestinationTensorLayoutType>
+          &destination_tensor,
+      TiledCopyType tiled_copy, DType fill_value, int bound) {
 
     constexpr int rows{size(get<1>(SourceTensorLayoutType{}))};
 
     CUTE_UNROLL
-    for (int i{0}; i < rows; ++i){
+    for (int i{0}; i < rows; ++i) {
       auto seq_idx{get<1>(identity_tensor(0, i, 0))};
 
-      if (seq_idx < bound){
-        copy(
-          tiled_copy, 
-          source_tensor(_, i, _), 
-          destination_tensor(_, i, _)
-        );
-      }else{
+      if (seq_idx < bound) {
+        copy(tiled_copy, source_tensor(_, i, _), destination_tensor(_, i, _));
+      } else {
         fill(destination_tensor(_, i, _), fill_value);
       }
     }
   }
 
-  template<
-    bool predicate = false,
-    typename SourceEngineTypeTC,
-    typename SourceLayoutTypeTC,
-    typename DestEngineTypeTC,
-    typename DestLayoutTypeTC,
-    typename TiledCopyType,
-    typename MMAType,
-    typename AEngineTypeMMA,
-    typename ALayoutTypeMMA,
-    typename BEngineTypeMMA,
-    typename BLayoutTypeMMA,
-    typename CEngineTypeMMA,
-    typename CLayoutTypeMMA,
-    typename IdentityEngineType,
-    typename IdentityLayoutType
-  >
-  COBRA_S_DEVICE void matmul(
-    const Tensor<SourceEngineTypeTC, SourceLayoutTypeTC> &source_slice_cp,
-    Tensor<DestEngineTypeTC, DestLayoutTypeTC> &dest_slice_cp,
-    const TiledCopyType &tc,
-    const Tensor<AEngineTypeMMA, ALayoutTypeMMA> &a_mma_slice,
-    const Tensor<BEngineTypeMMA, BLayoutTypeMMA> &b_mma_slice,
-    Tensor<CEngineTypeMMA, CLayoutTypeMMA> &c_frag,
-    const Tensor<IdentityEngineType, IdentityLayoutType> &b_identity,
-    const MMAType &mma,
-    int N
-  ){
+  template <bool predicate = false, typename SourceEngineTypeTC,
+            typename SourceLayoutTypeTC, typename DestEngineTypeTC,
+            typename DestLayoutTypeTC, typename TiledCopyType, typename MMAType,
+            typename AEngineTypeMMA, typename ALayoutTypeMMA,
+            typename BEngineTypeMMA, typename BLayoutTypeMMA,
+            typename CEngineTypeMMA, typename CLayoutTypeMMA,
+            typename IdentityEngineType, typename IdentityLayoutType>
+  COBRA_S_DEVICE void
+  matmul(const Tensor<SourceEngineTypeTC, SourceLayoutTypeTC> &source_slice_cp,
+         Tensor<DestEngineTypeTC, DestLayoutTypeTC> &dest_slice_cp,
+         const TiledCopyType &tc,
+         const Tensor<AEngineTypeMMA, ALayoutTypeMMA> &a_mma_slice,
+         const Tensor<BEngineTypeMMA, BLayoutTypeMMA> &b_mma_slice,
+         Tensor<CEngineTypeMMA, CLayoutTypeMMA> &c_frag,
+         const Tensor<IdentityEngineType, IdentityLayoutType> &b_identity,
+         const MMAType &mma, int N) {
 
-    if constexpr(predicate){
-      predicate_copy_tensor(b_identity, source_slice_cp, dest_slice_cp, tc, DType(0), N);
-    }else{
+    if constexpr (predicate) {
+      predicate_copy_tensor(b_identity, source_slice_cp, dest_slice_cp, tc,
+                            DType(0), N);
+    } else {
       copy(tc, source_slice_cp, dest_slice_cp);
     }
     __syncthreads();
     gemm(mma, a_mma_slice, b_mma_slice, c_frag);
   }
 
-  template <bool predicate = false, typename MaxTensorEngineType, typename RScoresTensorEngineType,
-            typename ProbTensorEngineType, typename OutTensorEngineType,
-            typename MaxTensorLayoutType, typename ScoresTensorLayoutType,
-            typename ProbTensorLayoutType, typename OutTensorLayoutType,
-            typename ScoresIdentityEngineType, typename ScoresIdentityLayoutType>
+  template <bool predicate = false, typename MaxTensorEngineType,
+            typename RScoresTensorEngineType, typename ProbTensorEngineType,
+            typename OutTensorEngineType, typename MaxTensorLayoutType,
+            typename ScoresTensorLayoutType, typename ProbTensorLayoutType,
+            typename OutTensorLayoutType, typename ScoresIdentityEngineType,
+            typename ScoresIdentityLayoutType>
   COBRA_S_DEVICE void update_statistics(
       Tensor<MaxTensorEngineType, MaxTensorLayoutType> &max_tensor,
       Tensor<MaxTensorEngineType, MaxTensorLayoutType> &sum_tensor,
       Tensor<RScoresTensorEngineType, ScoresTensorLayoutType> &r_scores,
       Tensor<ProbTensorEngineType, ProbTensorLayoutType> &prob_tensor,
       Tensor<OutTensorEngineType, OutTensorLayoutType> &out_tensor,
-      const Tensor<ScoresIdentityEngineType, ScoresIdentityLayoutType> &scores_idty_tensor,
-      const DType scale,
-      const int bound
-    ) {
+      const Tensor<ScoresIdentityEngineType, ScoresIdentityLayoutType>
+          &scores_idty_tensor,
+      const DType scale, const int bound) {
 
     static_assert(rank_v<ScoresTensorLayoutType> == 3,
                   "Per Register Attention scores must be 3 dimensional (mma, "
@@ -504,15 +434,17 @@ struct FMHA {
         // uses hardware unit, removes warp divergence from branch checks
         // each thread may hold multiple values from each row, we find the
         // local maximum first
-        if constexpr (predicate){
+        if constexpr (predicate) {
           auto n{get<1>(scores_idty_slice(idx))};
-          if (n < bound){
-            r_score_slice(idx) = r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
-          }else{
+          if (n < bound) {
+            r_score_slice(idx) =
+                r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
+          } else {
             r_score_slice(idx) = -INFINITY;
           }
-        }else{
-          r_score_slice(idx) = r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
+        } else {
+          r_score_slice(idx) =
+              r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
         }
 
         current_max = cuda::std::max(r_score_slice(idx), current_max);
@@ -562,7 +494,8 @@ struct FMHA {
     const auto qk_mma{get_tiled_mma()};
     const auto pv_mma{get_tiled_mma()};
 
-    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc), decltype(qk_mma), decltype(pv_mma)>};
+    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc), decltype(qk_mma),
+                                       decltype(pv_mma)>};
 
     size_t smem_size{sizeof(SharedStorage)};
 
@@ -573,7 +506,8 @@ struct FMHA {
     cudaFuncSetAttribute(kernel_fptr,
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc, qk_mma, pv_mma);
+    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc,
+                                                    qk_mma, pv_mma);
   }
 };
 

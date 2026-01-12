@@ -29,15 +29,14 @@ namespace naive {
  * @param N sequence length: tokens per sequence
  * @return void
  */
-template <typename MHAType, typename TiledCopyType, typename TiledMMAQK,
-          typename TiledMMAPV>
-__global__ void
-mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
-           const typename MHAType::TensorDType *__restrict__ K,
-           const typename MHAType::TensorDType *__restrict__ V,
-           typename MHAType::TensorDType *__restrict__ O, const int N,
-           const typename MHAType::TensorDType scale, TiledCopyType tc,
-           TiledMMAQK t_mma_qk, TiledMMAPV t_mma_pv) {
+template <typename MHAType, typename TiledCopyType, typename TiledMMAType>
+__global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
+                           const typename MHAType::TensorDType *__restrict__ K,
+                           const typename MHAType::TensorDType *__restrict__ V,
+                           typename MHAType::TensorDType *__restrict__ O,
+                           const int N,
+                           const typename MHAType::TensorDType scale,
+                           TiledCopyType tc, TiledMMAType t_mma) {
 
   using DType = typename MHAType::TensorDType;
   size_t batch_size{gridDim.y};
@@ -106,18 +105,16 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   const Tensor tV_global_part_iter{thr_copy_qkv.partition_S(v_iterator)};
   Tensor tV_shared_part{thr_copy_qkv.partition_D(shared_v)};
 
-  ThrMMA thr_mma_qk{t_mma_qk.get_slice(threadIdx.x)};
+  ThrMMA thr_mma_qk{t_mma.get_slice(threadIdx.x)};
 
   Tensor q_mma{thr_mma_qk.partition_A(shared_q)};
   Tensor k_mma{thr_mma_qk.partition_B(shared_k)};
   Tensor p_mma{thr_mma_qk.partition_C(shared_p)};
 
-  ThrMMA thr_mma_pv{t_mma_pv.get_slice(threadIdx.x)};
-
-  Tensor p_mma2{thr_mma_pv.partition_A(shared_p)};
-  Tensor v_mma{thr_mma_pv.partition_B(trans_shared_v)};
-  Tensor g_out_mma{thr_mma_pv.partition_C(out_slice)};
-  Tensor r_out_mma{thr_mma_pv.make_fragment_C(g_out_mma)};
+  Tensor p_mma2{thr_mma_qk.partition_A(shared_p)};
+  Tensor v_mma{thr_mma_qk.partition_B(trans_shared_v)};
+  Tensor g_out_mma{thr_mma_qk.partition_C(out_slice)};
+  Tensor r_out_mma{thr_mma_qk.make_fragment_C(g_out_mma)};
 
   Tensor head_idty{MHAType::identity_slice_head(batch_size, N)};
 
@@ -142,7 +139,7 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor o_iterator_idty{
       local_tile(head_idty, q_tiler, coord)}; // (B_r, d, ceil(N / B_r))
   Tensor o_head_slice_idty{o_iterator_idty(_, _, blockIdx.z)};
-  Tensor o_mma_idty{thr_mma_pv.partition_C(o_head_slice_idty)};
+  Tensor o_mma_idty{thr_mma_qk.partition_C(o_head_slice_idty)};
 
   // predicated copy
   MHAType::predicate_copy_tensor(tQ_idty_part, tQ_global_part, tQ_shared_part,
@@ -161,9 +158,11 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   fill(m, -INFINITY);
   clear(l); // zero the sums
 
+  // Do the block that needs predication first
+
   MHAType::matmul<true>(tK_global_part_iter(_, _, _, iters - 1), tK_shared_part,
                         tc, q_mma, k_mma, r_scores_mma,
-                        kv_idty_part(_, _, _, iters - 1), t_mma_qk, N);
+                        kv_idty_part(_, _, _, iters - 1), t_mma, N);
 
   MHAType::update_statistics<true>(m, l, r_scores_mma, p_mma, r_out_mma,
                                    scores_slice_idty(_, _, _, iters - 1), scale,
@@ -171,19 +170,20 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   MHAType::matmul<true>(tV_global_part_iter(_, _, _, iters - 1), tV_shared_part,
                         tc, p_mma2, v_mma, r_out_mma,
-                        kv_idty_part(_, _, _, iters - 1), t_mma_pv, N);
+                        kv_idty_part(_, _, _, iters - 1), t_mma, N);
 
+  // do the rest of blocks that don't need predication
   for (int iter{iters - 2}; iter > -1; --iter) {
     MHAType::matmul(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc,
                     q_mma, k_mma, r_scores_mma, kv_idty_part(_, _, _, iter),
-                    t_mma_qk, N);
+                    t_mma, N);
 
     MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma,
                                scores_slice_idty(_, _, _, iter), scale, N);
 
     MHAType::matmul(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc,
                     p_mma2, v_mma, r_out_mma, kv_idty_part(_, _, _, iter),
-                    t_mma_pv, N);
+                    t_mma, N);
   }
 
   constexpr Layout mma_shape{get<0>(r_out_mma.layout())};
@@ -212,9 +212,8 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   for (size_t i{0}; i < write_rows; ++i) {
     auto seq_idx{get<1>(o_mma_idty(0, i, 0))};
 
-    if (seq_idx < N) {
+    if (seq_idx < N)
       copy(r_out_mma(_, i, _), g_out_mma(_, i, _));
-    }
   }
 }
 } // namespace naive
@@ -491,11 +490,9 @@ struct FMHA {
     DType scale{rsqrt(static_cast<DType>(head_dim))};
 
     const auto tc{get_tiled_copy()};
-    const auto qk_mma{get_tiled_mma()};
-    const auto pv_mma{get_tiled_mma()};
+    const auto tmma{get_tiled_mma()};
 
-    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc), decltype(qk_mma),
-                                       decltype(pv_mma)>};
+    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc), decltype(tmma)>};
 
     size_t smem_size{sizeof(SharedStorage)};
 
@@ -507,7 +504,7 @@ struct FMHA {
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
     kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc,
-                                                    qk_mma, pv_mma);
+                                                    tmma);
   }
 };
 

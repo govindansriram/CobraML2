@@ -76,6 +76,7 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   auto q_tiler{make_shape(B_r, d)};
   auto kv_tiler{make_shape(B_c, d)};
+  auto scores_tiler{make_shape(B_r, B_c)};
 
   Tensor q_iterator{
       local_tile(q_head, q_tiler, coord)}; // (B_r, d, ceil(N / B_r))
@@ -124,6 +125,16 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor q_head_slice_idty{q_iterator_idty(_, _, blockIdx.z)};
   Tensor tQ_idty_part{thr_copy_qkv.partition_S(q_head_slice_idty)};
 
+  // make kv identity tensor
+  Tensor kv_iterator_idty{local_tile(head_idty, kv_tiler, coord)};
+  Tensor kv_idty_part{thr_copy_qkv.partition_S(kv_iterator_idty)};
+
+  // scores identity tensor
+  Tensor scores_idty{make_identity_tensor(make_shape(N, N))};
+  Tensor scores_tile_idty{
+      local_tile(scores_idty, scores_tiler, make_coord(blockIdx.z, _))}; // (B_r, B_c, ceil(N / B_c))
+  Tensor scores_slice_idty{thr_mma_qk.partition_C(scores_tile_idty)};
+
   // predicated copy
   MHAType::predicate_copy_tensor(
     tQ_idty_part,
@@ -142,7 +153,9 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   __syncthreads(); // redundant
 
   // if (threadIdx.x == 120 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 7){
-  //   print_tensor(shared_q);
+  //   print(scores_slice_idty);
+  //   print("\n");
+  //   print(r_out_mma);
   // }
 
   // start with the lowest possible value
@@ -152,16 +165,23 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   clear(l); // zero the sums
 
   for (size_t iter{0}; iter < iters; ++iter) {
-    copy(tc, tK_global_part_iter(_, _, _, iter), tK_shared_part);
 
-    __syncthreads();
+    MHAType::attention_matmul(
+      tK_global_part_iter(_, _, _, iter),
+      tK_shared_part,
+      tc,
+      q_mma,
+      k_mma,
+      r_scores_mma,
+      kv_idty_part(_, _, _, iter),
+      t_mma_qk,
+      N
+    );
 
-    gemm(t_mma_qk, q_mma, k_mma, r_scores_mma);
+    MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma, scores_slice_idty(_, _, _, iter), scale, N);
+
     copy(tc, tV_global_part_iter(_, _, _, iter), tV_shared_part);
-    MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma, scale);
-
     __syncthreads();
-
     gemm(t_mma_pv, p_mma2, v_mma, r_out_mma);
   }
 
@@ -346,17 +366,59 @@ struct FMHA {
     }
   }
 
-  template <typename MaxTensorEngineType, typename RScoresTensorEngineType,
+  template<
+    bool predicate = false,
+    typename SourceEngineTypeTC,
+    typename SourceLayoutTypeTC,
+    typename DestEngineTypeTC,
+    typename DestLayoutTypeTC,
+    typename TiledCopyType,
+    typename MMAType,
+    typename AEngineTypeMMA,
+    typename ALayoutTypeMMA,
+    typename BEngineTypeMMA,
+    typename BLayoutTypeMMA,
+    typename CEngineTypeMMA,
+    typename CLayoutTypeMMA,
+    typename IdentityEngineType,
+    typename IdentityLayoutType
+  >
+  COBRA_S_DEVICE void attention_matmul(
+    const Tensor<SourceEngineTypeTC, SourceLayoutTypeTC> &source_slice_cp,
+    Tensor<DestEngineTypeTC, DestLayoutTypeTC> &dest_slice_cp,
+    const TiledCopyType &tc,
+    const Tensor<AEngineTypeMMA, ALayoutTypeMMA> &a_mma_slice,
+    const Tensor<BEngineTypeMMA, BLayoutTypeMMA> &b_mma_slice,
+    Tensor<CEngineTypeMMA, CLayoutTypeMMA> &c_frag,
+    const Tensor<IdentityEngineType, IdentityLayoutType> &b_identity,
+    const MMAType &mma,
+    int N
+  ){
+
+    if constexpr(predicate){
+      predicate_copy_tensor(b_identity, source_slice_cp, dest_slice_cp, tc, DType(0), N);
+    }else{
+      copy(tc, source_slice_cp, dest_slice_cp);
+    }
+    __syncthreads();
+    gemm(mma, a_mma_slice, b_mma_slice, c_frag);
+  }
+
+  template <bool predicate = false, typename MaxTensorEngineType, typename RScoresTensorEngineType,
             typename ProbTensorEngineType, typename OutTensorEngineType,
             typename MaxTensorLayoutType, typename ScoresTensorLayoutType,
-            typename ProbTensorLayoutType, typename OutTensorLayoutType>
+            typename ProbTensorLayoutType, typename OutTensorLayoutType,
+            typename ScoresIdentityEngineType, typename ScoresIdentityLayoutType>
   COBRA_S_DEVICE void update_statistics(
       Tensor<MaxTensorEngineType, MaxTensorLayoutType> &max_tensor,
       Tensor<MaxTensorEngineType, MaxTensorLayoutType> &sum_tensor,
       Tensor<RScoresTensorEngineType, ScoresTensorLayoutType> &r_scores,
       Tensor<ProbTensorEngineType, ProbTensorLayoutType> &prob_tensor,
       Tensor<OutTensorEngineType, OutTensorLayoutType> &out_tensor,
-      const DType scale) {
+      const Tensor<ScoresIdentityEngineType, ScoresIdentityLayoutType> &scores_idty_tensor,
+      const DType scale,
+      const int bound
+    ) {
 
     static_assert(rank_v<ScoresTensorLayoutType> == 3,
                   "Per Register Attention scores must be 3 dimensional (mma, "
@@ -372,6 +434,7 @@ struct FMHA {
     for (size_t m{0}; m < mma_m; ++m) {
 
       auto r_score_slice{r_scores(_, m, _)};
+      auto scores_idty_slice{scores_idty_tensor(_, m, _)};
       auto p_slice{(prob_tensor(_, m, _))};
       auto o_slice{(out_tensor(_, m, _))};
 
@@ -389,7 +452,17 @@ struct FMHA {
         // uses hardware unit, removes warp divergence from branch checks
         // each thread may hold multiple values from each row, we find the
         // local maximum first
-        r_score_slice(idx) = r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
+        if constexpr (predicate){
+          auto n{get<1>(scores_idty_slice(idx))};
+          if (n < bound){
+            r_score_slice(idx) = r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
+          }else{
+            r_score_slice(idx) = -INFINITY;
+          }
+        }else{
+          r_score_slice(idx) = r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
+        }
+
         current_max = cuda::std::max(r_score_slice(idx), current_max);
       }
 
@@ -402,6 +475,8 @@ struct FMHA {
       current_sum = current_sum * scale_old;
 
       DType local_sum{0};
+
+      // TODO experiment with efficent copies
 
       CUTE_UNROLL
       for (size_t idx{0}; idx < slice_size; ++idx) {

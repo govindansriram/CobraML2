@@ -53,33 +53,32 @@ void cpu_mha(float *Q, float *K, float *V, float *O, int B, int N, int H,
 
 template <typename DType>
 thrust::device_vector<DType>
-create_projection(int head_count, int head_dim, int batch_size,
-                  int sequence_length, auto fill_fn) {
-  int total_length{head_count * head_dim * batch_size * sequence_length};
+create_projection(int batch_size, int sequence_length, int head_count, 
+                  int head_dim, auto fill_fn) {
+  int total_length{batch_size * sequence_length * head_count * head_dim};
   return create_tensor<DType>(total_length, fill_fn);
 }
 
 void check_output(const std::vector<float> &result,
-                  const std::vector<float> &expected, int b, int h, int N,
+                  const std::vector<float> &expected, int b, int N, int h,
                   int d, float tolerance) {
-  // float tolerance = 1e-4f;
 
   ASSERT_EQ(result.size(), expected.size())
       << "expected and result are incomparable, vector lengths are not the "
          "same";
 
   for (int i = 0; i < expected.size(); i++) {
-
-    int batch{i / (h * N * d)};
-    int leftover{i % (h * N * d)};
-    int head{leftover / (N * d)};
-    leftover = leftover % (N * d);
-    int seq{leftover / d};
+    // BSHD: index = batch * (N*h*d) + seq * (h*d) + head * d + idx
+    int batch{i / (N * h * d)};
+    int leftover{i % (N * h * d)};
+    int seq{leftover / (h * d)};
+    leftover = leftover % (h * d);
+    int head{leftover / d};
     int idx{leftover % d};
 
     ASSERT_NEAR(result[i], expected[i], tolerance)
-        << "Mismatch at batch: " << batch << ", head: " << head
-        << ", sequence: " << seq << ", idx: " << idx
+        << "Mismatch at batch: " << batch << ", seq: " << seq
+        << ", head: " << head << ", idx: " << idx
         << " ----- result=" << result[i] << ", expected=" << expected[i];
   }
 }

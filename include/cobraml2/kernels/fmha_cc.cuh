@@ -135,6 +135,12 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
       local_tile(scores_idty, scores_tiler, make_coord(blockIdx.z, _))}; // (B_r, B_c, ceil(N / B_c))
   Tensor scores_slice_idty{thr_mma_qk.partition_C(scores_tile_idty)};
 
+  // out identity tensor
+  Tensor o_iterator_idty{
+    local_tile(head_idty, q_tiler, coord)}; // (B_r, d, ceil(N / B_r))
+  Tensor o_head_slice_idty{o_iterator_idty(_, _, blockIdx.z)};
+  Tensor o_mma_idty{thr_mma_pv.partition_C(o_head_slice_idty)};
+
   // predicated copy
   MHAType::predicate_copy_tensor(
     tQ_idty_part,
@@ -150,13 +156,7 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
   clear(r_scores_mma); // Zero the accumulator
 
-  __syncthreads(); // redundant
-
-  // if (threadIdx.x == 120 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 7){
-  //   print(scores_slice_idty);
-  //   print("\n");
-  //   print(r_out_mma);
-  // }
+  // __syncthreads(); // redundant
 
   // start with the lowest possible value
   Tensor m{make_tensor<DType>(mma_m)};
@@ -164,9 +164,44 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   fill(m, -INFINITY);
   clear(l); // zero the sums
 
-  for (size_t iter{0}; iter < iters; ++iter) {
+  MHAType::matmul<true>(
+    tK_global_part_iter(_, _, _, iters - 1),
+    tK_shared_part,
+    tc,
+    q_mma,
+    k_mma,
+    r_scores_mma,
+    kv_idty_part(_, _, _, iters - 1),
+    t_mma_qk,
+    N
+  );
 
-    MHAType::attention_matmul(
+  MHAType::update_statistics<true>(
+    m, 
+    l, 
+    r_scores_mma, 
+    p_mma, 
+    r_out_mma, 
+    scores_slice_idty(_, _, _, iters - 1), 
+    scale, 
+    N
+  );
+
+  MHAType::matmul<true>(
+    tV_global_part_iter(_, _, _, iters - 1),
+    tV_shared_part,
+    tc,
+    p_mma2,
+    v_mma,
+    r_out_mma,
+    kv_idty_part(_, _, _, iters - 1),
+    t_mma_pv,
+    N
+  );
+
+
+  for (int iter{iters - 2}; iter > -1; --iter) {
+    MHAType::matmul(
       tK_global_part_iter(_, _, _, iter),
       tK_shared_part,
       tc,
@@ -178,11 +213,28 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
       N
     );
 
-    MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma, scores_slice_idty(_, _, _, iter), scale, N);
+    MHAType::update_statistics(
+      m, 
+      l, 
+      r_scores_mma, 
+      p_mma, 
+      r_out_mma, 
+      scores_slice_idty(_, _, _, iter), 
+      scale, 
+      N
+    );
 
-    copy(tc, tV_global_part_iter(_, _, _, iter), tV_shared_part);
-    __syncthreads();
-    gemm(t_mma_pv, p_mma2, v_mma, r_out_mma);
+    MHAType::matmul(
+      tV_global_part_iter(_, _, _, iter),
+      tV_shared_part,
+      tc,
+      p_mma2,
+      v_mma,
+      r_out_mma,
+      kv_idty_part(_, _, _, iter),
+      t_mma_pv,
+      N
+    );
   }
 
   constexpr Layout mma_shape{get<0>(r_out_mma.layout())};
@@ -201,7 +253,22 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
     }
   }
 
-  copy(r_out_mma, g_out_mma);
+  // if (threadIdx.x == 120 && blockIdx.x == 0 && blockIdx.y == 1 && blockIdx.z == 7){
+  // }
+
+  constexpr int write_rows{
+    size(get<1>(g_out_mma.shape()))
+  };
+
+  CUTE_UNROLL
+  for (size_t i{0}; i < write_rows; ++i){
+    auto seq_idx{get<1>(o_mma_idty(0, i, 0))};
+
+    if (seq_idx < N){
+      copy(r_out_mma(_, i, _), g_out_mma(_, i, _));
+    }
+  }
+
 }
 } // namespace naive
 
@@ -270,21 +337,6 @@ struct FMHA {
     const Tensor projection{make_identity_tensor(projection_layout.shape())};
     return projection(blockIdx.y, _, blockIdx.x, _);
   }
-
-  // CUTE_HOST_DEVICE static constexpr int get_total_threads() {
-  //   constexpr int elements_per_load{sizeof(VectorizedLoadType) / sizeof(DType)};
-  //   constexpr int threads_per_row{head_dim / elements_per_load};
-
-  //   static_assert(head_dim % elements_per_load == 0,
-  //                 "head dimension in bytes must be a multiple of 128");
-
-  //   constexpr int total_threads{B_r * threads_per_row};
-
-  //   static_assert(total_threads % 32 == 0,
-  //                 "block size requires an odd number of threads");
-
-  //   return total_threads;
-  // }
 
   static constexpr auto get_tiled_copy() {
 
@@ -383,7 +435,7 @@ struct FMHA {
     typename IdentityEngineType,
     typename IdentityLayoutType
   >
-  COBRA_S_DEVICE void attention_matmul(
+  COBRA_S_DEVICE void matmul(
     const Tensor<SourceEngineTypeTC, SourceLayoutTypeTC> &source_slice_cp,
     Tensor<DestEngineTypeTC, DestLayoutTypeTC> &dest_slice_cp,
     const TiledCopyType &tc,

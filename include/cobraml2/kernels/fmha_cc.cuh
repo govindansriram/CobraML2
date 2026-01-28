@@ -160,7 +160,7 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   // Do the block that needs predication first
 
-  MHAType::matmul<true>(tK_global_part_iter(_, _, _, iters - 1), tK_shared_part,
+  MHAType::matmul<true, true>(tK_global_part_iter(_, _, _, iters - 1), tK_shared_part,
                         tc, q_mma, k_mma, r_scores_mma,
                         kv_idty_part(_, _, _, iters - 1), t_mma, N);
 
@@ -168,20 +168,20 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
                                    scores_slice_idty(_, _, _, iters - 1), scale,
                                    N);
 
-  MHAType::matmul<true>(tV_global_part_iter(_, _, _, iters - 1), tV_shared_part,
+  MHAType::matmul<true, false>(tV_global_part_iter(_, _, _, iters - 1), tV_shared_part,
                         tc, p_mma2, v_mma, r_out_mma,
                         kv_idty_part(_, _, _, iters - 1), t_mma, N);
 
   // do the rest of blocks that don't need predication
   for (int iter{static_cast<int>(iters) - 2}; iter > -1; --iter) {
-    MHAType::matmul(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc,
+    MHAType::matmul<false, true>(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc,
                     q_mma, k_mma, r_scores_mma, kv_idty_part(_, _, _, iter),
                     t_mma, N);
 
     MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma,
                                scores_slice_idty(_, _, _, iter), scale, N);
 
-    MHAType::matmul(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc,
+    MHAType::matmul<false, false>(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc,
                     p_mma2, v_mma, r_out_mma, kv_idty_part(_, _, _, iter),
                     t_mma, N);
   }
@@ -358,7 +358,7 @@ struct FMHA {
     }
   }
 
-  template <bool predicate = false, typename SourceEngineTypeTC,
+  template <bool predicate = false, bool vectorize = false, typename SourceEngineTypeTC,
             typename SourceLayoutTypeTC, typename DestEngineTypeTC,
             typename DestLayoutTypeTC, typename TiledCopyType, typename MMAType,
             typename AEngineTypeMMA, typename ALayoutTypeMMA,
@@ -382,7 +382,68 @@ struct FMHA {
       copy(tc, source_slice_cp, dest_slice_cp);
     }
     __syncthreads();
-    gemm(mma, a_mma_slice, b_mma_slice, c_frag);
+
+    if constexpr (!vectorize){
+      gemm(mma, a_mma_slice, b_mma_slice, c_frag);
+    } else{
+        constexpr size_t mma_m_len{size(get<1>(ALayoutTypeMMA{}))};
+        constexpr size_t mma_n_len{size(get<1>(BLayoutTypeMMA{}))};
+        constexpr size_t mma_k_len{size(get<2>(BLayoutTypeMMA{}))};
+
+        constexpr size_t elements_per_load{sizeof(VectorizedLoadType) / sizeof(TensorDType)};
+
+        float4 a_vecs[mma_m_len];
+        float4 b_vecs[mma_n_len];
+
+        CUTE_UNROLL
+        for (size_t k{0}; k < mma_k_len; k += elements_per_load) {
+
+            // 1. Load all A vectors
+            CUTE_UNROLL
+            for (size_t m{0}; m < mma_m_len; m++) {
+                a_vecs[m] = *reinterpret_cast<float4*>(&a_mma_slice(0, m, k));
+            }
+
+            // 2. Load all B vectors
+            CUTE_UNROLL
+            for (size_t n{0}; n < mma_n_len; n++) {
+                b_vecs[n] = *reinterpret_cast<float4*>(&b_mma_slice(0, n, k));
+            }
+
+            // 3. FMAs - all .x first, then .y, then .z, then .w
+            CUTE_UNROLL
+            for (size_t m{0}; m < mma_m_len; m++) {
+                CUTE_UNROLL
+                for (size_t n{0}; n < mma_n_len; n++) {
+                    c_frag(0, m, n) += a_vecs[m].x * b_vecs[n].x;
+                }
+            }
+
+            CUTE_UNROLL
+            for (size_t m{0}; m < mma_m_len; m++) {
+                CUTE_UNROLL
+                for (size_t n{0}; n < mma_n_len; n++) {
+                    c_frag(0, m, n) += a_vecs[m].y * b_vecs[n].y;
+                }
+            }
+
+            CUTE_UNROLL
+            for (size_t m{0}; m < mma_m_len; m++) {
+                CUTE_UNROLL
+                for (size_t n{0}; n < mma_n_len; n++) {
+                    c_frag(0, m, n) += a_vecs[m].z * b_vecs[n].z;
+                }
+            }
+
+            CUTE_UNROLL
+            for (size_t m{0}; m < mma_m_len; m++) {
+                CUTE_UNROLL
+                for (size_t n{0}; n < mma_n_len; n++) {
+                    c_frag(0, m, n) += a_vecs[m].w * b_vecs[n].w;
+                }
+            }
+        }
+    }
   }
 
   template <bool predicate = false, typename MaxTensorEngineType,

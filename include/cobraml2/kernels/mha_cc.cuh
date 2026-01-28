@@ -21,7 +21,8 @@
  * -----------------------
  * - Tensor: A view over data with a Layout (shape + strides)
  * - Layout: Describes how logical coordinates map to memory offsets
- * - TiledCopy: Describes how threads cooperatively copy data (global <-> shared)
+ * - TiledCopy: Describes how threads cooperatively copy data (global <->
+ * shared)
  * - TiledMMA: Describes how threads cooperatively perform matrix multiply
  * - Identity Tensor: A tensor that returns coordinates, used for predication
  *
@@ -67,7 +68,8 @@ namespace mha_cc_kernels {
  *
  * @param Q         Query tensor [B, N, H, d] in global memory
  * @param K         Key tensor [B, N, H, d] in global memory
- * @param S         Output scores [B, H, N_rows, N_cols] in global memory (padded)
+ * @param S         Output scores [B, H, N_rows, N_cols] in global memory
+ * (padded)
  * @param N         Actual sequence length (may be < tile size)
  * @param N_rows    Padded row dimension (multiple of B_r)
  * @param N_cols    Padded column dimension (multiple of B_c)
@@ -120,9 +122,9 @@ __global__ void qk_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   // Step 3: Define tile shapes for partitioning
   // =========================================================================
   // These are compile-time constants wrapped in CuTe's Int<> type
-  constexpr typename MHAType::HeadDimType d{};      // Head dimension (e.g., 64)
-  constexpr typename MHAType::BlockRowsType B_r{};  // Query tile rows (e.g., 64)
-  constexpr typename MHAType::BlockColsType B_c{};  // Key tile rows (e.g., 64)
+  constexpr typename MHAType::HeadDimType d{};     // Head dimension (e.g., 64)
+  constexpr typename MHAType::BlockRowsType B_r{}; // Query tile rows (e.g., 64)
+  constexpr typename MHAType::BlockColsType B_c{}; // Key tile rows (e.g., 64)
 
   auto q_tiler{make_shape(B_r, d)};   // Q tiles are [B_r x d]
   auto k_tiler{make_shape(B_c, d)};   // K tiles are [B_c x d]
@@ -155,7 +157,8 @@ __global__ void qk_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   // Step 5: Partition tensors for cooperative thread work
   // =========================================================================
   // TiledCopy describes how threads cooperatively move data:
-  //   - Thread layout: How threads are arranged (e.g., [8, 16] = 8 rows x 16 cols)
+  //   - Thread layout: How threads are arranged (e.g., [8, 16] = 8 rows x 16
+  //   cols)
   //   - Value layout: How many elements each thread handles per "atom"
   //
   // get_slice(threadIdx.x): Returns this thread's portion of the tiled copy
@@ -179,15 +182,16 @@ __global__ void qk_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   //   - partition_C: Partition output matrix for this thread
   ThrMMA thr_mma{t_mma.get_slice(threadIdx.x)};
 
-  Tensor q_mma{thr_mma.partition_A(shared_q)};  // A matrix (Q)
-  Tensor k_mma{thr_mma.partition_B(shared_k)};  // B matrix (K, used as K^T)
+  Tensor q_mma{thr_mma.partition_A(shared_q)}; // A matrix (Q)
+  Tensor k_mma{thr_mma.partition_B(shared_k)}; // B matrix (K, used as K^T)
 
   // =========================================================================
   // Step 7: Create identity tensors for predication
   // =========================================================================
-  // Identity tensors return their coordinates when accessed, enabling bounds checking.
-  // For a tensor sliced from 4D [batch, seq, heads, dim], the identity returns
-  // a 4-tuple (b, s, h, d) where we can extract the sequence index with get<1>.
+  // Identity tensors return their coordinates when accessed, enabling bounds
+  // checking. For a tensor sliced from 4D [batch, seq, heads, dim], the
+  // identity returns a 4-tuple (b, s, h, d) where we can extract the sequence
+  // index with get<1>.
   //
   // We use N_rows (padded) to ensure the identity covers the full tile range,
   // even when tiles extend beyond the actual sequence length N.
@@ -205,8 +209,9 @@ __global__ void qk_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   // predicate_copy_tensor: Copies data with bounds checking
   //   - If sequence index < N: copy from global to shared
   //   - If sequence index >= N: fill with zero (out of bounds)
-  MHAType::predicate_copy_tensor(tQ_idty, tQ_global, tQ_shared, tc, DType(0), N);
-  __syncthreads();  // Ensure all threads finished loading Q
+  MHAType::predicate_copy_tensor(tQ_idty, tQ_global, tQ_shared, tc, DType(0),
+                                 N);
+  __syncthreads(); // Ensure all threads finished loading Q
 
   // =========================================================================
   // Step 9: Main loop - iterate over K tiles
@@ -217,8 +222,8 @@ __global__ void qk_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
     // Partition output for this thread and create register fragment
     Tensor g_scores{thr_mma.partition_C(s_slice)};
-    Tensor r_scores{thr_mma.make_fragment_C(g_scores)};  // Registers
-    clear(r_scores);  // Initialize accumulator to zero
+    Tensor r_scores{thr_mma.make_fragment_C(g_scores)}; // Registers
+    clear(r_scores); // Initialize accumulator to zero
 
     // Load K tile with predication
     MHAType::predicate_copy_tensor(tK_idty(_, _, _, k_iter),
@@ -244,14 +249,15 @@ __global__ void qk_kernel(const typename MHAType::TensorDType *__restrict__ Q,
     Tensor scores_mma_idty{thr_mma.partition_C(scores_tile_idty)};
 
     // Get dimensions of this thread's output partition
-    auto write_m = size<1>(g_scores);  // Rows this thread writes
-    auto write_n = size<2>(g_scores);  // Cols this thread writes
+    auto write_m = size<1>(g_scores); // Rows this thread writes
+    auto write_n = size<2>(g_scores); // Cols this thread writes
 
     // Write with bounds checking on both row and column
     CUTE_UNROLL
     for (int m = 0; m < write_m; ++m) {
       auto row_idx{get<0>(scores_mma_idty(0, m, 0))};
-      if (row_idx >= N) continue;  // Skip invalid rows
+      if (row_idx >= N)
+        continue; // Skip invalid rows
 
       CUTE_UNROLL
       for (int n = 0; n < write_n; ++n) {
@@ -263,7 +269,7 @@ __global__ void qk_kernel(const typename MHAType::TensorDType *__restrict__ Q,
       }
     }
 
-    __syncthreads();  // Ensure shared memory can be reused
+    __syncthreads(); // Ensure shared memory can be reused
   }
 }
 
@@ -294,7 +300,8 @@ __global__ void qk_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 template <typename MHAType>
 __global__ void softmax_kernel(typename MHAType::TensorDType *__restrict__ S,
                                typename MHAType::TensorDType *__restrict__ P,
-                               const int N, const int N_rows, const int N_cols) {
+                               const int N, const int N_rows,
+                               const int N_cols) {
 
   using DType = typename MHAType::TensorDType;
   size_t batch_size{gridDim.y};
@@ -317,7 +324,8 @@ __global__ void softmax_kernel(typename MHAType::TensorDType *__restrict__ S,
   // Process each row assigned to this block
   for (int local_row = 0; local_row < B_r; ++local_row) {
     int row_idx = block_row_start + local_row;
-    if (row_idx >= N) continue;  // Skip padded rows
+    if (row_idx >= N)
+      continue; // Skip padded rows
 
     // Get row views
     Tensor s_row{s_head(row_idx, _)};
@@ -335,14 +343,16 @@ __global__ void softmax_kernel(typename MHAType::TensorDType *__restrict__ S,
     local_max = warp_max(local_max);
 
     // Cross-warp reduction
-    if (lane_id == 0) smem[warp_id] = local_max;
+    if (lane_id == 0)
+      smem[warp_id] = local_max;
     __syncthreads();
 
     DType row_max;
     if (warp_id == 0) {
       DType val = (lane_id < num_warps) ? smem[lane_id] : -INFINITY;
       val = warp_max(val);
-      if (lane_id == 0) smem[0] = val;
+      if (lane_id == 0)
+        smem[0] = val;
     }
     __syncthreads();
     row_max = smem[0];
@@ -353,7 +363,7 @@ __global__ void softmax_kernel(typename MHAType::TensorDType *__restrict__ S,
     DType local_sum = 0;
     for (int j = threadIdx.x; j < N; j += threads) {
       DType exp_val = expf(s_row(j) - row_max);
-      p_row(j) = exp_val;  // Store intermediate exp values
+      p_row(j) = exp_val; // Store intermediate exp values
       local_sum += exp_val;
     }
 
@@ -361,14 +371,16 @@ __global__ void softmax_kernel(typename MHAType::TensorDType *__restrict__ S,
     local_sum = warp_sum(local_sum);
 
     // Cross-warp reduction
-    if (lane_id == 0) smem[warp_id] = local_sum;
+    if (lane_id == 0)
+      smem[warp_id] = local_sum;
     __syncthreads();
 
     DType row_sum;
     if (warp_id == 0) {
       DType val = (lane_id < num_warps) ? smem[lane_id] : DType(0);
       val = warp_sum(val);
-      if (lane_id == 0) smem[0] = val;
+      if (lane_id == 0)
+        smem[0] = val;
     }
     __syncthreads();
     row_sum = smem[0];
@@ -428,7 +440,8 @@ __global__ void pv_kernel(const typename MHAType::TensorDType *__restrict__ P,
   size_t batch_size{gridDim.y};
 
   // Create tensor views
-  const Tensor p_head{MHAType::slice_scores_padded(P, batch_size, N_rows, N_cols)};
+  const Tensor p_head{
+      MHAType::slice_scores_padded(P, batch_size, N_rows, N_cols)};
   const Tensor v_head{MHAType::slice_head(V, batch_size, N)};
   Tensor o_head{MHAType::slice_head(O, batch_size, N)};
 
@@ -457,9 +470,9 @@ __global__ void pv_kernel(const typename MHAType::TensorDType *__restrict__ P,
   constexpr typename MHAType::BlockRowsType B_r{};
   constexpr typename MHAType::BlockColsType B_c{};
 
-  auto p_tiler{make_shape(B_r, B_c)};  // P tiles: [B_r x B_c]
-  auto v_tiler{make_shape(B_c, d)};    // V tiles: [B_c x d]
-  auto o_tiler{make_shape(B_r, d)};    // O tiles: [B_r x d]
+  auto p_tiler{make_shape(B_r, B_c)}; // P tiles: [B_r x B_c]
+  auto v_tiler{make_shape(B_c, d)};   // V tiles: [B_c x d]
+  auto o_tiler{make_shape(B_r, d)};   // O tiles: [B_r x d]
 
   // Create tile iterators
   // P: This block's row, iterate over columns
@@ -482,7 +495,7 @@ __global__ void pv_kernel(const typename MHAType::TensorDType *__restrict__ P,
 
   // MMA partitions
   Tensor p_mma{thr_mma.partition_A(shared_p)};
-  Tensor v_mma{thr_mma.partition_B(trans_shared_v)};  // Note: transposed view!
+  Tensor v_mma{thr_mma.partition_B(trans_shared_v)}; // Note: transposed view!
 
   // Identity tensors for predication
   Tensor head_idty{MHAType::identity_slice_head_padded(batch_size, N_rows)};
@@ -527,7 +540,8 @@ __global__ void pv_kernel(const typename MHAType::TensorDType *__restrict__ P,
   // =========================================================================
   // Write output with predication
   // =========================================================================
-  Tensor o_iterator_idty{local_tile(head_idty, o_tiler, make_coord(blockIdx.z, 0))};
+  Tensor o_iterator_idty{
+      local_tile(head_idty, o_tiler, make_coord(blockIdx.z, 0))};
   Tensor o_mma_idty{thr_mma.partition_C(o_iterator_idty)};
 
   auto write_rows = size<1>(g_out);
@@ -580,7 +594,8 @@ struct MHA_CC {
   using ScalarLoadType = DType;
 
   static constexpr int threads_per_block{thread_count};
-  static constexpr int elements_per_vector = sizeof(VectorizedLoadType) / sizeof(DType);
+  static constexpr int elements_per_vector =
+      sizeof(VectorizedLoadType) / sizeof(DType);
 
   /**
    * Shared Memory Layout for QK Kernel
@@ -589,8 +604,8 @@ struct MHA_CC {
    * Both are row-major: element [i,j] at offset i*head_dim + j
    */
   struct QKSharedStorage {
-    ArrayEngine<DType, B_r * head_dim> Q;  // [B_r x d]
-    ArrayEngine<DType, B_c * head_dim> K;  // [B_c x d]
+    ArrayEngine<DType, B_r * head_dim> Q; // [B_r x d]
+    ArrayEngine<DType, B_c * head_dim> K; // [B_c x d]
 
     // Row-major layouts
     using QLayoutType =
@@ -612,8 +627,8 @@ struct MHA_CC {
    * and adjusted strides, avoiding any actual data movement.
    */
   struct PVSharedStorage {
-    ArrayEngine<DType, B_r * B_c> P;       // [B_r x B_c]
-    ArrayEngine<DType, B_c * head_dim> V;  // [B_c x d]
+    ArrayEngine<DType, B_r * B_c> P;      // [B_r x B_c]
+    ArrayEngine<DType, B_c * head_dim> V; // [B_c x d]
 
     using PLayoutType =
         Layout<Shape<BlockRowsType, BlockColsType>, Stride<BlockColsType, _1>>;
@@ -640,7 +655,7 @@ struct MHA_CC {
   // Q, K, V, O tensor layout: [Batch, SeqLen, Heads, HeadDim] row-major
   COBRA_S_DEVICE auto get_tensor_layout(size_t batch_size, size_t N) {
     return make_layout(make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}),
-                       LayoutRight{});  // LayoutRight = row-major
+                       LayoutRight{}); // LayoutRight = row-major
   }
 
   // Scores layout: [Batch, Heads, SeqLen, SeqLen]
@@ -658,11 +673,11 @@ struct MHA_CC {
    * Solution: Allocate with padded dimensions [N_rows, N_cols] but
    * only use [N, N] logically. The padding is zero-initialized.
    */
-  COBRA_S_DEVICE auto get_padded_scores_layout(size_t batch_size,
-                                                size_t N_rows, size_t N_cols) {
-    return make_layout(
-        make_shape(batch_size, NumHeadsType{}, N_rows, N_cols),
-        make_stride(head_count * N_rows * N_cols, N_rows * N_cols, N_cols, _1{}));
+  COBRA_S_DEVICE auto get_padded_scores_layout(size_t batch_size, size_t N_rows,
+                                               size_t N_cols) {
+    return make_layout(make_shape(batch_size, NumHeadsType{}, N_rows, N_cols),
+                       make_stride(head_count * N_rows * N_cols,
+                                   N_rows * N_cols, N_cols, _1{}));
   }
 
   /**
@@ -693,8 +708,9 @@ struct MHA_CC {
 
   template <typename PtrType>
   COBRA_S_DEVICE auto slice_scores_padded(PtrType g_ptr, int batch_size,
-                                           int N_rows, int N_cols) {
-    const auto scores_layout{get_padded_scores_layout(batch_size, N_rows, N_cols)};
+                                          int N_rows, int N_cols) {
+    const auto scores_layout{
+        get_padded_scores_layout(batch_size, N_rows, N_cols)};
     const Tensor scores{
         make_tensor(make_gmem_ptr<DType>(g_ptr), scores_layout)};
     return scores(blockIdx.y, blockIdx.x, _, _);
@@ -726,7 +742,8 @@ struct MHA_CC {
   /**
    * TiledCopy Configuration
    * -----------------------
-   * Describes how threads cooperatively copy data between global and shared memory.
+   * Describes how threads cooperatively copy data between global and shared
+   * memory.
    *
    * Components:
    *   1. Copy_Atom: The basic copy operation (e.g., 128-bit vectorized load)
@@ -793,9 +810,9 @@ struct MHA_CC {
 
     using RowType = Int<thread_count / 32>;
 
-    TiledMMA t_mma = make_tiled_mma(
-        UniversalFMA<DType, DType, DType>{},
-        Layout<Shape<RowType, _32>, Stride<_32, _1>>{});
+    TiledMMA t_mma =
+        make_tiled_mma(UniversalFMA<DType, DType, DType>{},
+                       Layout<Shape<RowType, _32>, Stride<_32, _1>>{});
 
     return t_mma;
   }
@@ -869,7 +886,8 @@ struct MHA_CC {
           &source_tensor,
       Tensor<DestinationTensorEngineType, DestinationTensorLayoutType>
           &destination_tensor,
-      TiledCopyType tiled_copy, DType fill_value, int row_bound, int col_bound) {
+      TiledCopyType tiled_copy, DType fill_value, int row_bound,
+      int col_bound) {
 
     constexpr int rows{size(get<1>(SourceTensorLayoutType{}))};
 
@@ -914,7 +932,8 @@ struct MHA_CC {
 
     // Allocate intermediate score matrices
     DType *S, *P;
-    size_t scores_size = batch_size * head_count * N_rows * N_cols * sizeof(DType);
+    size_t scores_size =
+        batch_size * head_count * N_rows * N_cols * sizeof(DType);
     cudaMalloc(&S, scores_size);
     cudaMalloc(&P, scores_size);
 
@@ -934,7 +953,8 @@ struct MHA_CC {
 
     // Kernel 1: S = Q @ K^T
     {
-      auto kernel_fptr{mha_cc_kernels::qk_kernel<Self, decltype(tc), decltype(tmma)>};
+      auto kernel_fptr{
+          mha_cc_kernels::qk_kernel<Self, decltype(tc), decltype(tmma)>};
       size_t smem_size{sizeof(QKSharedStorage)};
 
       cudaFuncSetAttribute(
@@ -942,8 +962,8 @@ struct MHA_CC {
       cudaFuncSetAttribute(kernel_fptr,
                            cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-      kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, S, N, N_rows, N_cols,
-                                                       scale, tc, tmma);
+      kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, S, N, N_rows,
+                                                      N_cols, scale, tc, tmma);
     }
 
     // Kernel 2: P = softmax(S)
@@ -954,7 +974,8 @@ struct MHA_CC {
 
     // Kernel 3: O = P @ V
     {
-      auto kernel_fptr{mha_cc_kernels::pv_kernel<Self, decltype(tc), decltype(tmma)>};
+      auto kernel_fptr{
+          mha_cc_kernels::pv_kernel<Self, decltype(tc), decltype(tmma)>};
       size_t smem_size{sizeof(PVSharedStorage)};
 
       cudaFuncSetAttribute(
@@ -962,8 +983,8 @@ struct MHA_CC {
       cudaFuncSetAttribute(kernel_fptr,
                            cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-      kernel_fptr<<<grid_dim, block_dim, smem_size>>>(P, V, O, N, N_rows, N_cols,
-                                                       tc, tmma);
+      kernel_fptr<<<grid_dim, block_dim, smem_size>>>(P, V, O, N, N_rows,
+                                                      N_cols, tc, tmma);
     }
 
     cudaDeviceSynchronize();

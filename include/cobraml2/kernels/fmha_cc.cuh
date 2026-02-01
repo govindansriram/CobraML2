@@ -69,6 +69,13 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor shared_p{make_tensor(make_smem_ptr(shared_storage->P.begin()),
                               typename SharedStorageType::PLayoutType{})};
 
+
+  // if (thread0()){
+  //   print_layout(trans_shared_v.layout());
+  //   print("\n");
+  //   print_layout(shared_v.layout());
+  // }
+
   // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
 
   constexpr typename MHAType::HeadDimType d{};
@@ -198,11 +205,11 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   static_assert(rank(mma_shape) == 1,
                 "only rank 1 mma shape is currently supported");
 
-  CUTE_UNROLL
+  // CUTE_UNROLL
   for (size_t m_row{0}; m_row < m_rows; ++m_row) {
     auto out_slice{r_out_mma(_, m_row, _)};
 
-    CUTE_UNROLL
+    // CUTE_UNROLL
     for (size_t idx{0}; idx < size(out_slice); ++idx) {
       out_slice(idx) = out_slice(idx) / l(m_row);
     }
@@ -214,7 +221,7 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   constexpr int write_rows{size(get<1>(g_out_mma.shape()))};
 
-  CUTE_UNROLL
+  // CUTE_UNROLL
   for (size_t i{0}; i < write_rows; ++i) {
     auto seq_idx{get<1>(o_mma_idty(0, i, 0))};
 
@@ -255,14 +262,21 @@ struct FMHA {
     ArrayEngine<DType, B_c * head_dim> V;
     ArrayEngine<DType, B_r * B_c> P;
 
-    using QLayoutType =
-        Layout<Shape<QueryRowsType, HeadDimType>, Stride<HeadDimType, _1>>;
-    using KLayoutType =
-        Layout<Shape<KVColsType, HeadDimType>, Stride<HeadDimType, _1>>;
-    using VLayoutType = Layout<Shape<KVColsType, HeadDimType>>;
+    using swizzle_atom = decltype(composition(Swizzle<3,2,3>{},
+                            Layout<Shape <_8,Shape <_4, _8>>,
+                                    Stride<_32,Stride<_1,_4>>>{}));
+
+    using swizzle_atom_T = decltype(composition(Swizzle<3,2,3>{},
+      Layout<Shape <Shape <_4, _8>, _8>, 
+      Stride<Stride<_1, _4>, _32>>{}));
+
+    using QLayoutType = decltype(tile_to_shape(swizzle_atom{}, make_shape(QueryRowsType{}, HeadDimType{})));
+    using KLayoutType = decltype(tile_to_shape(swizzle_atom{}, make_shape(KVColsType{}, HeadDimType{})));
+    using VTransposedLayoutType = decltype(tile_to_shape(swizzle_atom{}, make_shape(HeadDimType{}, KVColsType{})));
+
+    using VLayoutType = decltype(tile_to_shape(swizzle_atom_T{}, make_shape(KVColsType{}, HeadDimType{}), LayoutRight{}));
     using PLayoutType =
         Layout<Shape<KVColsType, QueryRowsType>, Stride<QueryRowsType, _1>>;
-    using VTransposedLayoutType = Layout<Shape<HeadDimType, KVColsType>, Stride<KVColsType, _1>>;
   };
 
   static constexpr int threads_per_block{thread_count};
@@ -404,7 +418,7 @@ struct FMHA {
         float4 a_vecs[mma_m_len];
         float4 b_vecs[mma_n_len];
 
-        CUTE_UNROLL
+        #pragma unroll 8 // too little unrolling hurts ILP to much causes register spills
         for (size_t k{0}; k < mma_k_len; k += elements_per_load) {
 
             // 1. Load all A vectors

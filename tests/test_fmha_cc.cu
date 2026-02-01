@@ -104,11 +104,11 @@ void test_fmha(int batch_size, int sequence_length) {
 // even block size by sequence length
 TEST(FMHA_CC, H16_D64_Br64_Bc64_B5_N128) { test_fmha<16, 64, 64, 64>(4, 512); }
 
-// // uneven block size by sequence length (requires predication)
-// TEST(FMHA_CC, H2_D64_Br64_Bc64_B56_N490) { test_fmha<2, 64, 64, 64>(56, 490); }
+// uneven block size by sequence length (requires predication)
+TEST(FMHA_CC, H2_D64_Br64_Bc64_B56_N490) { test_fmha<2, 64, 64, 64>(56, 490); }
 
-// // 1 block only and even
-// TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N64) { test_fmha<16, 64, 64, 64>(8, 64); }
+// 1 block only and even
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N64) { test_fmha<16, 64, 64, 64>(8, 64); }
 
-// // 1 block only and uneven
-// TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N59) { test_fmha<16, 64, 64, 64>(8, 59); }
+// 1 block only and uneven
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N59) { test_fmha<16, 64, 64, 64>(8, 59); }

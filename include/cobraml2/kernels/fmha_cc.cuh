@@ -156,8 +156,6 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
   clear(r_scores_mma); // Zero the accumulator
 
-  // __syncthreads(); // redundant
-
   // start with the lowest possible value
   Tensor m{make_tensor<DType>(mma_m)};
   Tensor l{make_tensor<DType>(mma_m)};
@@ -180,14 +178,14 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   // do the rest of blocks that don't need predication
   for (int iter{static_cast<int>(iters) - 2}; iter > -1; --iter) {
-    MHAType::matmul<false>(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc_qk,
+    MHAType::matmul(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc_qk,
                     q_mma, k_mma, r_scores_mma, k_idty_part(_, _, _, iter),
                     t_mma, N);
 
     MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma,
                                scores_slice_idty(_, _, _, iter), scale, N);
 
-    MHAType::matmul<false>(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc_v,
+    MHAType::matmul(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc_v,
                     p_mma2, v_mma, r_out_mma, v_idty_part(_, _, _, iter),
                     t_mma, N);
   }
@@ -198,23 +196,19 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   static_assert(rank(mma_shape) == 1,
                 "only rank 1 mma shape is currently supported");
 
-  // CUTE_UNROLL
+  CUTE_UNROLL
   for (size_t m_row{0}; m_row < m_rows; ++m_row) {
     auto out_slice{r_out_mma(_, m_row, _)};
 
-    // CUTE_UNROLL
+    CUTE_UNROLL
     for (size_t idx{0}; idx < size(out_slice); ++idx) {
       out_slice(idx) = out_slice(idx) / l(m_row);
     }
   }
 
-  // if (threadIdx.x == 120 && blockIdx.x == 0 && blockIdx.y == 1 && blockIdx.z
-  // == 7){
-  // }
-
   constexpr int write_rows{size(get<1>(g_out_mma.shape()))};
 
-  // CUTE_UNROLL
+  CUTE_UNROLL
   for (size_t i{0}; i < write_rows; ++i) {
     auto seq_idx{get<1>(o_mma_idty(0, i, 0))};
 
@@ -250,6 +244,18 @@ struct FMHA {
   using ScalarLoadType = uint32_t;
 
   struct SharedStorage {
+    // Swizzle atom dimensions
+    static constexpr int kSwizzleAtomRows = 8;
+    static constexpr int kSwizzleAtomCols = 32;
+
+    // Static asserts for tiling compatibility
+    static_assert(B_r % kSwizzleAtomRows == 0,
+        "B_r must be divisible by 8 (swizzle atom row size) for Q layout");
+    static_assert(B_c % kSwizzleAtomCols == 0,
+        "B_c must be divisible by 32 (swizzle atom col size) for V layout");
+    static_assert(head_dim % kSwizzleAtomCols == 0,
+        "head_dim must be divisible by 32 (swizzle atom col size) for Q/K layouts");
+
     ArrayEngine<DType, B_r * head_dim> Q;
     ArrayEngine<DType, B_c * head_dim> K;
     ArrayEngine<DType, B_c * head_dim> V;

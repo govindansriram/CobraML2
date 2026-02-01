@@ -29,16 +29,15 @@ namespace naive {
  * @param N sequence length: tokens per sequence
  * @return void
  */
-template <typename MHAType, typename TiledCopyTypeQK, typename TiledCopyTypeV, typename TiledMMAType>
-__global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
-                           const typename MHAType::TensorDType *__restrict__ K,
-                           const typename MHAType::TensorDType *__restrict__ V,
-                           typename MHAType::TensorDType *__restrict__ O,
-                           const int N,
-                           const typename MHAType::TensorDType scale,
-                           TiledCopyTypeQK tc_qk,
-                           TiledCopyTypeV tc_v, 
-                           TiledMMAType t_mma) {
+template <typename MHAType, typename TiledCopyTypeQK, typename TiledCopyTypeV,
+          typename TiledMMAType>
+__global__ void
+mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
+           const typename MHAType::TensorDType *__restrict__ K,
+           const typename MHAType::TensorDType *__restrict__ V,
+           typename MHAType::TensorDType *__restrict__ O, const int N,
+           const typename MHAType::TensorDType scale, TiledCopyTypeQK tc_qk,
+           TiledCopyTypeV tc_v, TiledMMAType t_mma) {
 
   using DType = typename MHAType::TensorDType;
   size_t batch_size{gridDim.y};
@@ -186,8 +185,8 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
                                scores_slice_idty(_, _, _, iter), scale, N);
 
     MHAType::matmul(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc_v,
-                    p_mma2, v_mma, r_out_mma, v_idty_part(_, _, _, iter),
-                    t_mma, N);
+                    p_mma2, v_mma, r_out_mma, v_idty_part(_, _, _, iter), t_mma,
+                    N);
   }
 
   constexpr Layout mma_shape{get<0>(r_out_mma.layout())};
@@ -249,31 +248,40 @@ struct FMHA {
     static constexpr int kSwizzleAtomCols = 32;
 
     // Static asserts for tiling compatibility
-    static_assert(B_r % kSwizzleAtomRows == 0,
+    static_assert(
+        B_r % kSwizzleAtomRows == 0,
         "B_r must be divisible by 8 (swizzle atom row size) for Q layout");
-    static_assert(B_c % kSwizzleAtomCols == 0,
+    static_assert(
+        B_c % kSwizzleAtomCols == 0,
         "B_c must be divisible by 32 (swizzle atom col size) for V layout");
     static_assert(head_dim % kSwizzleAtomCols == 0,
-        "head_dim must be divisible by 32 (swizzle atom col size) for Q/K layouts");
+                  "head_dim must be divisible by 32 (swizzle atom col size) "
+                  "for Q/K layouts");
 
     ArrayEngine<DType, B_r * head_dim> Q;
     ArrayEngine<DType, B_c * head_dim> K;
     ArrayEngine<DType, B_c * head_dim> V;
     ArrayEngine<DType, B_r * B_c> P;
 
-    using swizzle_atom = decltype(composition(Swizzle<3,2,3>{},
-                            Layout<Shape <_8,Shape <_4, _8>>,
-                                    Stride<_32,Stride<_1,_4>>>{}));
+    using swizzle_atom = decltype(composition(
+        Swizzle<3, 2, 3>{},
+        Layout<Shape<_8, Shape<_4, _8>>, Stride<_32, Stride<_1, _4>>>{}));
 
-    using swizzle_atom_T = decltype(composition(Swizzle<3,2,3>{},
-      Layout<Shape <Shape <_4, _8>, _8>, 
-      Stride<Stride<_1, _4>, _32>>{}));
+    using swizzle_atom_T = decltype(composition(
+        Swizzle<3, 2, 3>{},
+        Layout<Shape<Shape<_4, _8>, _8>, Stride<Stride<_1, _4>, _32>>{}));
 
-    using QLayoutType = decltype(tile_to_shape(swizzle_atom{}, make_shape(QueryRowsType{}, HeadDimType{})));
-    using KLayoutType = decltype(tile_to_shape(swizzle_atom{}, make_shape(KVColsType{}, HeadDimType{})));
-    using VTransposedLayoutType = decltype(tile_to_shape(swizzle_atom{}, make_shape(HeadDimType{}, KVColsType{})));
-    using VLayoutType = decltype(tile_to_shape(swizzle_atom_T{}, make_shape(KVColsType{}, HeadDimType{}), LayoutRight{}));
-    using PLayoutType = Layout<Shape<KVColsType, QueryRowsType>, Stride<QueryRowsType, _1>>;
+    using QLayoutType = decltype(tile_to_shape(
+        swizzle_atom{}, make_shape(QueryRowsType{}, HeadDimType{})));
+    using KLayoutType = decltype(tile_to_shape(
+        swizzle_atom{}, make_shape(KVColsType{}, HeadDimType{})));
+    using VTransposedLayoutType = decltype(tile_to_shape(
+        swizzle_atom{}, make_shape(HeadDimType{}, KVColsType{})));
+    using VLayoutType = decltype(tile_to_shape(
+        swizzle_atom_T{}, make_shape(KVColsType{}, HeadDimType{}),
+        LayoutRight{}));
+    using PLayoutType =
+        Layout<Shape<KVColsType, QueryRowsType>, Stride<QueryRowsType, _1>>;
   };
 
   static constexpr int threads_per_block{thread_count};
@@ -304,27 +312,29 @@ struct FMHA {
     return projection(blockIdx.y, _, blockIdx.x, _);
   }
 
-  template<typename LoadType>
-  static constexpr auto get_tiled_copy() {
+  template <typename LoadType> static constexpr auto get_tiled_copy() {
 
     // ensures no repeat across the head dimension
 
     constexpr int elements_per_load{sizeof(LoadType) / sizeof(DType)};
     constexpr int threads_per_row{head_dim / elements_per_load};
 
-    static_assert(head_dim % threads_per_row == 0,
-                  "the head dimension cannot be properly tiled with this thread layout");
+    static_assert(
+        head_dim % threads_per_row == 0,
+        "the head dimension cannot be properly tiled with this thread layout");
 
     using TPRType = Int<threads_per_row>;
     using EPLType = Int<elements_per_load>;
     constexpr int rows{thread_count / threads_per_row};
     using RowType = Int<rows>;
 
-    static_assert(thread_count % threads_per_row == 0,
-                  "the head dimension cannot be properly tiled with this thread layout");
+    static_assert(
+        thread_count % threads_per_row == 0,
+        "the head dimension cannot be properly tiled with this thread layout");
 
-    static_assert(B_r % rows == 0 && B_c % rows == 0,
-                  "the block size cannot be properly tiled with this thread layout");
+    static_assert(
+        B_r % rows == 0 && B_c % rows == 0,
+        "the block size cannot be properly tiled with this thread layout");
 
     return make_tiled_copy(
         Copy_Atom<UniversalCopy<LoadType>, DType>{},
@@ -407,58 +417,60 @@ struct FMHA {
     constexpr size_t mma_n_len{size(get<1>(BLayoutTypeMMA{}))};
     constexpr size_t mma_k_len{size(get<2>(BLayoutTypeMMA{}))};
 
-    constexpr size_t elements_per_load{sizeof(VectorizedLoadType) / sizeof(TensorDType)};
+    constexpr size_t elements_per_load{sizeof(VectorizedLoadType) /
+                                       sizeof(TensorDType)};
 
     float4 a_vecs[mma_m_len];
     float4 b_vecs[mma_n_len];
 
-    #pragma unroll 8 // too little unrolling hurts ILP to much causes register spills
+#pragma unroll 8 // too little unrolling hurts ILP to much causes register
+                 // spills
     for (size_t k{0}; k < mma_k_len; k += elements_per_load) {
 
-        // 1. Load all A vectors
-        CUTE_UNROLL
-        for (size_t m{0}; m < mma_m_len; m++) {
-            a_vecs[m] = *reinterpret_cast<float4*>(&a_mma_slice(0, m, k));
-        }
+      // 1. Load all A vectors
+      CUTE_UNROLL
+      for (size_t m{0}; m < mma_m_len; m++) {
+        a_vecs[m] = *reinterpret_cast<float4 *>(&a_mma_slice(0, m, k));
+      }
 
-        // 2. Load all B vectors
+      // 2. Load all B vectors
+      CUTE_UNROLL
+      for (size_t n{0}; n < mma_n_len; n++) {
+        b_vecs[n] = *reinterpret_cast<float4 *>(&b_mma_slice(0, n, k));
+      }
+
+      // 3. FMAs - all .x first, then .y, then .z, then .w
+      CUTE_UNROLL
+      for (size_t m{0}; m < mma_m_len; m++) {
         CUTE_UNROLL
         for (size_t n{0}; n < mma_n_len; n++) {
-            b_vecs[n] = *reinterpret_cast<float4*>(&b_mma_slice(0, n, k));
+          c_frag(0, m, n) += a_vecs[m].x * b_vecs[n].x;
         }
+      }
 
-        // 3. FMAs - all .x first, then .y, then .z, then .w
+      CUTE_UNROLL
+      for (size_t m{0}; m < mma_m_len; m++) {
         CUTE_UNROLL
-        for (size_t m{0}; m < mma_m_len; m++) {
-            CUTE_UNROLL
-            for (size_t n{0}; n < mma_n_len; n++) {
-                c_frag(0, m, n) += a_vecs[m].x * b_vecs[n].x;
-            }
+        for (size_t n{0}; n < mma_n_len; n++) {
+          c_frag(0, m, n) += a_vecs[m].y * b_vecs[n].y;
         }
+      }
 
+      CUTE_UNROLL
+      for (size_t m{0}; m < mma_m_len; m++) {
         CUTE_UNROLL
-        for (size_t m{0}; m < mma_m_len; m++) {
-            CUTE_UNROLL
-            for (size_t n{0}; n < mma_n_len; n++) {
-                c_frag(0, m, n) += a_vecs[m].y * b_vecs[n].y;
-            }
+        for (size_t n{0}; n < mma_n_len; n++) {
+          c_frag(0, m, n) += a_vecs[m].z * b_vecs[n].z;
         }
+      }
 
+      CUTE_UNROLL
+      for (size_t m{0}; m < mma_m_len; m++) {
         CUTE_UNROLL
-        for (size_t m{0}; m < mma_m_len; m++) {
-            CUTE_UNROLL
-            for (size_t n{0}; n < mma_n_len; n++) {
-                c_frag(0, m, n) += a_vecs[m].z * b_vecs[n].z;
-            }
+        for (size_t n{0}; n < mma_n_len; n++) {
+          c_frag(0, m, n) += a_vecs[m].w * b_vecs[n].w;
         }
-
-        CUTE_UNROLL
-        for (size_t m{0}; m < mma_m_len; m++) {
-            CUTE_UNROLL
-            for (size_t n{0}; n < mma_n_len; n++) {
-                c_frag(0, m, n) += a_vecs[m].w * b_vecs[n].w;
-            }
-        }
+      }
     }
   }
 
@@ -571,7 +583,8 @@ struct FMHA {
 
     const auto tmma{get_tiled_mma()};
 
-    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc_qk), decltype(tc_v), decltype(tmma)>};
+    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc_qk), decltype(tc_v),
+                                       decltype(tmma)>};
 
     size_t smem_size{sizeof(SharedStorage)};
 
@@ -582,8 +595,8 @@ struct FMHA {
     cudaFuncSetAttribute(kernel_fptr,
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc_qk, tc_v,
-                                                    tmma);
+    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc_qk,
+                                                    tc_v, tmma);
   }
 };
 

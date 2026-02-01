@@ -29,14 +29,15 @@ namespace naive {
  * @param N sequence length: tokens per sequence
  * @return void
  */
-template <typename MHAType, typename TiledCopyType, typename TiledMMAType>
-__global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
-                           const typename MHAType::TensorDType *__restrict__ K,
-                           const typename MHAType::TensorDType *__restrict__ V,
-                           typename MHAType::TensorDType *__restrict__ O,
-                           const int N,
-                           const typename MHAType::TensorDType scale,
-                           TiledCopyType tc, TiledMMAType t_mma) {
+template <typename MHAType, typename TiledCopyTypeQK, typename TiledCopyTypeV,
+          typename TiledMMAType>
+__global__ void
+mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
+           const typename MHAType::TensorDType *__restrict__ K,
+           const typename MHAType::TensorDType *__restrict__ V,
+           typename MHAType::TensorDType *__restrict__ O, const int N,
+           const typename MHAType::TensorDType scale, TiledCopyTypeQK tc_qk,
+           TiledCopyTypeV tc_v, TiledMMAType t_mma) {
 
   using DType = typename MHAType::TensorDType;
   size_t batch_size{gridDim.y};
@@ -55,10 +56,10 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
                               typename SharedStorageType::QLayoutType{})};
 
   Tensor shared_k{make_tensor(make_smem_ptr(shared_storage->K.begin()),
-                              typename SharedStorageType::KVLayoutType{})};
+                              typename SharedStorageType::KLayoutType{})};
 
   Tensor shared_v{make_tensor(make_smem_ptr(shared_storage->V.begin()),
-                              typename SharedStorageType::KVLayoutType{})};
+                              typename SharedStorageType::VLayoutType{})};
 
   Tensor trans_shared_v{
       make_tensor(make_smem_ptr(shared_storage->V.begin()),
@@ -94,16 +95,17 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor out_slice{o_iterator(_, _, blockIdx.z)};
 
   // t prefix means unique to this thread
-  ThrCopy thr_copy_qkv{tc.get_slice(threadIdx.x)};
+  ThrCopy thr_copy_qk{tc_qk.get_slice(threadIdx.x)};
+  ThrCopy thr_copy_v{tc_v.get_slice(threadIdx.x)};
 
-  const Tensor tQ_global_part{thr_copy_qkv.partition_S(q_slice)};
-  Tensor tQ_shared_part{thr_copy_qkv.partition_D(shared_q)};
+  const Tensor tQ_global_part{thr_copy_qk.partition_S(q_slice)};
+  Tensor tQ_shared_part{thr_copy_qk.partition_D(shared_q)};
 
-  const Tensor tK_global_part_iter{thr_copy_qkv.partition_S(k_iterator)};
-  Tensor tK_shared_part{thr_copy_qkv.partition_D(shared_k)};
+  const Tensor tK_global_part_iter{thr_copy_qk.partition_S(k_iterator)};
+  Tensor tK_shared_part{thr_copy_qk.partition_D(shared_k)};
 
-  const Tensor tV_global_part_iter{thr_copy_qkv.partition_S(v_iterator)};
-  Tensor tV_shared_part{thr_copy_qkv.partition_D(shared_v)};
+  const Tensor tV_global_part_iter{thr_copy_v.partition_S(v_iterator)};
+  Tensor tV_shared_part{thr_copy_v.partition_D(shared_v)};
 
   ThrMMA thr_mma_qk{t_mma.get_slice(threadIdx.x)};
 
@@ -122,11 +124,14 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor q_iterator_idty{
       local_tile(head_idty, q_tiler, coord)}; // (B_r, d, ceil(N / B_r))
   Tensor q_head_slice_idty{q_iterator_idty(_, _, blockIdx.z)};
-  Tensor tQ_idty_part{thr_copy_qkv.partition_S(q_head_slice_idty)};
+  Tensor tQ_idty_part{thr_copy_qk.partition_S(q_head_slice_idty)};
 
-  // make kv identity tensor
+  // make k identity tensor
   Tensor kv_iterator_idty{local_tile(head_idty, kv_tiler, coord)};
-  Tensor kv_idty_part{thr_copy_qkv.partition_S(kv_iterator_idty)};
+  Tensor k_idty_part{thr_copy_qk.partition_S(kv_iterator_idty)};
+
+  // make v identity tensor
+  Tensor v_idty_part{thr_copy_v.partition_S(kv_iterator_idty)};
 
   // scores identity tensor
   Tensor scores_idty{make_identity_tensor(make_shape(N, N))};
@@ -143,14 +148,12 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   // predicated copy
   MHAType::predicate_copy_tensor(tQ_idty_part, tQ_global_part, tQ_shared_part,
-                                 tc, DType(0), N);
+                                 tc_qk, DType(0), N);
 
   auto mma_m{select<1>(q_mma.shape())};
 
   Tensor r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
   clear(r_scores_mma); // Zero the accumulator
-
-  // __syncthreads(); // redundant
 
   // start with the lowest possible value
   Tensor m{make_tensor<DType>(mma_m)};
@@ -161,29 +164,29 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   // Do the block that needs predication first
 
   MHAType::matmul<true>(tK_global_part_iter(_, _, _, iters - 1), tK_shared_part,
-                        tc, q_mma, k_mma, r_scores_mma,
-                        kv_idty_part(_, _, _, iters - 1), t_mma, N);
+                        tc_qk, q_mma, k_mma, r_scores_mma,
+                        k_idty_part(_, _, _, iters - 1), t_mma, N);
 
   MHAType::update_statistics<true>(m, l, r_scores_mma, p_mma, r_out_mma,
                                    scores_slice_idty(_, _, _, iters - 1), scale,
                                    N);
 
   MHAType::matmul<true>(tV_global_part_iter(_, _, _, iters - 1), tV_shared_part,
-                        tc, p_mma2, v_mma, r_out_mma,
-                        kv_idty_part(_, _, _, iters - 1), t_mma, N);
+                        tc_v, p_mma2, v_mma, r_out_mma,
+                        v_idty_part(_, _, _, iters - 1), t_mma, N);
 
   // do the rest of blocks that don't need predication
   for (int iter{static_cast<int>(iters) - 2}; iter > -1; --iter) {
-    MHAType::matmul(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc,
-                    q_mma, k_mma, r_scores_mma, kv_idty_part(_, _, _, iter),
+    MHAType::matmul(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc_qk,
+                    q_mma, k_mma, r_scores_mma, k_idty_part(_, _, _, iter),
                     t_mma, N);
 
     MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma,
                                scores_slice_idty(_, _, _, iter), scale, N);
 
-    MHAType::matmul(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc,
-                    p_mma2, v_mma, r_out_mma, kv_idty_part(_, _, _, iter),
-                    t_mma, N);
+    MHAType::matmul(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc_v,
+                    p_mma2, v_mma, r_out_mma, v_idty_part(_, _, _, iter), t_mma,
+                    N);
   }
 
   constexpr Layout mma_shape{get<0>(r_out_mma.layout())};
@@ -201,10 +204,6 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
       out_slice(idx) = out_slice(idx) / l(m_row);
     }
   }
-
-  // if (threadIdx.x == 120 && blockIdx.x == 0 && blockIdx.y == 1 && blockIdx.z
-  // == 7){
-  // }
 
   constexpr int write_rows{size(get<1>(g_out_mma.shape()))};
 
@@ -241,20 +240,48 @@ struct FMHA {
   using KVColsType = Int<B_c>;
 
   using VectorizedLoadType = uint128_t;
+  using ScalarLoadType = uint32_t;
 
   struct SharedStorage {
+    // Swizzle atom dimensions
+    static constexpr int kSwizzleAtomRows = 8;
+    static constexpr int kSwizzleAtomCols = 32;
+
+    // Static asserts for tiling compatibility
+    static_assert(
+        B_r % kSwizzleAtomRows == 0,
+        "B_r must be divisible by 8 (swizzle atom row size) for Q layout");
+    static_assert(
+        B_c % kSwizzleAtomCols == 0,
+        "B_c must be divisible by 32 (swizzle atom col size) for V layout");
+    static_assert(head_dim % kSwizzleAtomCols == 0,
+                  "head_dim must be divisible by 32 (swizzle atom col size) "
+                  "for Q/K layouts");
+
     ArrayEngine<DType, B_r * head_dim> Q;
     ArrayEngine<DType, B_c * head_dim> K;
     ArrayEngine<DType, B_c * head_dim> V;
     ArrayEngine<DType, B_r * B_c> P;
 
-    using QLayoutType =
-        Layout<Shape<QueryRowsType, HeadDimType>, Stride<HeadDimType, _1>>;
-    using KVLayoutType =
-        Layout<Shape<KVColsType, HeadDimType>, Stride<HeadDimType, _1>>;
+    using swizzle_atom = decltype(composition(
+        Swizzle<3, 2, 3>{},
+        Layout<Shape<_8, Shape<_4, _8>>, Stride<_32, Stride<_1, _4>>>{}));
+
+    using swizzle_atom_T = decltype(composition(
+        Swizzle<3, 2, 3>{},
+        Layout<Shape<Shape<_4, _8>, _8>, Stride<Stride<_1, _4>, _32>>{}));
+
+    using QLayoutType = decltype(tile_to_shape(
+        swizzle_atom{}, make_shape(QueryRowsType{}, HeadDimType{})));
+    using KLayoutType = decltype(tile_to_shape(
+        swizzle_atom{}, make_shape(KVColsType{}, HeadDimType{})));
+    using VTransposedLayoutType = decltype(tile_to_shape(
+        swizzle_atom{}, make_shape(HeadDimType{}, KVColsType{})));
+    using VLayoutType = decltype(tile_to_shape(
+        swizzle_atom_T{}, make_shape(KVColsType{}, HeadDimType{}),
+        LayoutRight{}));
     using PLayoutType =
         Layout<Shape<KVColsType, QueryRowsType>, Stride<QueryRowsType, _1>>;
-    using VTransposedLayoutType = Layout<Shape<HeadDimType, KVColsType>>;
   };
 
   static constexpr int threads_per_block{thread_count};
@@ -285,29 +312,32 @@ struct FMHA {
     return projection(blockIdx.y, _, blockIdx.x, _);
   }
 
-  static constexpr auto get_tiled_copy() {
+  template <typename LoadType> static constexpr auto get_tiled_copy() {
 
     // ensures no repeat across the head dimension
 
-    constexpr int elements_per_load{sizeof(VectorizedLoadType) / sizeof(DType)};
+    constexpr int elements_per_load{sizeof(LoadType) / sizeof(DType)};
     constexpr int threads_per_row{head_dim / elements_per_load};
 
-    static_assert(head_dim % threads_per_row == 0,
-                  "the head dimension is not a multiple of 128 bytes");
+    static_assert(
+        head_dim % threads_per_row == 0,
+        "the head dimension cannot be properly tiled with this thread layout");
 
     using TPRType = Int<threads_per_row>;
     using EPLType = Int<elements_per_load>;
     constexpr int rows{thread_count / threads_per_row};
     using RowType = Int<rows>;
 
-    static_assert(thread_count % threads_per_row == 0,
-                  "thread_count is not compatible with this head dimension");
+    static_assert(
+        thread_count % threads_per_row == 0,
+        "the head dimension cannot be properly tiled with this thread layout");
 
-    static_assert(B_r % rows == 0,
-                  "threads load too many rows B_r must be increased");
+    static_assert(
+        B_r % rows == 0 && B_c % rows == 0,
+        "the block size cannot be properly tiled with this thread layout");
 
     return make_tiled_copy(
-        Copy_Atom<UniversalCopy<VectorizedLoadType>, DType>{},
+        Copy_Atom<UniversalCopy<LoadType>, DType>{},
         Layout<Shape<RowType, TPRType>, Stride<TPRType, _1>>{},
         Layout<Shape<_1, EPLType>>{});
   }
@@ -382,7 +412,66 @@ struct FMHA {
       copy(tc, source_slice_cp, dest_slice_cp);
     }
     __syncthreads();
-    gemm(mma, a_mma_slice, b_mma_slice, c_frag);
+
+    constexpr size_t mma_m_len{size(get<1>(ALayoutTypeMMA{}))};
+    constexpr size_t mma_n_len{size(get<1>(BLayoutTypeMMA{}))};
+    constexpr size_t mma_k_len{size(get<2>(BLayoutTypeMMA{}))};
+
+    constexpr size_t elements_per_load{sizeof(VectorizedLoadType) /
+                                       sizeof(TensorDType)};
+
+    float4 a_vecs[mma_m_len];
+    float4 b_vecs[mma_n_len];
+
+#pragma unroll 8 // too little unrolling hurts ILP to much causes register
+                 // spills
+    for (size_t k{0}; k < mma_k_len; k += elements_per_load) {
+
+      // 1. Load all A vectors
+      CUTE_UNROLL
+      for (size_t m{0}; m < mma_m_len; m++) {
+        a_vecs[m] = *reinterpret_cast<float4 *>(&a_mma_slice(0, m, k));
+      }
+
+      // 2. Load all B vectors
+      CUTE_UNROLL
+      for (size_t n{0}; n < mma_n_len; n++) {
+        b_vecs[n] = *reinterpret_cast<float4 *>(&b_mma_slice(0, n, k));
+      }
+
+      // 3. FMAs - all .x first, then .y, then .z, then .w
+      CUTE_UNROLL
+      for (size_t m{0}; m < mma_m_len; m++) {
+        CUTE_UNROLL
+        for (size_t n{0}; n < mma_n_len; n++) {
+          c_frag(0, m, n) += a_vecs[m].x * b_vecs[n].x;
+        }
+      }
+
+      CUTE_UNROLL
+      for (size_t m{0}; m < mma_m_len; m++) {
+        CUTE_UNROLL
+        for (size_t n{0}; n < mma_n_len; n++) {
+          c_frag(0, m, n) += a_vecs[m].y * b_vecs[n].y;
+        }
+      }
+
+      CUTE_UNROLL
+      for (size_t m{0}; m < mma_m_len; m++) {
+        CUTE_UNROLL
+        for (size_t n{0}; n < mma_n_len; n++) {
+          c_frag(0, m, n) += a_vecs[m].z * b_vecs[n].z;
+        }
+      }
+
+      CUTE_UNROLL
+      for (size_t m{0}; m < mma_m_len; m++) {
+        CUTE_UNROLL
+        for (size_t n{0}; n < mma_n_len; n++) {
+          c_frag(0, m, n) += a_vecs[m].w * b_vecs[n].w;
+        }
+      }
+    }
   }
 
   template <bool predicate = false, typename MaxTensorEngineType,
@@ -489,10 +578,13 @@ struct FMHA {
 
     DType scale{rsqrt(static_cast<DType>(head_dim))};
 
-    const auto tc{get_tiled_copy()};
+    const auto tc_qk{get_tiled_copy<VectorizedLoadType>()};
+    const auto tc_v{get_tiled_copy<ScalarLoadType>()};
+
     const auto tmma{get_tiled_mma()};
 
-    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc), decltype(tmma)>};
+    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc_qk), decltype(tc_v),
+                                       decltype(tmma)>};
 
     size_t smem_size{sizeof(SharedStorage)};
 
@@ -503,8 +595,8 @@ struct FMHA {
     cudaFuncSetAttribute(kernel_fptr,
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc,
-                                                    tmma);
+    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N, scale, tc_qk,
+                                                    tc_v, tmma);
   }
 };
 

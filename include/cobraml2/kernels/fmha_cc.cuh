@@ -228,11 +228,12 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
  * @tparam thread_count
  */
 template <int head_count, int head_dim, int B_r, int B_c, typename DType,
-          int thread_count = 128, bool causal_mask=false>
+          int thread_count = 128, bool causal_mask = false>
 struct FMHA {
 
   using TensorDType = DType;
-  using Self = FMHA<head_count, head_dim, B_r, B_c, DType, thread_count, causal_mask>;
+  using Self =
+      FMHA<head_count, head_dim, B_r, B_c, DType, thread_count, causal_mask>;
 
   using NumHeadsType = Int<head_count>;
   using HeadDimType = Int<head_dim>;
@@ -519,11 +520,11 @@ struct FMHA {
 
       int adjusted_bound;
 
-      if constexpr(causal_mask){
+      if constexpr (causal_mask) {
         adjusted_bound = get<0>(scores_idty_slice(0)) + 1;
-      }else if constexpr(predicate){
+      } else if constexpr (predicate) {
         adjusted_bound = bound;
-      }else{
+      } else {
         adjusted_bound = 0;
       }
 
@@ -552,13 +553,13 @@ struct FMHA {
 
       // Compute scaling factor for old values
       DType scale_old;
-      if constexpr(causal_mask){
-        if (old_max == current_max && current_max == -INFINITY){
+      if constexpr (causal_mask) {
+        if (old_max == current_max && current_max == -INFINITY) {
           scale_old = DType(0);
-        }else{
+        } else {
           scale_old = expf(old_max - current_max);
         }
-      }else{
+      } else {
         scale_old = expf(old_max - current_max);
       }
 
@@ -572,13 +573,13 @@ struct FMHA {
       CUTE_UNROLL
       for (size_t idx{0}; idx < slice_size; ++idx) {
         auto p_score{r_score_slice(idx)};
-        if constexpr(causal_mask){
-          if (old_max == current_max && current_max == -INFINITY){
+        if constexpr (causal_mask) {
+          if (old_max == current_max && current_max == -INFINITY) {
             p_score = DType(0);
-          }else{
+          } else {
             p_score = expf(p_score - current_max);
-          }  
-        }else{
+          }
+        } else {
           p_score = expf(p_score - current_max);
         }
 

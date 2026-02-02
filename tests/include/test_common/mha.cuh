@@ -8,8 +8,8 @@ namespace cobraml::test_helpers {
 // Computes: O = softmax(Q @ K^T / sqrt(d)) @ V
 // All tensors have shape [B, N, H, d] (BSHD layout)
 // If causal=true, applies causal masking (position i can only attend to j <= i)
-void cpu_mha(float *Q, float *K, float *V, float *O, int B, int N, int H,
-             int d, bool causal = false) {
+void cpu_mha(float *Q, float *K, float *V, float *O, int B, int N, int H, int d,
+             bool causal = false) {
   for (int b = 0; b < B; b++) {
     for (int h = 0; h < H; h++) {
       for (int i = 0; i < N; i++) {

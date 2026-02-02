@@ -228,11 +228,11 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
  * @tparam thread_count
  */
 template <int head_count, int head_dim, int B_r, int B_c, typename DType,
-          int thread_count = 128>
+          int thread_count = 128, bool causal_mask=false>
 struct FMHA {
 
   using TensorDType = DType;
-  using Self = FMHA<head_count, head_dim, B_r, B_c, DType, thread_count>;
+  using Self = FMHA<head_count, head_dim, B_r, B_c, DType, thread_count, causal_mask>;
 
   using NumHeadsType = Int<head_count>;
   using HeadDimType = Int<head_dim>;
@@ -517,14 +517,24 @@ struct FMHA {
 
       constexpr size_t slice_size{size(r_score_slice)};
 
+      int adjusted_bound;
+
+      if constexpr(causal_mask){
+        adjusted_bound = get<0>(scores_idty_slice(0)) + 1;
+      }else if constexpr(predicate){
+        adjusted_bound = bound;
+      }else{
+        adjusted_bound = 0;
+      }
+
       CUTE_UNROLL
       for (size_t idx{0}; idx < slice_size; ++idx) {
         // uses hardware unit, removes warp divergence from branch checks
         // each thread may hold multiple values from each row, we find the
         // local maximum first
-        if constexpr (predicate) {
+        if constexpr (predicate || causal_mask) {
           auto n{get<1>(scores_idty_slice(idx))};
-          if (n < bound) {
+          if (n < adjusted_bound) {
             r_score_slice(idx) =
                 r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
           } else {
@@ -541,7 +551,16 @@ struct FMHA {
       current_max = warp_max(current_max);
 
       // Compute scaling factor for old values
-      auto scale_old = expf(old_max - current_max);
+      DType scale_old;
+      if constexpr(causal_mask){
+        if (old_max == current_max && current_max == -INFINITY){
+          scale_old = DType(0);
+        }else{
+          scale_old = expf(old_max - current_max);
+        }
+      }else{
+        scale_old = expf(old_max - current_max);
+      }
 
       // scale the sum
       current_sum = current_sum * scale_old;
@@ -553,7 +572,16 @@ struct FMHA {
       CUTE_UNROLL
       for (size_t idx{0}; idx < slice_size; ++idx) {
         auto p_score{r_score_slice(idx)};
-        p_score = expf(p_score - current_max);
+        if constexpr(causal_mask){
+          if (old_max == current_max && current_max == -INFINITY){
+            p_score = DType(0);
+          }else{
+            p_score = expf(p_score - current_max);
+          }  
+        }else{
+          p_score = expf(p_score - current_max);
+        }
+
         local_sum += p_score;
         // write to probs tensor
         p_slice(idx) = p_score;

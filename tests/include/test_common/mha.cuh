@@ -7,8 +7,9 @@ namespace cobraml::test_helpers {
 // CPU reference implementation for correctness verification
 // Computes: O = softmax(Q @ K^T / sqrt(d)) @ V
 // All tensors have shape [B, N, H, d] (BSHD layout)
+// If causal=true, applies causal masking (position i can only attend to j <= i)
 void cpu_mha(float *Q, float *K, float *V, float *O, int B, int N, int H,
-             int d) {
+             int d, bool causal = false) {
   for (int b = 0; b < B; b++) {
     for (int h = 0; h < H; h++) {
       for (int i = 0; i < N; i++) {
@@ -17,6 +18,12 @@ void cpu_mha(float *Q, float *K, float *V, float *O, int B, int N, int H,
         std::vector<float> scores(N);
 
         for (int j = 0; j < N; j++) {
+          // Apply causal mask: future positions get -inf
+          if (causal && j > i) {
+            scores[j] = -INFINITY;
+            continue;
+          }
+
           float score = 0;
           for (int k_idx = 0; k_idx < d; k_idx++) {
             // BSHD: index is b * (N*H*d) + seq * (H*d) + h * d + k_idx

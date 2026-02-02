@@ -7,9 +7,10 @@
 using namespace cobraml;
 using namespace cute;
 
-template <int head_count, int head_dim, int B_r, int B_c>
+template <int head_count, int head_dim, int B_r, int B_c, bool mask = false>
 void test_fmha(int batch_size, int sequence_length) {
-  using MHAType = kernels::FMHA<head_count, head_dim, B_r, B_c, float>;
+  using MHAType =
+      kernels::FMHA<head_count, head_dim, B_r, B_c, float, 128, mask>;
 
   thrust::device_vector<float> q_device{test_helpers::create_projection<float>(
       head_count, head_dim, batch_size, sequence_length,
@@ -94,7 +95,7 @@ void test_fmha(int batch_size, int sequence_length) {
 
   test_helpers::cpu_mha(q_host.data(), k_host.data(), v_host.data(),
                         o_ref.data(), batch_size, sequence_length, head_count,
-                        head_dim);
+                        head_dim, mask);
 
   std::vector<float> o_vec(o_host.begin(), o_host.end());
   test_helpers::check_output(o_vec, o_ref, batch_size, sequence_length,
@@ -104,11 +105,32 @@ void test_fmha(int batch_size, int sequence_length) {
 // even block size by sequence length
 TEST(FMHA_CC, H16_D64_Br64_Bc64_B4_N512) { test_fmha<16, 64, 64, 64>(4, 512); }
 
+// even block size by sequence length with causal masking
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B4_N512_causal) {
+  test_fmha<16, 64, 64, 64, true>(4, 512);
+}
+
 // uneven block size by sequence length (requires predication)
 TEST(FMHA_CC, H2_D64_Br64_Bc64_B56_N490) { test_fmha<2, 64, 64, 64>(56, 490); }
+
+// uneven block size by sequence length (requires predication) with causal
+// masking
+TEST(FMHA_CC, H2_D64_Br64_Bc64_B56_N490_causal) {
+  test_fmha<2, 64, 64, 64, true>(56, 490);
+}
 
 // 1 block only and even
 TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N64) { test_fmha<16, 64, 64, 64>(8, 64); }
 
+// 1 block only and even with causal masking
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N64_causal) {
+  test_fmha<16, 64, 64, 64, true>(8, 64);
+}
+
 // 1 block only and uneven
 TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N59) { test_fmha<16, 64, 64, 64>(8, 59); }
+
+// 1 block only and uneven with causal masking
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N59_causal) {
+  test_fmha<16, 64, 64, 64, true>(8, 59);
+}

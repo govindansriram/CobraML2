@@ -12,6 +12,7 @@ endif()
 
 project(cobraml2 VERSION 0.0.0 LANGUAGES CXX CUDA)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -std=c++20")
 
 option(BENCHMARK "Enable benchmarking" OFF)
@@ -50,3 +51,26 @@ if(COBRAML2_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+
+# used to to add intellisense for bindings
+option(COBRAML2_BUILD_PYTHON "Build Python bindings" ON)                                                           
+if(COBRAML2_BUILD_PYTHON)
+  set(Python_ROOT_DIR "${CMAKE_SOURCE_DIR}/.venv")
+  find_package(Python REQUIRED COMPONENTS Development Interpreter)
+
+  # Find PyTorch using the found Python
+  execute_process(
+    COMMAND ${Python_EXECUTABLE} -c "import torch; print(torch.utils.cmake_prefix_path)"
+    OUTPUT_VARIABLE TORCH_CMAKE_PREFIX
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )                                                                                                                 
+  list(APPEND CMAKE_PREFIX_PATH "${TORCH_CMAKE_PREFIX}")                                                            
+  find_package(Torch REQUIRED)                                                                                      
+                                                                                                                    
+  add_library(cobraml_python SHARED EXCLUDE_FROM_ALL
+    python/csrc/fmha_binding.cu
+  )                                                                                                                 
+                                                                                                                    
+  target_link_libraries(cobraml_python cobraml2 ${TORCH_LIBRARIES} Python::Python)
+  target_include_directories(cobraml_python PRIVATE ${TORCH_INCLUDE_DIRS} ${Python_INCLUDE_DIRS})                                          
+endif()  

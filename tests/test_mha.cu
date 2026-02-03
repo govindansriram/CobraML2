@@ -1,4 +1,4 @@
-#include <cobraml2/kernels/mha.cuh>
+#include <cobraml2/kernels/mha_cc.cuh>
 #include <gtest/gtest.h>
 #include <test_common/mha.cuh>
 #include <thrust/device_vector.h>
@@ -6,9 +6,10 @@
 
 using namespace cobraml;
 
-template <int head_count, int head_dim>
+template <int head_count, int head_dim, int B_r, int B_c>
 void test_mha(int batch_size, int sequence_length) {
-  // Create Q tensor [B, H, N, d]
+  using MHAType = kernels::MHA_CC<head_count, head_dim, B_r, B_c, float>;
+
   thrust::device_vector<float> q_device{test_helpers::create_projection<float>(
       head_count, head_dim, batch_size, sequence_length,
       test_helpers::seeded_fill_random_uniform<float>(0))};
@@ -25,6 +26,8 @@ void test_mha(int batch_size, int sequence_length) {
       head_count, head_dim, batch_size, sequence_length,
       test_helpers::fill_zero<float>)};
 
+  MHAType mha{};
+
 #ifdef BENCHMARK
   constexpr size_t warmup_iters{2};
   constexpr size_t total_iters{10};
@@ -33,18 +36,11 @@ void test_mha(int batch_size, int sequence_length) {
 #endif
 
   for (size_t i{0}; i < warmup_iters; ++i) {
-    kernels::mha_forward(thrust::raw_pointer_cast(q_device.data()),
-                         thrust::raw_pointer_cast(k_device.data()),
-                         thrust::raw_pointer_cast(v_device.data()),
-                         thrust::raw_pointer_cast(o_device.data()),
-                         batch_size,      // B
-                         sequence_length, // N
-                         head_count,      // H
-                         head_dim         // d
-    );
+    mha(thrust::raw_pointer_cast(q_device.data()),
+        thrust::raw_pointer_cast(k_device.data()),
+        thrust::raw_pointer_cast(v_device.data()),
+        thrust::raw_pointer_cast(o_device.data()), batch_size, sequence_length);
   }
-
-  // Sync and check for CUDA errors
   cudaDeviceSynchronize();
 
 #ifdef BENCHMARK
@@ -57,15 +53,10 @@ void test_mha(int batch_size, int sequence_length) {
 
   for (size_t i{0}; i < total_iters; ++i) {
     cudaEventRecord(start);
-    kernels::mha_forward(thrust::raw_pointer_cast(q_device.data()),
-                         thrust::raw_pointer_cast(k_device.data()),
-                         thrust::raw_pointer_cast(v_device.data()),
-                         thrust::raw_pointer_cast(o_device.data()),
-                         batch_size,      // B
-                         sequence_length, // N
-                         head_count,      // H
-                         head_dim         // d
-    );
+    mha(thrust::raw_pointer_cast(q_device.data()),
+        thrust::raw_pointer_cast(k_device.data()),
+        thrust::raw_pointer_cast(v_device.data()),
+        thrust::raw_pointer_cast(o_device.data()), batch_size, sequence_length);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&ms, start, stop);
@@ -87,7 +78,6 @@ void test_mha(int batch_size, int sequence_length) {
                                               sequence_length, head_dim,
                                               average_time_ms)
             << " GFLOPs\n";
-
 #else
   cudaError_t err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
@@ -110,4 +100,11 @@ void test_mha(int batch_size, int sequence_length) {
                              head_count, head_dim, 1e-4f);
 }
 
-TEST(MHA, H4_D64_B56_N512) { test_mha<4, 64>(56, 512); }
+// Aligned N (divisible by block size)
+TEST(MHA_CC, H16_D64_Br64_Bc64_B4_N512) { test_mha<16, 64, 64, 64>(4, 512); }
+TEST(MHA_CC, H16_D64_Br64_Bc64_B8_N128) { test_mha<16, 64, 64, 64>(8, 128); }
+TEST(MHA_CC, H16_D64_Br64_Bc64_B8_N64) { test_mha<16, 64, 64, 64>(8, 64); }
+
+// Unaligned N (not divisible by block size, requires predication)
+TEST(MHA_CC, H2_D64_Br64_Bc64_B56_N490) { test_mha<2, 64, 64, 64>(56, 490); }
+TEST(MHA_CC, H16_D64_Br64_Bc64_B8_N59) { test_mha<16, 64, 64, 64>(8, 59); }

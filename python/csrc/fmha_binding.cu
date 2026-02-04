@@ -52,7 +52,8 @@ struct FMHADispatcher {
             fig.head_dim, 
             fig.causal,
             [](float * Q, float * K, float * V, float * O, uint32_t B, uint32_t N){
-                cobraml::kernels::FMHA<fig.heads, fig.head_dim, 64, 64, float, 128, fig.causal>{}(
+                constexpr auto cfg = configs[I];
+                cobraml::kernels::FMHA<cfg.heads, cfg.head_dim, 64, 64, float, 128, cfg.causal>{}(
                     Q, K, V, O, B, N
                 );
             }
@@ -123,10 +124,6 @@ torch::Tensor fmha_forward(
     torch::Tensor V,                                                                                                
     bool causal                                                                                                     
 ) {
-    TORCH_CHECK(Q.is_cuda(), "Q must be on CUDA Device");
-    TORCH_CHECK(K.is_cuda(), "K must be on CUDA Device");
-    TORCH_CHECK(V.is_cuda(), "V must be on CUDA Device");
-
     TORCH_CHECK(Q.is_contiguous(), "Q must be row major");
     TORCH_CHECK(K.is_contiguous(), "K must be row major");
     TORCH_CHECK(V.is_contiguous(), "V must be row major");
@@ -166,10 +163,10 @@ torch::Tensor fmha_forward(
     }
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def(
-        "fmha_forward", &fmha_forward, 
-        "Flash Multi-Head Attention forward", 
-        py::arg("Q"), py::arg("K"), py::arg("V"), 
-        py::arg("causal") = false);
+TORCH_LIBRARY(cobraml, m) {
+    m.def("fmha(Tensor Q, Tensor K, Tensor V, bool causal) -> Tensor");
+}
+
+TORCH_LIBRARY_IMPL(cobraml, CUDA, m) {
+    m.impl("fmha", &fmha_forward);
 }

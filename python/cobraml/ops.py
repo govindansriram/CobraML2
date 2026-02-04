@@ -1,4 +1,4 @@
-from . import _C
+import torch
 
 
 def fmha(q, k, v, causal=False):
@@ -14,4 +14,4 @@ def fmha(q, k, v, causal=False):
     Returns:
         Output tensor [B, N, H, d]
     """
-    return _C.fmha_forward(q, k, v, causal)
+    return torch.ops.cobraml.fmha(q, k, v, causal)

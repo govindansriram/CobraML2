@@ -1,7 +1,7 @@
 ![/assets/](/assets/logo.png)
 
 ## About
-A header only lib containing SOTA flash attention kernels, mega kernels, and full model serving.
+LLM Inference Serving platform with flash attention kernels, mega kernels, and much more.
 Built from scratch, documenting every step along the way.
 
 ## Installation

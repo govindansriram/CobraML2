@@ -436,12 +436,13 @@ struct FMHA {
     for (size_t k{0}; k < mma_k_len; k += elements_per_load) {
 
       CUTE_UNROLL
-      for (size_t m{0}; m < mma_m_len; m += mma_m_size){
+      for (size_t m{0}; m < mma_m_len; m += mma_m_size) {
 
         // 1. Load all A vectors
         CUTE_UNROLL
         for (size_t m_local{0}; m_local < mma_m_size; m_local++) {
-          a_vecs[m_local] = *reinterpret_cast<float4 *>(&a_mma_slice(0, m + m_local, k));
+          a_vecs[m_local] =
+              *reinterpret_cast<float4 *>(&a_mma_slice(0, m + m_local, k));
         }
 
         // 2. Load all B vectors
@@ -484,7 +485,8 @@ struct FMHA {
         }
       }
     }
-    // __syncthreads(); // ensure all threads finish reading shared memory before
+    // __syncthreads(); // ensure all threads finish reading shared memory
+    // before
     //                  // next copy overwrites KV buffer
   }
 

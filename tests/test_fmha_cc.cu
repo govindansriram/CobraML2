@@ -136,7 +136,9 @@ TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N59_causal) {
 }
 
 // even block size by sequence length head_dim 128
-TEST(FMHA_CC, H16_D128_Br32_Bc32_B4_N512) { test_fmha<16, 128, 32, 32>(4, 512); }
+TEST(FMHA_CC, H16_D128_Br32_Bc32_B4_N512) {
+  test_fmha<16, 128, 32, 32>(4, 512);
+}
 
 // even block size by sequence length with causal masking, head_dim 128
 TEST(FMHA_CC, H16_D128_Br32_Bc32_B4_N512_causal) {

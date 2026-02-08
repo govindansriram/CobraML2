@@ -20,4 +20,4 @@ jobs:
 
       - name: Check formatting
         run: |
-          find include tests -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' | xargs clang-format --dry-run --Werror
+          find include tests python/csrc -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' | xargs clang-format --dry-run --Werror

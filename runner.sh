@@ -150,7 +150,7 @@ if [ "$FORMAT" = true ]; then
         clang-format -i "$FORMAT_FILE"
     else
         echo "Formatting all source files..."
-        find include tests -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' | xargs clang-format -i
+        find include tests python/csrc -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' | xargs clang-format -i
     fi
     echo "Done formatting."
     # Exit if only formatting was requested

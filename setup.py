@@ -3,9 +3,7 @@ from setuptools import setup, find_packages
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import torch
 
-# Get absolute paths relative to this file
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.dirname(THIS_DIR)
 
 MIN_ARCH = 80
 
@@ -31,16 +29,18 @@ def get_cuda_arch_flags():
     ]
 
 setup(
-    packages=find_packages(),
+    name="cobraml",
+    package_dir={"": "python"},
+    packages=find_packages(where="python"),
     ext_modules=[
         CUDAExtension(
             name='cobraml._C',
             sources=[
-                os.path.join(THIS_DIR, 'csrc/fmha_binding.cu'),
+                os.path.join(THIS_DIR, 'python/csrc/fmha_binding.cu'),
             ],
             include_dirs=[
-                os.path.join(ROOT_DIR, 'include'),
-                os.path.join(ROOT_DIR, 'external/cutlass/include'),
+                os.path.join(THIS_DIR, 'include'),
+                os.path.join(THIS_DIR, 'external/cutlass/include'),
             ],
             extra_compile_args={
                 'cxx': ['-O3'],

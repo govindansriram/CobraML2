@@ -6,9 +6,14 @@ Built from scratch, documenting every step along the way.
 
 ## Installation
 
+### Prerequisites
+- Python >= 3.10
+- CUDA toolkit with `nvcc`
+- An NVIDIA GPU with compute capability >= 8.0 (Ampere+)
+
 So far all code has only been tested on systems with `CUDA >= 12.8` and `Ubuntu 22.04`
 
-### Build from source
+## Get from source
 ```bash
 git clone https://github.com/govindansriram/CobraML2.git
 cd CobraML2
@@ -16,26 +21,60 @@ cd CobraML2
 sudo chmod +x ./runner.sh
 ```
 
-You can now build the executables by running:
+## Building the Python Package
+
+### Setup
+
+The runner handles venv creation, CUDA-matched torch installation, and building in one go:
+
 ```bash
-./runner.sh
+# First time: creates .venv and installs torch matching your system CUDA version
+./runner.sh --python-setup
+
+# Build and install cobraml in editable mode
+./runner.sh --build-python
 ```
 
-And run them using:
+## Testing
+
+### C++ tests
+
+The C++ tests require the `.venv` to exist at the project root, since CMake uses it to locate PyTorch headers. Run `./runner.sh --python-setup` at least once before building C++ targets.
+
 ```bash
-./runner.sh -r exe_name
+# Build and run a specific test
+./runner.sh -r test_fmha_cc
+
+# Run all tests
+./runner.sh -a
+
+# Run with benchmarking enabled
+./runner.sh -c -b -r test_fmha_cc
+
+# Filter specific test cases
+./runner.sh -r test_fmha_cc -- --gtest_filter=*causal*
 ```
 
-## PyTorch Integration
+### Python tests
 
-...
+Requires the Python package to be built first (`./runner.sh --build-python`).
+
+```bash
+# Run all Python tests
+./runner.sh --python-test
+
+# Run with benchmarking
+./runner.sh --python-benchmark
+
+# Pass extra args to pytest
+./runner.sh --python-test -- -k "test_fmha_fp32[4-512-16-64-True]"
+```
 
 ## Roadmap
 
-1. MHA
-   - Iter 1: 287.925 GFLOPs
-2. Flash Attention 1
-   - Iter 1: 7715.79 GFLOPs
+1. Flash Attention 1 (done)
+   - between 2 and 4 x faster then pytorch naive MHA
+2. KV cache and inference serving 
 3. Flash Attention 2
 4. Flash Attention 3
 5. Matmul
@@ -59,6 +98,10 @@ The `runner.sh` script is the main entry point for building, testing, profiling,
 | `-o, --output <name>` | Custom name for .ncu-rep file |
 | `--profile-opts <opts>` | Additional ncu options |
 | `--no-tests` | Disable building tests |
+| `--python-setup` | Create .venv and install build deps |
+| `--build-python` | Build and install cobraml Python package |
+| `--python-test` | Run Python tests |
+| `--python-benchmark` | Run Python benchmarks |
 | `--` | Pass remaining args to executable |
 
 ### Examples

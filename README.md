@@ -13,7 +13,9 @@ Built from scratch, documenting every step along the way.
 
 So far all code has only been tested on systems with `CUDA >= 12.8` and `Ubuntu 22.04`
 
-## Get from source
+### Build from source
+
+#### Initial setup
 ```bash
 git clone https://github.com/govindansriram/CobraML2.git
 cd CobraML2
@@ -21,9 +23,7 @@ cd CobraML2
 sudo chmod +x ./runner.sh
 ```
 
-## Building the Python Package
-
-### Setup
+#### Building the Python Package
 
 The runner handles venv creation, CUDA-matched torch installation, and building in one go:
 
@@ -35,9 +35,9 @@ The runner handles venv creation, CUDA-matched torch installation, and building 
 ./runner.sh --build-python
 ```
 
-## Testing
+#### Testing
 
-### C++ tests
+##### C++ tests
 
 The C++ tests require the `.venv` to exist at the project root, since CMake uses it to locate PyTorch headers. Run `./runner.sh --python-setup` at least once before building C++ targets.
 
@@ -55,7 +55,7 @@ The C++ tests require the `.venv` to exist at the project root, since CMake uses
 ./runner.sh -r test_fmha_cc -- --gtest_filter=*causal*
 ```
 
-### Python tests
+##### Python tests
 
 Requires the Python package to be built first (`./runner.sh --build-python`).
 

@@ -29,7 +29,8 @@ dependencies = [
 [project.optional-dependencies]                                                                                     
 dev = [                                                                                                             
     "pytest",                                                                                                       
-    "numpy",                                                                                                        
+    "numpy",
+    "ruff",
 ]                                                                                                                   
                                                                                                                     
 [project.urls]                                                                                                      

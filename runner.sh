@@ -19,6 +19,9 @@ PYTHON_BUILD=false
 PYTHON_TEST=false
 PYTHON_BENCHMARK=false
 RUN_ARGS=()
+VENV_DIR=".venv"
+VENV_PIP="$VENV_DIR/bin/pip"
+VENV_PYTHON="$VENV_DIR/bin/python"
 
 usage() {
     echo "Usage: $0 [options]"
@@ -147,10 +150,18 @@ done
 if [ "$FORMAT" = true ]; then
     if [ -n "$FORMAT_FILE" ]; then
         echo "Formatting: $FORMAT_FILE"
-        clang-format -i "$FORMAT_FILE"
+        if [[ "$FORMAT_FILE" == *.py ]]; then
+            "$VENV_DIR/bin/ruff" format "$FORMAT_FILE"
+            "$VENV_DIR/bin/ruff" check --fix "$FORMAT_FILE"
+        else
+            clang-format -i "$FORMAT_FILE"
+        fi
     else
         echo "Formatting all source files..."
         find include tests python/csrc -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' | xargs clang-format -i
+        echo "Formatting Python files..."
+        "$VENV_DIR/bin/ruff" format python/
+        "$VENV_DIR/bin/ruff" check --fix python/
     fi
     echo "Done formatting."
     # Exit if only formatting was requested
@@ -225,11 +236,6 @@ if [ -n "$PROFILE_TARGET" ]; then
 fi
 
 # Python venv setup
-VENV_DIR=".venv"
-
-VENV_PIP="$VENV_DIR/bin/pip"
-VENV_PYTHON="$VENV_DIR/bin/python"
-
 setup_python_venv() {
     if [ ! -d "$VENV_DIR" ]; then
         echo "Creating Python venv..."
@@ -263,7 +269,7 @@ if [ "$PYTHON_BUILD" = true ]; then
     echo "Building cobraml Python package..."
     echo "----------------------------------------"
     "$VENV_PIP" install --no-build-isolation -e .
-    "$VENV_PIP" install pytest numpy
+    "$VENV_PIP" install pytest numpy ruff
 fi
 
 if [ "$PYTHON_TEST" = true ]; then

@@ -7,6 +7,6 @@ for lib in _lib_path:
     torch.ops.load_library(lib)
     break
 
-from .ops import fmha
+from .ops import fmha  # noqa: E402
 
 __all__ = ["fmha"]

@@ -103,8 +103,11 @@ void fmha_forward_fp32(
     const int64_t H,
     const int64_t d
 ){
-
-    static FMHADispatcher<1, 32, 1, 64, 128, 64> dispatcher;
+    // fp32 Flash Attention is only performant with
+    // head dimension of 64. This is due to occupancy 
+    // problems caused by the larger amounts of SMEM used
+    // by larger head dimensions
+    static FMHADispatcher<1, 32, 1, 64, 64, 64> dispatcher;
     dispatcher.dispatch(
         Q.data_ptr<float>(),
         K.data_ptr<float>(),

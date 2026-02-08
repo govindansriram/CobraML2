@@ -14,7 +14,14 @@ FORMAT_FILE=""
 PROFILE_TARGET=""
 PROFILE_OPTS=""
 PROFILE_OUTPUT=""
+PYTHON_SETUP=false
+PYTHON_BUILD=false
+PYTHON_TEST=false
+PYTHON_BENCHMARK=false
 RUN_ARGS=()
+VENV_DIR=".venv"
+VENV_PIP="$VENV_DIR/bin/pip"
+VENV_PYTHON="$VENV_DIR/bin/python"
 
 usage() {
     echo "Usage: $0 [options]"
@@ -31,6 +38,10 @@ usage() {
     echo "  -o, --output <name>       Name for the .ncu-rep file (default: target name)"
     echo "  --profile-opts <opts>     Additional ncu options"
     echo "  --no-tests                Disable building tests"
+    echo "  --python-setup            Create/activate .venv and install dev deps"
+    echo "  --build-python            Build and install cobraml Python package"
+    echo "  --python-test             Run Python tests"
+    echo "  --python-benchmark        Run Python tests with benchmarking"
     echo "  --                        Remaining args passed to executable/ctest"
     echo ""
     echo "Examples:"
@@ -46,6 +57,10 @@ usage() {
     echo "  $0 -p test_fmha_cc        # Build and profile with ncu"
     echo "  $0 -p test_fmha_cc -o my_profile  # Custom report name"
     echo "  $0 -p test_fmha_cc --profile-opts '--kernel-name fmha'"
+    echo "  $0 --python-setup         # Setup Python venv with dev deps"
+    echo "  $0 --build-python         # Build cobraml package (runs setup first)"
+    echo "  $0 --python-test          # Run Python tests"
+    echo "  $0 --python-benchmark     # Run Python benchmarks"
 }
 
 # Parse arguments
@@ -102,6 +117,22 @@ while [[ $# -gt 0 ]]; do
             TESTS=OFF
             shift
             ;;
+        --python-setup)
+            PYTHON_SETUP=true
+            shift
+            ;;
+        --build-python)
+            PYTHON_BUILD=true
+            shift
+            ;;
+        --python-test)
+            PYTHON_TEST=true
+            shift
+            ;;
+        --python-benchmark)
+            PYTHON_BENCHMARK=true
+            shift
+            ;;
         --)
             shift
             RUN_ARGS=("$@")
@@ -119,10 +150,18 @@ done
 if [ "$FORMAT" = true ]; then
     if [ -n "$FORMAT_FILE" ]; then
         echo "Formatting: $FORMAT_FILE"
-        clang-format -i "$FORMAT_FILE"
+        if [[ "$FORMAT_FILE" == *.py ]]; then
+            "$VENV_DIR/bin/ruff" format "$FORMAT_FILE"
+            "$VENV_DIR/bin/ruff" check --fix "$FORMAT_FILE"
+        else
+            clang-format -i "$FORMAT_FILE"
+        fi
     else
         echo "Formatting all source files..."
-        find include tests -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' | xargs clang-format -i
+        find include tests python/csrc -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' | xargs clang-format -i
+        echo "Formatting Python files..."
+        "$VENV_DIR/bin/ruff" format python/
+        "$VENV_DIR/bin/ruff" check --fix python/
     fi
     echo "Done formatting."
     # Exit if only formatting was requested
@@ -137,21 +176,30 @@ if [ "$CLEAN" = true ]; then
     rm -rf "$BUILD_DIR"
 fi
 
-mkdir -p "$BUILD_DIR"
+PYTHON_ONLY=false
+if [ "$PYTHON_SETUP" = true ] || [ "$PYTHON_BUILD" = true ] || [ "$PYTHON_TEST" = true ] || [ "$PYTHON_BENCHMARK" = true ]; then
+    if [ -z "$TARGET" ] && [ -z "$RUN_TARGET" ] && [ "$RUN_ALL" = false ] && [ -z "$PROFILE_TARGET" ] && [ "$FORMAT" = false ]; then
+        PYTHON_ONLY=true
+    fi
+fi
 
-# Configure
-echo "Configuring (BENCHMARK=${BENCHMARK})..."
-cmake -B "$BUILD_DIR" \
-    -DCOBRAML2_BUILD_TESTS="$TESTS" \
-    -DBENCHMARK="$BENCHMARK"
+if [ "$PYTHON_ONLY" = false ]; then
+    mkdir -p "$BUILD_DIR"
 
-# Build
-if [ -n "$TARGET" ]; then
-    echo "Building target: $TARGET"
-    cmake --build "$BUILD_DIR" --target "$TARGET" --parallel
-else
-    echo "Building all..."
-    cmake --build "$BUILD_DIR" --parallel
+    # Configure
+    echo "Configuring (BENCHMARK=${BENCHMARK})..."
+    cmake -B "$BUILD_DIR" \
+        -DCOBRAML2_BUILD_TESTS="$TESTS" \
+        -DBENCHMARK="$BENCHMARK"
+
+    # Build
+    if [ -n "$TARGET" ]; then
+        echo "Building target: $TARGET"
+        cmake --build "$BUILD_DIR" --target "$TARGET" --parallel
+    else
+        echo "Building all..."
+        cmake --build "$BUILD_DIR" --parallel
+    fi
 fi
 
 # Run all tests if requested
@@ -185,4 +233,55 @@ if [ -n "$PROFILE_TARGET" ]; then
         "$BUILD_DIR/tests/$PROFILE_TARGET" "${RUN_ARGS[@]}"
     echo ""
     echo "Report saved: ${REPORT_NAME}.ncu-rep"
+fi
+
+# Python venv setup
+setup_python_venv() {
+    if [ ! -d "$VENV_DIR" ]; then
+        echo "Creating Python venv..."
+        python3 -m venv "$VENV_DIR"
+        echo "Installing build dependencies..."
+        "$VENV_PIP" install setuptools wheel ninja
+        # Detect system CUDA and install matching PyTorch
+        CUDA_VERSION=$(nvcc --version 2>/dev/null | grep -oP 'release \K\d+\.\d+' || echo "")
+        if [ -n "$CUDA_VERSION" ]; then
+            CUDA_TAG="cu$(echo "$CUDA_VERSION" | tr -d '.')"
+            echo "Detected CUDA $CUDA_VERSION — installing torch for $CUDA_TAG"
+            "$VENV_PIP" install torch --index-url "https://download.pytorch.org/whl/$CUDA_TAG"
+        else
+            echo "nvcc not found — installing default torch"
+            "$VENV_PIP" install torch
+        fi
+    fi
+    echo "Using venv: $VENV_DIR"
+}
+
+if [ "$PYTHON_SETUP" = true ] || [ "$PYTHON_BUILD" = true ] || [ "$PYTHON_TEST" = true ] || [ "$PYTHON_BENCHMARK" = true ]; then
+    setup_python_venv
+fi
+
+if [ "$PYTHON_SETUP" = true ]; then
+    echo "Python environment ready."
+fi
+
+if [ "$PYTHON_BUILD" = true ]; then
+    echo ""
+    echo "Building cobraml Python package..."
+    echo "----------------------------------------"
+    "$VENV_PIP" install --no-build-isolation -e .
+    "$VENV_PIP" install pytest numpy ruff
+fi
+
+if [ "$PYTHON_TEST" = true ]; then
+    echo ""
+    echo "Running Python tests..."
+    echo "----------------------------------------"
+    "$VENV_PYTHON" -m pytest python/tests -v "${RUN_ARGS[@]}"
+fi
+
+if [ "$PYTHON_BENCHMARK" = true ]; then
+    echo ""
+    echo "Running Python benchmarks..."
+    echo "----------------------------------------"
+    "$VENV_PYTHON" -m pytest python/tests -v -s --benchmark "${RUN_ARGS[@]}"
 fi

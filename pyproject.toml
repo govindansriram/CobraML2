@@ -1,0 +1,38 @@
+[build-system]                                                                                                      
+requires = ["setuptools", "wheel", "torch>=2.10.0", "ninja"]                                                           
+build-backend = "setuptools.build_meta"                                                                             
+                                                                                                                    
+[project]                                                                                                           
+name = "cobraml"                                                                                                    
+version = "0.1.0"                                                                                                   
+description = "Performant kernels, and other ML Systems integrations"                                                             
+readme = "README.md"                                                                                                
+license = {text = "MIT"}                                                                                            
+requires-python = ">=3.10"                                                                                           
+authors = [                                                                                                         
+    {name = "Sriram Govindan", email = "sriramgovindanwork@gmail.com"}                                                            
+]                                                                                                                   
+keywords = ["cuda", "attention", "flash-attention", "pytorch"]                                                      
+classifiers = [                                                                                                     
+    "Development Status :: 2 - Pre-Alpha",                                                                              
+    "Intended Audience :: Developers",                                                                              
+    "License :: OSI Approved :: MIT License",                                                                                                                                             
+    "Programming Language :: Python :: 3.10",                                                                       
+    "Programming Language :: Python :: 3.11",                                                                       
+    "Programming Language :: Python :: 3.12",                                                                       
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",                                                   
+]                                                                                                                   
+dependencies = [                                                                                                    
+    "torch>=2.10.0",                                                                                                   
+]                                                                                                                   
+                                                                                                                    
+[project.optional-dependencies]                                                                                     
+dev = [                                                                                                             
+    "pytest",                                                                                                       
+    "numpy",
+    "ruff",
+]                                                                                                                   
+                                                                                                                    
+[project.urls]                                                                                                      
+Homepage = "https://github.com/govindansriram/CobraML2"                                                             
+Repository = "https://github.com/govindansriram/CobraML2"

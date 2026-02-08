@@ -18,6 +18,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-format
 
-      - name: Check formatting
+      - name: Check C++ formatting
         run: |
-          find include tests -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' | xargs clang-format --dry-run --Werror
+          find include tests python/csrc -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh' | xargs clang-format --dry-run --Werror
+
+      - name: Check Python formatting
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: "format --check"
+          src: "python/"
+
+      - name: Lint Python
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: "check"
+          src: "python/"

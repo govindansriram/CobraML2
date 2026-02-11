@@ -36,7 +36,7 @@ setup(
         CUDAExtension(
             name='cobraml._C',
             sources=[
-                os.path.join(THIS_DIR, 'python/csrc/fmha_binding.cu'),
+                'python/csrc/fmha_binding.cu',
             ],
             include_dirs=[
                 os.path.join(THIS_DIR, 'include'),

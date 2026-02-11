@@ -7,14 +7,13 @@ struct FMHADispatcher {
 
   // Helper to count steps
   static constexpr int count_steps(int start, int stop, int step) {
-    int count = 0;
-    for (int i = start; i <= stop; i += step)
-      count++;
-    return count;
+    return (stop - start) / step + 1;
   }
 
   static constexpr int H_count{count_steps(H_start, H_stop, H_step)};
   static constexpr int D_count{count_steps(D_start, D_stop, D_step)};
+
+  // times 2 for causal masking
   static constexpr int num_configs{H_count * D_count * 2};
 
   struct Config {
@@ -22,20 +21,16 @@ struct FMHADispatcher {
     bool causal;
   };
 
-  static constexpr auto make_configs() {
-    std::array<Config, num_configs> arr{};
-    int idx{0};
+  static constexpr auto idx_to_config(size_t idx) {
 
-    for (int h{H_start}; h <= H_stop; h += H_step) {
-      for (int d{D_start}; d <= D_stop; d += D_step) {
-        arr[idx++] = {h, d, false};
-        arr[idx++] = {h, d, true};
-      }
-    }
-    return arr;
+    bool causal{(idx / (D_count * H_count)) == 0};
+    int remainder{(idx % (D_count * H_count))};
+    int head_count{remainder / D_count * H_step};
+    int head_dim{remainder % D_count * D_step};
+
+    return Config{head_count + H_start, head_dim + D_start, causal};
   }
 
-  static constexpr auto configs{make_configs()};
   using KernelFn = void (*)(float *, float *, float *, float *, uint32_t,
                             uint32_t);
 
@@ -45,16 +40,16 @@ struct FMHADispatcher {
     KernelFn fn;
   };
 
-  std::array<Entry, configs.size()> table;
+  std::array<Entry, num_configs> table;
 
   template <std::size_t I> void register_one() {
-    constexpr auto fig{configs[I]};
+    constexpr Config config{idx_to_config(I)};
     table[I] = {
-        fig.heads, fig.head_dim, fig.causal,
+        config.heads, config.head_dim, config.causal,
         [](float *Q, float *K, float *V, float *O, uint32_t B, uint32_t N) {
-          constexpr auto cfg = configs[I];
-          cobraml::kernels::FMHA<cfg.heads, cfg.head_dim, 64, 64, float, 128,
-                                 cfg.causal>{}(Q, K, V, O, B, N);
+          constexpr Config inner_config{idx_to_config(I)};
+          cobraml::kernels::FMHA<inner_config.heads, inner_config.head_dim, 64, 64, float, 128,
+                                 inner_config.causal>{}(Q, K, V, O, B, N);
         }};
   }
 
@@ -62,7 +57,7 @@ struct FMHADispatcher {
     (..., register_one<Is>());
   }
 
-  FMHADispatcher() { init_impl(std::make_index_sequence<configs.size()>{}); }
+  FMHADispatcher() { init_impl(std::make_index_sequence<num_configs>{}); }
 
   void dispatch(float *Q, float *K, float *V, float *O, bool causal, uint32_t B,
                 uint32_t N, int H, int d) {

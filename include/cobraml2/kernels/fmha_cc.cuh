@@ -264,7 +264,6 @@ struct FMHA {
 
     ArrayEngine<DType, B_r * head_dim> Q;
     ArrayEngine<DType, B_c * head_dim> KV;
-    // ArrayEngine<DType, B_c * head_dim> V;
     ArrayEngine<DType, B_r * B_c> P;
 
     using swizzle_atom = decltype(composition(
@@ -485,9 +484,6 @@ struct FMHA {
         }
       }
     }
-    // __syncthreads(); // ensure all threads finish reading shared memory
-    // before
-    //                  // next copy overwrites KV buffer
   }
 
   template <bool predicate = false, typename MaxTensorEngineType,

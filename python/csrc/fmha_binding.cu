@@ -48,8 +48,9 @@ struct FMHADispatcher {
         config.heads, config.head_dim, config.causal,
         [](float *Q, float *K, float *V, float *O, uint32_t B, uint32_t N) {
           constexpr Config inner_config{idx_to_config(I)};
-          cobraml::kernels::FMHA<inner_config.heads, inner_config.head_dim, 64, 64, float, 128,
-                                 inner_config.causal>{}(Q, K, V, O, B, N);
+          cobraml::kernels::FMHA<inner_config.heads, inner_config.head_dim, 64,
+                                 64, float, 128, inner_config.causal>{}(
+              Q, K, V, O, B, N);
         }};
   }
 

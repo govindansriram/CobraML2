@@ -55,14 +55,14 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor shared_q{make_tensor(make_smem_ptr(shared_storage->Q.begin()),
                               typename SharedStorageType::QLayoutType{})};
 
-  Tensor shared_k{make_tensor(make_smem_ptr(shared_storage->K.begin()),
+  Tensor shared_k{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
                               typename SharedStorageType::KLayoutType{})};
 
-  Tensor shared_v{make_tensor(make_smem_ptr(shared_storage->V.begin()),
+  Tensor shared_v{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
                               typename SharedStorageType::VLayoutType{})};
 
   Tensor trans_shared_v{
-      make_tensor(make_smem_ptr(shared_storage->V.begin()),
+      make_tensor(make_smem_ptr(shared_storage->KV.begin()),
                   typename SharedStorageType::VTransposedLayoutType{})};
 
   Tensor shared_p{make_tensor(make_smem_ptr(shared_storage->P.begin()),
@@ -171,12 +171,14 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
                                    scores_slice_idty(_, _, _, iters - 1), scale,
                                    N);
 
+  __syncthreads(); // ensure all K reads done before V overwrites KV buffer
   MHAType::matmul<true>(tV_global_part_iter(_, _, _, iters - 1), tV_shared_part,
                         tc_v, p_mma2, v_mma, r_out_mma,
                         v_idty_part(_, _, _, iters - 1), t_mma, N);
 
   // do the rest of blocks that don't need predication
   for (int iter{static_cast<int>(iters) - 2}; iter > -1; --iter) {
+    __syncthreads();
     MHAType::matmul(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc_qk,
                     q_mma, k_mma, r_scores_mma, k_idty_part(_, _, _, iter),
                     t_mma, N);
@@ -184,6 +186,7 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
     MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma,
                                scores_slice_idty(_, _, _, iter), scale, N);
 
+    __syncthreads(); // ensure all K reads done before V overwrites KV buffer
     MHAType::matmul(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc_v,
                     p_mma2, v_mma, r_out_mma, v_idty_part(_, _, _, iter), t_mma,
                     N);
@@ -260,8 +263,7 @@ struct FMHA {
                   "for Q/K layouts");
 
     ArrayEngine<DType, B_r * head_dim> Q;
-    ArrayEngine<DType, B_c * head_dim> K;
-    ArrayEngine<DType, B_c * head_dim> V;
+    ArrayEngine<DType, B_c * head_dim> KV;
     ArrayEngine<DType, B_r * B_c> P;
 
     using swizzle_atom = decltype(composition(
@@ -421,55 +423,64 @@ struct FMHA {
     constexpr size_t elements_per_load{sizeof(VectorizedLoadType) /
                                        sizeof(TensorDType)};
 
-    float4 a_vecs[mma_m_len];
+    constexpr size_t slice_factor{mma_m_len};
+
+    constexpr size_t mma_m_size{mma_m_len / slice_factor};
+
+    float4 a_vecs[mma_m_size];
     float4 b_vecs[mma_n_len];
 
 #pragma unroll 8 // too little unrolling hurts ILP to much causes register
                  // spills
     for (size_t k{0}; k < mma_k_len; k += elements_per_load) {
 
-      // 1. Load all A vectors
       CUTE_UNROLL
-      for (size_t m{0}; m < mma_m_len; m++) {
-        a_vecs[m] = *reinterpret_cast<float4 *>(&a_mma_slice(0, m, k));
-      }
+      for (size_t m{0}; m < mma_m_len; m += mma_m_size) {
 
-      // 2. Load all B vectors
-      CUTE_UNROLL
-      for (size_t n{0}; n < mma_n_len; n++) {
-        b_vecs[n] = *reinterpret_cast<float4 *>(&b_mma_slice(0, n, k));
-      }
-
-      // 3. FMAs - all .x first, then .y, then .z, then .w
-      CUTE_UNROLL
-      for (size_t m{0}; m < mma_m_len; m++) {
+        // 1. Load all A vectors
         CUTE_UNROLL
-        for (size_t n{0}; n < mma_n_len; n++) {
-          c_frag(0, m, n) += a_vecs[m].x * b_vecs[n].x;
+        for (size_t m_local{0}; m_local < mma_m_size; m_local++) {
+          a_vecs[m_local] =
+              *reinterpret_cast<float4 *>(&a_mma_slice(0, m + m_local, k));
         }
-      }
 
-      CUTE_UNROLL
-      for (size_t m{0}; m < mma_m_len; m++) {
+        // 2. Load all B vectors
         CUTE_UNROLL
         for (size_t n{0}; n < mma_n_len; n++) {
-          c_frag(0, m, n) += a_vecs[m].y * b_vecs[n].y;
+          b_vecs[n] = *reinterpret_cast<float4 *>(&b_mma_slice(0, n, k));
         }
-      }
 
-      CUTE_UNROLL
-      for (size_t m{0}; m < mma_m_len; m++) {
+        // 3. FMAs - all .x first, then .y, then .z, then .w
         CUTE_UNROLL
-        for (size_t n{0}; n < mma_n_len; n++) {
-          c_frag(0, m, n) += a_vecs[m].z * b_vecs[n].z;
+        for (size_t m_local{0}; m_local < mma_m_size; ++m_local) {
+          CUTE_UNROLL
+          for (size_t n{0}; n < mma_n_len; n++) {
+            c_frag(0, m + m_local, n) += a_vecs[m_local].x * b_vecs[n].x;
+          }
         }
-      }
 
-      CUTE_UNROLL
-      for (size_t m{0}; m < mma_m_len; m++) {
         CUTE_UNROLL
-        for (size_t n{0}; n < mma_n_len; n++) {
-          c_frag(0, m, n) += a_vecs[m].w * b_vecs[n].w;
+        for (size_t m_local{0}; m_local < mma_m_size; ++m_local) {
+          CUTE_UNROLL
+          for (size_t n{0}; n < mma_n_len; n++) {
+            c_frag(0, m + m_local, n) += a_vecs[m_local].y * b_vecs[n].y;
+          }
+        }
+
+        CUTE_UNROLL
+        for (size_t m_local{0}; m_local < mma_m_size; ++m_local) {
+          CUTE_UNROLL
+          for (size_t n{0}; n < mma_n_len; n++) {
+            c_frag(0, m + m_local, n) += a_vecs[m_local].z * b_vecs[n].z;
+          }
+        }
+
+        CUTE_UNROLL
+        for (size_t m_local{0}; m_local < mma_m_size; ++m_local) {
+          CUTE_UNROLL
+          for (size_t n{0}; n < mma_n_len; n++) {
+            c_frag(0, m + m_local, n) += a_vecs[m_local].w * b_vecs[n].w;
+          }
         }
       }
     }

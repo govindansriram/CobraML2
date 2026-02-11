@@ -66,3 +66,9 @@ temp/
 *.tmp
 
 dump.*
+
+# Python
+.venv
+__pycache__/
+UNKNOWN.egg-info/
+cobraml.egg-info/

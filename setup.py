@@ -1,5 +1,5 @@
 import os
-from setuptools import setup, find_packages
+from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import torch
 
@@ -29,9 +29,6 @@ def get_cuda_arch_flags():
     ]
 
 setup(
-    name="cobraml",
-    package_dir={"": "python"},
-    packages=find_packages(where="python"),
     ext_modules=[
         CUDAExtension(
             name='cobraml._C',

@@ -23,23 +23,26 @@ cd CobraML2
 sudo chmod +x ./runner.sh
 ```
 
-#### Building the Python Package
+#### Python package
 
-The runner handles venv creation, CUDA-matched torch installation, and building in one go:
+Install torch for your CUDA version, then build cobraml:
 
 ```bash
-# First time: creates .venv and installs torch matching your system CUDA version
-./runner.sh --python-setup
-
-# Build and install cobraml in editable mode
-./runner.sh --build-python
+python3 -m venv .venv
+source .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cu130
+pip install --no-build-isolation -e ".[dev]"
 ```
+
+Replace `cu130` with your CUDA version: `cu124`, `cu126`, `cu128`, etc. Check with `nvcc --version`.
+
+#### C++ targets
+
+The C++ build uses CMake to locate PyTorch headers from the `.venv`. You don't need to build the full Python package first, but torch must be installed in the venv.
 
 #### Testing
 
 ##### C++ tests
-
-The C++ tests require the `.venv` to exist at the project root, since CMake uses it to locate PyTorch headers. Run `./runner.sh --python-setup` at least once before building C++ targets.
 
 ```bash
 # Build and run a specific test
@@ -57,17 +60,17 @@ The C++ tests require the `.venv` to exist at the project root, since CMake uses
 
 ##### Python tests
 
-Requires the Python package to be built first (`./runner.sh --build-python`).
+Requires the Python package to be built first.
 
 ```bash
-# Run all Python tests
-./runner.sh --python-test
+# Run all tests
+pytest
 
 # Run with benchmarking
-./runner.sh --python-benchmark
+pytest --benchmark
 
-# Pass extra args to pytest
-./runner.sh --python-test -- -k "test_fmha_fp32[4-512-16-64-True]"
+# Filter specific test cases
+pytest -k "test_fmha_fp32[4-512-16-64-True]"
 ```
 
 ## Roadmap
@@ -98,10 +101,6 @@ The `runner.sh` script is the main entry point for building, testing, profiling,
 | `-o, --output <name>` | Custom name for .ncu-rep file |
 | `--profile-opts <opts>` | Additional ncu options |
 | `--no-tests` | Disable building tests |
-| `--python-setup` | Create .venv and install build deps |
-| `--build-python` | Build and install cobraml Python package |
-| `--python-test` | Run Python tests |
-| `--python-benchmark` | Run Python benchmarks |
 | `--` | Pass remaining args to executable |
 
 ### Examples
@@ -158,18 +157,20 @@ The `runner.sh` script is the main entry point for building, testing, profiling,
 
 ### Linting
 
-All files must be formatted to follow the style specified by `clang-format`.
+#### C++
 
-Ensure clang-format is installed by running `clang-format --version`.
+All C++ files must be formatted with `clang-format`.
 
-**Format all files:**
 ```bash
 ./runner.sh -f
+./runner.sh -f include/cobraml2/kernels/fmha_cc.cuh
 ```
 
-**Format a specific file:**
+#### Python
+
 ```bash
-./runner.sh -f include/cobraml2/kernels/fmha_cc.cuh
+ruff check python/
+ruff format python/
 ```
 
 ## Contributing

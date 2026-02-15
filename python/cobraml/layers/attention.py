@@ -37,7 +37,7 @@ class MultiHeadAttention:
         out = torch.matmul(attn, v)
         return out.transpose(1, 2)  # back to [B, N, H, d]
 
-    def post_process(out_tensor: torch.Tensor):
+    def post_process(self, out_tensor: torch.Tensor):
         return out_tensor.contiguous()
 
 
@@ -55,6 +55,7 @@ class FusedMultiHeadAttention(MultiHeadAttention):
 
 class AttentionLayer(nn.Module):
     def __init__(self, model_config: ModelConfig):
+        super().__init__()
 
         self._num_heads = model_config.num_heads
         self._head_dim = model_config.head_dim
@@ -64,11 +65,11 @@ class AttentionLayer(nn.Module):
 
         # creates QKV projections by multiplying by weights
         # [B, N, D] @ [D * 3, D].T -> [B, N, D * 3] (weight is stored transposed)
-        self._fc1 = nn.Linear(self._embed_dim, 3 * self._embed_dim)
+        self.c_attn = nn.Linear(self._embed_dim, 3 * self._embed_dim)
 
         # applied to output of attention
         # [B, N, D] @ [D, D].T -> [B, N, D]
-        self._fc2 = nn.Linear(self._embed_dim, self._embed_dim)
+        self.c_proj = nn.Linear(self._embed_dim, self._embed_dim)
 
         self._attn_mechanism = (
             MultiHeadAttention()
@@ -77,7 +78,7 @@ class AttentionLayer(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        projection = self._fc1(hidden_states)
+        projection = self.c_attn(hidden_states)
         q_proj, k_proj, v_proj = projection.split(self._embed_dim, dim=2)
         new_shape = (*q_proj.shape[:-1], self._num_heads, self._head_dim)
 
@@ -91,4 +92,4 @@ class AttentionLayer(nn.Module):
 
         out_view = out_tensor.view(*out_tensor.shape[:2], self._embed_dim)
 
-        return self._fc2(out_view)
+        return self.c_proj(out_view)

@@ -43,8 +43,7 @@ void cpu_mha_impl(float *Q, float *K, float *V, float *O, int B, int N, int H,
         for (int k_idx = 0; k_idx < d; k_idx++) {
           float out = 0;
           for (int j = 0; j < N; j++) {
-            int v_idx =
-                b * (seq_stride * N) + j * seq_stride + h * d + k_idx;
+            int v_idx = b * (seq_stride * N) + j * seq_stride + h * d + k_idx;
             out += (scores[j] / sum_exp) * V[v_idx];
           }
           int o_idx = b * (N * H * d) + i * (H * d) + h * d + k_idx;
@@ -56,8 +55,8 @@ void cpu_mha_impl(float *Q, float *K, float *V, float *O, int B, int N, int H,
 }
 
 // Separate Q, K, V buffers (standard BSHD layout)
-void cpu_mha(float *Q, float *K, float *V, float *O, int B, int N, int H,
-             int d, bool causal = false) {
+void cpu_mha(float *Q, float *K, float *V, float *O, int B, int N, int H, int d,
+             bool causal = false) {
   cpu_mha_impl(Q, K, V, O, B, N, H, d, H * d, causal);
 }
 

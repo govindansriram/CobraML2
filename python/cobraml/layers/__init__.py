@@ -10,9 +10,4 @@ for lib in _lib_path:
 from .attention import MultiHeadAttention, FusedMultiHeadAttention, AttentionLayer  # noqa: E402
 from .mlp import GPT2MLP
 
-__all__ = [
-    "MultiHeadAttention", 
-    "FusedMultiHeadAttention", 
-    "AttentionLayer",
-    "GPT2MLP"
-]
+__all__ = ["MultiHeadAttention", "FusedMultiHeadAttention", "AttentionLayer", "GPT2MLP"]

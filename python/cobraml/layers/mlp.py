@@ -7,8 +7,8 @@ from transformers.activations import ACT2FN
 if TYPE_CHECKING:
     from cobraml.models.config import GPT2Config
 
-class GPT2MLP(nn.Module):
 
+class GPT2MLP(nn.Module):
     def __init__(self, config: GPT2Config):
         super().__init__()
 
@@ -27,9 +27,3 @@ class GPT2MLP(nn.Module):
         hidden_state = self.c_fc(hidden_state)
         hidden_state = self.act(hidden_state)
         return self.c_proj(hidden_state)
-
-
-
-
-        
-

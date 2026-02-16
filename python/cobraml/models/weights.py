@@ -1,6 +1,5 @@
 import safetensors
 import torch
-from tqdm.asyncio import tqdm
 import glob
 from huggingface_hub import snapshot_download
 from typing import Dict

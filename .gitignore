@@ -72,3 +72,6 @@ dump.*
 __pycache__/
 UNKNOWN.egg-info/
 cobraml.egg-info/
+
+# extensions
+.cache/

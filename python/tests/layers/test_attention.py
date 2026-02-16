@@ -1,31 +1,6 @@
 import torch
-import cobraml
+from cobraml.layers import MultiHeadAttention, FusedMultiHeadAttention
 import pytest
-
-
-def vanilla_mha(q, k, v, causal=True):
-    """Naive MHA: Q @ K.T @ V with no optimizations"""
-    _, N, _, d = q.shape
-    scale = d**-0.5
-
-    # [B, N, H, d] -> [B, H, N, d]
-    q = q.transpose(1, 2)
-    k = k.transpose(1, 2)
-    v = v.transpose(1, 2)
-
-    # Attention scores [B, H, N, N]
-    attn = torch.matmul(q, k.transpose(-2, -1)) * scale
-
-    if causal:
-        mask = torch.triu(
-            torch.ones(N, N, device=q.device, dtype=torch.bool), diagonal=1
-        )
-        attn = attn.masked_fill(mask, float("-inf"))
-
-    attn = torch.softmax(attn, dim=-1)
-
-    out = torch.matmul(attn, v)
-    return out.transpose(1, 2)  # back to [B, N, H, d]
 
 
 @pytest.mark.parametrize(
@@ -56,18 +31,23 @@ def vanilla_mha(q, k, v, causal=True):
 def test_fmha_fp32(benchmark, B, N, H, d, causal):
     iterations = 1
 
-    # Initial Tensors
-    q = torch.randn(B, N, H, d, device="cuda", dtype=torch.float32)
-    k = torch.randn(B, N, H, d, device="cuda", dtype=torch.float32)
-    v = torch.randn(B, N, H, d, device="cuda", dtype=torch.float32)
+    fmha = FusedMultiHeadAttention()
+    mha = MultiHeadAttention()
+
+    hd = H * d
+    qkv = torch.randn(B, N, 3 * hd, device="cuda", dtype=torch.float32)
+    q, k, v = qkv.split(hd, dim=2)
+    q = q.view(B, N, H, d)
+    k = k.view(B, N, H, d)
+    v = v.view(B, N, H, d)
 
     if benchmark:
         iterations = 100
 
         # Warmup
         for _ in range(10):
-            _ = cobraml.fmha(q, k, v, causal=causal)
-            _ = vanilla_mha(q, k, v, causal=causal)
+            _ = fmha(q, k, v, causal=causal)
+            _ = mha(q, k, v, causal=causal)
         torch.cuda.synchronize()
 
     start = torch.cuda.Event(enable_timing=True)
@@ -78,20 +58,18 @@ def test_fmha_fp32(benchmark, B, N, H, d, causal):
     cobra_total = 0
     vanilla_total = 0
     for _ in range(iterations):
-        q = q.normal_()
-        k = k.normal_()
-        v = v.normal_()
+        qkv.normal_()
 
         torch.cuda.synchronize()
 
         start.record()
-        out_cobra = cobraml.fmha(q, k, v, causal=causal)
+        out_cobra = fmha(q, k, v, causal=causal)
         end.record()
         torch.cuda.synchronize()
         cobra_total += start.elapsed_time(end)
 
         start.record()
-        out_vanilla = vanilla_mha(q, k, v, causal=causal)
+        out_vanilla = mha(q, k, v, causal=causal)
         end.record()
         torch.cuda.synchronize()
         vanilla_total += start.elapsed_time(end)

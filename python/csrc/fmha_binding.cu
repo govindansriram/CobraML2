@@ -49,7 +49,7 @@ struct FMHADispatcher {
         [](float *Q, float *K, float *V, float *O, uint32_t B, uint32_t N) {
           constexpr Config inner_config{idx_to_config(I)};
           cobraml::kernels::FMHA<inner_config.heads, inner_config.head_dim, 64,
-                                 64, float, 128, inner_config.causal>{}(
+                                 64, float, 128, inner_config.causal, true>{}(
               Q, K, V, O, B, N);
         }};
   }
@@ -90,9 +90,6 @@ void fmha_forward_fp32(torch::Tensor &Q, torch::Tensor &K, torch::Tensor &V,
 
 torch::Tensor fmha_forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V,
                            bool causal) {
-  TORCH_CHECK(Q.is_contiguous(), "Q must be row major");
-  TORCH_CHECK(K.is_contiguous(), "K must be row major");
-  TORCH_CHECK(V.is_contiguous(), "V must be row major");
 
   c10::ScalarType Q_dtype{Q.scalar_type()};
   c10::ScalarType K_dtype{K.scalar_type()};

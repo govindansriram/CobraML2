@@ -80,10 +80,7 @@ class AttentionLayer(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         projection = self.c_attn(hidden_states)
         q_proj, k_proj, v_proj = projection.split(self._embed_dim, dim=2)
-        print(q_proj.size(), self._num_heads, self._head_dim, q_proj.is_contiguous())
-        print(projection.size(), projection.stride(), q_proj.stride())
         new_shape = (*q_proj.shape[:-1], self._num_heads, self._head_dim)
-        print(new_shape)
 
         q_proj = q_proj.view(new_shape)
         k_proj = k_proj.view(new_shape)

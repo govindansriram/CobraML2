@@ -34,10 +34,12 @@ def test_fmha_fp32(benchmark, B, N, H, d, causal):
     fmha = FusedMultiHeadAttention()
     mha = MultiHeadAttention()
 
-    # Initial Tensors
-    q = torch.randn(B, N, H, d, device="cuda", dtype=torch.float32)
-    k = torch.randn(B, N, H, d, device="cuda", dtype=torch.float32)
-    v = torch.randn(B, N, H, d, device="cuda", dtype=torch.float32)
+    hd = H * d
+    qkv = torch.randn(B, N, 3 * hd, device="cuda", dtype=torch.float32)
+    q, k, v = qkv.split(hd, dim=2)
+    q = q.view(B, N, H, d)
+    k = k.view(B, N, H, d)
+    v = v.view(B, N, H, d)
 
     if benchmark:
         iterations = 100
@@ -56,9 +58,7 @@ def test_fmha_fp32(benchmark, B, N, H, d, causal):
     cobra_total = 0
     vanilla_total = 0
     for _ in range(iterations):
-        q = q.normal_()
-        k = k.normal_()
-        v = v.normal_()
+        qkv.normal_()
 
         torch.cuda.synchronize()
 

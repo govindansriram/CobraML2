@@ -28,7 +28,7 @@ model.eval()
 
 model_name = "openai-community/gpt2-xl"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-text = "The quick brown fox jumps over the lazy"
+text = "Hi how are you?"
 input_ids = tokenizer(text, return_tensors="pt")["input_ids"].to(device)
 
 with torch.inference_mode():

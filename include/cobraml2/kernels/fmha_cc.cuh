@@ -45,7 +45,7 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   const Tensor q_head{MHAType::slice_head(Q, batch_size, N)};
   const Tensor k_head{MHAType::slice_head(K, batch_size, N)};
   const Tensor v_head{MHAType::slice_head(V, batch_size, N)};
-  Tensor o_head{MHAType::slice_head(O, batch_size, N)};
+  Tensor o_head{MHAType::slice_head<true>(O, batch_size, N)};
 
   extern __shared__ char shared_memory[];
   using SharedStorageType = typename MHAType::SharedStorage;
@@ -230,13 +230,14 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
  * @tparam DType
  * @tparam thread_count
  */
-template <int head_count, int head_dim, int B_r, int B_c, typename DType,
-          int thread_count = 128, bool causal_mask = false>
+template <int head_count, int head_dim, int B_r, 
+          int B_c, typename DType, int thread_count = 128, 
+          bool causal_mask = false, bool qkv_contigous_buffer = false>
 struct FMHA {
 
   using TensorDType = DType;
   using Self =
-      FMHA<head_count, head_dim, B_r, B_c, DType, thread_count, causal_mask>;
+      FMHA<head_count, head_dim, B_r, B_c, DType, thread_count, causal_mask, qkv_contigous_buffer>;
 
   using NumHeadsType = Int<head_count>;
   using HeadDimType = Int<head_dim>;
@@ -289,12 +290,19 @@ struct FMHA {
 
   static constexpr int threads_per_block{thread_count};
 
+  template<bool is_o = false>
   COBRA_S_DEVICE auto get_tensor_layout(size_t batch_size, size_t N) {
-    return make_layout(make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}),
-                       LayoutRight{});
+
+    if constexpr(qkv_contigous_buffer && !is_o){
+      Int<head_dim * head_count * 3> embed3{};
+      return make_layout(make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}),
+              make_stride(embed3.value * N, embed3, HeadDimType{}, _1{}));
+    }else{
+        return make_layout(make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}), LayoutRight{});
+    }
   }
 
-  template <typename PtrType>
+  template <bool is_o = false, typename PtrType>
   COBRA_S_DEVICE auto slice_head(PtrType g_ptr, int batch_size, int N) {
 
     using BaseType = std::decay_t<std::remove_pointer_t<PtrType>>;
@@ -303,7 +311,7 @@ struct FMHA {
         std::is_same_v<std::remove_cv_t<std::remove_pointer_t<PtrType>>, DType>,
         "Must point to DType");
 
-    const auto projection_layout{get_tensor_layout(batch_size, N)};
+    const auto projection_layout{get_tensor_layout<is_o>(batch_size, N)};
     const Tensor projection{
         make_tensor(make_gmem_ptr<DType>(g_ptr), projection_layout)};
     return projection(blockIdx.y, _, blockIdx.x, _);

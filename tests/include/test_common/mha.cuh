@@ -58,6 +58,56 @@ void cpu_mha(float *Q, float *K, float *V, float *O, int B, int N, int H, int d,
   }
 }
 
+// CPU reference for contiguous QKV buffer layout
+// Q, K, V are interleaved in one buffer with stride H*d*3 per sequence position
+// Q starts at offset 0, K at H*d, V at 2*H*d within each position
+// Output O uses standard BSHD layout
+void cpu_mha_contiguous(float *QKV, float *O, int B, int N, int H, int d,
+                        bool causal = false) {
+  int embed3 = H * d * 3;
+  for (int b = 0; b < B; b++) {
+    for (int h = 0; h < H; h++) {
+      for (int i = 0; i < N; i++) {
+        float max_score = -INFINITY;
+        std::vector<float> scores(N);
+
+        for (int j = 0; j < N; j++) {
+          if (causal && j > i) {
+            scores[j] = -INFINITY;
+            continue;
+          }
+
+          float score = 0;
+          for (int k_idx = 0; k_idx < d; k_idx++) {
+            int q_idx = b * (embed3 * N) + i * embed3 + h * d + k_idx;
+            int k_idx_full = b * (embed3 * N) + j * embed3 + H * d + h * d + k_idx;
+            score += QKV[q_idx] * QKV[k_idx_full];
+          }
+          score /= sqrtf((float)d);
+          scores[j] = score;
+          max_score = std::max(max_score, score);
+        }
+
+        float sum_exp = 0;
+        for (int j = 0; j < N; j++) {
+          scores[j] = expf(scores[j] - max_score);
+          sum_exp += scores[j];
+        }
+
+        for (int k_idx = 0; k_idx < d; k_idx++) {
+          float out = 0;
+          for (int j = 0; j < N; j++) {
+            int v_idx = b * (embed3 * N) + j * embed3 + 2 * H * d + h * d + k_idx;
+            out += (scores[j] / sum_exp) * QKV[v_idx];
+          }
+          int o_idx = b * (N * H * d) + i * (H * d) + h * d + k_idx;
+          O[o_idx] = out;
+        }
+      }
+    }
+  }
+}
+
 template <typename DType>
 thrust::device_vector<DType>
 create_projection(int batch_size, int sequence_length, int head_count,

@@ -1,8 +1,28 @@
 ![/assets/](/assets/logo.png)
 
 ## About
-LLM Inference Serving platform with flash attention kernels, mega kernels, and much more.
-Built from scratch, documenting every step along the way.
+LLM serving engine and custom kernels built from scratch, documenting every step along the way.
+
+## Accomplishments
+
+1. Flash Attention 1 (done)
+   - between 2 and 4 x faster then pytorch naive MHA
+2. Brought up GPT2
+
+## Milestones
+
+1. Flash Attention 2
+2. Flash Attention 3
+3. KV Cache
+4. Paged Attention
+5. Tensor Parallelism
+6. MOE support
+
+## Current limitations
+
+1. No FP16, FP8, FP4 support
+2. head dim must equal 64
+3. can only handle 1 batch at a time (unless all batches are evenly sized)
 
 ## Installation
 
@@ -72,15 +92,6 @@ pytest --benchmark
 # Filter specific test cases
 pytest -k "test_fmha_fp32[4-512-16-64-True]"
 ```
-
-## Roadmap
-
-1. Flash Attention 1 (done)
-   - between 2 and 4 x faster then pytorch naive MHA
-2. KV cache and inference serving 
-3. Flash Attention 2
-4. Flash Attention 3
-5. Matmul
 
 ## Using the Runner
 
@@ -155,9 +166,9 @@ The `runner.sh` script is the main entry point for building, testing, profiling,
 ./runner.sh -p test_fmha_cc --profile-opts '--kernel-name fmha'
 ```
 
-### Linting
+## Linting
 
-#### C++
+### C++
 
 All C++ files must be formatted with `clang-format`.
 
@@ -166,7 +177,7 @@ All C++ files must be formatted with `clang-format`.
 ./runner.sh -f include/cobraml2/kernels/fmha_cc.cuh
 ```
 
-#### Python
+### Python
 
 ```bash
 ruff check python/

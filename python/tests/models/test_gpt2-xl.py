@@ -44,14 +44,13 @@ def run_us() -> torch.Tensor:
     with torch.inference_mode():
         model.load_state_dict(state_dict, strict=False)
 
-        # generate with our model
-        our_ids = input_ids.clone()
-        for _ in range(max_tokens):
-            logits = model(our_ids)
-            next_token = logits[0, -1].argmax().unsqueeze(0).unsqueeze(0)
-            our_ids = torch.cat([our_ids, next_token], dim=1)
-            if next_token.item() == eos_token_id:
-                break
+        # deterministic path used for parity against HF
+        our_ids = model.generate(
+            input_ids.clone(),
+            max_new_tokens=max_tokens,
+            eos_token_id=eos_token_id,
+            do_sample=False,
+        )
 
     del model, state_dict
     torch.cuda.empty_cache()

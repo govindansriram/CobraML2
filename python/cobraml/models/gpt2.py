@@ -2,6 +2,7 @@ from cobraml.layers import AttentionLayer, GPT2MLP
 import torch.nn as nn
 import torch
 from .config import GPT2Config
+from .sampling import sample_next_token
 
 
 class GPT2Block(nn.Module):
@@ -70,3 +71,42 @@ class GPT2LMHeadModel(nn.Module):
     def forward(self, input_ids: torch.Tensor):
         hidden_state = self.transformer(input_ids)
         return self.lm_head(hidden_state)
+
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int,
+        eos_token_id: int | None = None,
+        *,
+        do_sample: bool = False,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float = 1.0,
+    ) -> torch.Tensor:
+        generated = input_ids
+        finished = torch.zeros(
+            generated.size(0), dtype=torch.bool, device=generated.device
+        )
+
+        for _ in range(max_new_tokens):
+            logits = self(generated)
+            next_token = sample_next_token(
+                logits[:, -1, :],
+                do_sample=do_sample,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+            )
+
+            if eos_token_id is not None:
+                eos_fill = torch.full_like(next_token, eos_token_id)
+                next_token = torch.where(finished[:, None], eos_fill, next_token)
+
+            generated = torch.cat([generated, next_token], dim=1)
+
+            if eos_token_id is not None:
+                finished |= next_token.squeeze(-1).eq(eos_token_id)
+                if torch.all(finished):
+                    break
+
+        return generated

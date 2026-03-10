@@ -5,6 +5,7 @@
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
 #include <cutlass/bfloat16.h>
+#include <cutlass/arch/barrier.h>
 
 namespace cobraml::kernels {
 using namespace cute;
@@ -13,10 +14,10 @@ using namespace cute;
 namespace SM100 {
 
 template<
-    typename TmaDescriptorAType, 
-    typename TmaDescriptorBType, 
-    typename TensorAType, 
-    typename TensorBType, 
+    typename TmaDescriptorAType,
+    typename TmaDescriptorBType,
+    typename TensorAType,
+    typename TensorBType,
     typename TensorCType,
     typename ConfigType
 >
@@ -28,24 +29,18 @@ __global__ void gemm_device(
     TensorCType c,
     size_t M,
     ConfigType config
-){
-    if (thread0()){
-        print(a); print("\n");
-        print(b); print("\n");
-        print(c); print("\n");
-    }
-}
+);
 
 template<
-    typename AType, 
-    typename BType, 
+    typename AType,
+    typename BType,
     typename CType
 >
 struct GEMM {
 
     static_assert(std::is_same_v<AType, BType>, "AType and BType should be the same");
 
-    template<
+template<
         size_t N, 
         size_t K,
         size_t MMA_M,
@@ -116,12 +111,111 @@ struct GEMM {
 
     template<typename ConfigType>
     struct SharedStorage {
+        using ProducerBarrierType = cutlass::arch::ClusterTransactionBarrier;
+        using ConsumerBarrierType = cutlass::arch::ClusterBarrier;
+
         // Define shared memory buffers for A and B tiles
         alignas(128) cute::ArrayEngine<AType, size(ConfigType::a_smem_layout)> smem_a;
         alignas(128) cute::ArrayEngine<BType, size(ConfigType::b_smem_layout)> smem_b;
 
-        alignas(16) cute::ArrayEngine<cute::uint64_t, ConfigType::static_pipeline_stages> full_barrier;
-        alignas(16) cute::ArrayEngine<cute::uint64_t, ConfigType::static_pipeline_stages> empty_barrier;
+        alignas(16) ProducerBarrierType full_barrier[ConfigType::static_pipeline_stages];
+        alignas(16) ConsumerBarrierType empty_barrier[ConfigType::static_pipeline_stages];
+    };
+
+    enum class ThreadRole {
+        Producer,
+        Consumer
+    };
+
+    COBRA_S_DEVICE ThreadRole get_thread_role() {
+        int warp_idx = threadIdx.x / 32;
+        return (warp_idx == 0) ? ThreadRole::Producer : ThreadRole::Consumer;
+    }
+
+    template<typename ConfigType>
+    struct Pipeline {
+
+        struct State {
+            int index{0};
+            uint32_t phase{0};
+
+            COBRA_DEVICE State& operator++() {
+                ++index;
+                if (index >= ConfigType::static_pipeline_stages) {
+                    index = 0;
+                    phase ^= 1;
+                }
+
+                return *this;
+            }
+        };
+
+        enum class BarrierStatus : uint32_t {
+            WaitDone = 1,
+            WaitAgain = 0
+        };
+
+        SharedStorage<ConfigType>& shared_storage;
+        ThreadRole role;
+
+        struct ProducerView {
+
+            SharedStorage<ConfigType>& shared_storage;
+            bool is_leader{false};
+
+            private:
+            SharedStorage::ConsumerBarrierType& get_barrier_status(State& state) {
+                return shared_storage.full_barrier[state.index];
+            }
+
+            constexpr transaction_bytes{
+                size(ConfigType::a_smem_layout(_, _, _, 0)) * sizeof(AType) + size(ConfigType::b_smem_layout(_, _, _, 0)) * sizeof(BType)
+            };
+
+            public:
+            COBRA_DEVICE ProducerView(SharedStorage<ConfigType>& shared_storage): shared_storage(shared_storage) {
+                is_leader = (cute::elect_one_sync() == 1);
+            }
+
+            COBRA_DEVICE BarrierStatus check_barrier(State& state){
+                return static_cast<BarrierStatus>(get_barrier_status(state).try_wait(state.phase));
+            }
+
+            COBRA_DEVICE Tensor wait_barrier(State& state, BarrierStatus status){
+
+                if (status == BarrierStatus::WaitAgain) 
+                    get_barrier_status(state).wait(state.phase);
+
+                if (is_leader)
+                    get_barrier_status(state).arrive_and_expect_tx(transaction_bytes);
+
+                // TODO continue here
+            }
+        }
+
+        COBRA_DEVICE Pipeline(
+            SharedStorage<ConfigType>& shared_storage,
+            ThreadRole role) : shared_storage(shared_storage), role(role) {
+            if (role == ThreadRole::Producer) {
+                if (elect_one_sync()) {
+                    for (size_t i = 0; i < ConfigType::static_pipeline_stages; ++i) {
+                        shared_storage.full_barrier[i].init(1);
+                        shared_storage.empty_barrier[i].init(1);
+                    }
+                }
+            }
+            cutlass::arch::fence_barrier_init();
+            __syncthreads();
+        }
+
+        COBRA_DEVICE State init_producer_state() {
+            return State{0, 1};
+        }
+
+        COBRA_DEVICE State init_consumer_state() {
+            return State{0, 0};
+        }
+
     };
 
     template<typename ConfigType>
@@ -257,6 +351,35 @@ struct GEMM {
         assert(status == cudaSuccess && "Kernel launch failed");
     }
 };
+
+template<
+    typename TmaDescriptorAType,
+    typename TmaDescriptorBType,
+    typename TensorAType,
+    typename TensorBType,
+    typename TensorCType,
+    typename ConfigType
+>
+__global__ void gemm_device(
+    __grid_constant__ TmaDescriptorAType const tma_a,
+    __grid_constant__ TmaDescriptorBType const tma_b,
+    TensorAType a,
+    TensorBType b,
+    TensorCType c,
+    size_t M,
+    ConfigType config
+){
+    using AType = typename TensorAType::value_type;
+    using BType = typename TensorBType::value_type;
+    using CType = typename TensorCType::value_type;
+    using GemmType = GEMM<AType, BType, CType>;
+    using SharedStorageType = typename GemmType::template SharedStorage<ConfigType>;
+    using PipelineType = typename GemmType::template Pipeline<ConfigType>;
+
+    extern __shared__ char shared_memory[];
+    SharedStorageType& shared_storage{*reinterpret_cast<SharedStorageType *>(shared_memory)};
+    PipelineType pipeline(shared_storage, GemmType::get_thread_role());
+}
 
 }
 }

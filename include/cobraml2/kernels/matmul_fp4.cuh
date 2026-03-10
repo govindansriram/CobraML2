@@ -164,13 +164,28 @@ template<
             bool is_leader{false};
 
             private:
-            SharedStorage::ConsumerBarrierType& get_barrier_status(State& state) {
+            COBRA_DEVICE typename SharedStorage<ConfigType>::ConsumerBarrierType& get_barrier_status(State& state) {
                 return shared_storage.full_barrier[state.index];
             }
 
-            constexpr transaction_bytes{
+            static constexpr size_t transaction_bytes{
                 size(ConfigType::a_smem_layout(_, _, _, 0)) * sizeof(AType) + size(ConfigType::b_smem_layout(_, _, _, 0)) * sizeof(BType)
             };
+
+            template<bool is_a>
+            COBRA_DEVICE auto get_smem_tensor(){
+                if constexpr (is_a) {   
+                    return make_tensor(
+                        make_smem_ptr(shared_storage.smem_a.begin()), 
+                        ConfigType::a_smem_layout
+                    );
+                }else{
+                    return make_tensor(
+                        make_smem_ptr(shared_storage.smem_b.begin()), 
+                        ConfigType::b_smem_layout
+                    );
+                }
+            }
 
             public:
             COBRA_DEVICE ProducerView(SharedStorage<ConfigType>& shared_storage): shared_storage(shared_storage) {
@@ -181,21 +196,23 @@ template<
                 return static_cast<BarrierStatus>(get_barrier_status(state).try_wait(state.phase));
             }
 
-            COBRA_DEVICE Tensor wait_barrier(State& state, BarrierStatus status){
-
+            COBRA_DEVICE auto wait_barrier(State& state, BarrierStatus status){
                 if (status == BarrierStatus::WaitAgain) 
                     get_barrier_status(state).wait(state.phase);
 
                 if (is_leader)
                     get_barrier_status(state).arrive_and_expect_tx(transaction_bytes);
 
-                // TODO continue here
+                return make_tuple(
+                    get_smem_tensor<true>()(_, _, _, state.index), 
+                    get_smem_tensor<false>()(_, _, _, state.index)
+                );
             }
-        }
+        };
 
         COBRA_DEVICE Pipeline(
             SharedStorage<ConfigType>& shared_storage,
-            ThreadRole role) : shared_storage(shared_storage), role(role) {
+            const ThreadRole& role) : shared_storage(shared_storage), role(role) {
             if (role == ThreadRole::Producer) {
                 if (elect_one_sync()) {
                     for (size_t i = 0; i < ConfigType::static_pipeline_stages; ++i) {
@@ -214,6 +231,10 @@ template<
 
         COBRA_DEVICE State init_consumer_state() {
             return State{0, 0};
+        }
+
+        COBRA_DEVICE ProducerView producer_view() {
+            return ProducerView(shared_storage);
         }
 
     };
@@ -375,10 +396,18 @@ __global__ void gemm_device(
     using GemmType = GEMM<AType, BType, CType>;
     using SharedStorageType = typename GemmType::template SharedStorage<ConfigType>;
     using PipelineType = typename GemmType::template Pipeline<ConfigType>;
+    using ThreadRoleEnum = typename GemmType::ThreadRole;
 
     extern __shared__ char shared_memory[];
+
     SharedStorageType& shared_storage{*reinterpret_cast<SharedStorageType *>(shared_memory)};
-    PipelineType pipeline(shared_storage, GemmType::get_thread_role());
+    ThreadRoleEnum role{GemmType::get_thread_role()};
+    PipelineType pipeline(shared_storage, role);
+
+    if (role == ThreadRoleEnum::Producer) {
+        auto starting_state = pipeline.init_producer_state();
+        auto producer_view = pipeline.producer_view();
+    }
 }
 
 }

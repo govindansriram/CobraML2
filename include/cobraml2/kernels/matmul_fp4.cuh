@@ -7,11 +7,8 @@
 #include <cutlass/bfloat16.h>
 #include <cutlass/arch/barrier.h>
 
-namespace cobraml::kernels {
+namespace cobraml::SM100::kernels {
 using namespace cute;
-
-
-namespace SM100 {
 
 template<
     typename TmaDescriptorAType,
@@ -405,10 +402,10 @@ __global__ void gemm_device(
     PipelineType pipeline(shared_storage, role);
 
     if (role == ThreadRoleEnum::Producer) {
-        auto starting_state = pipeline.init_producer_state();
-        auto producer_view = pipeline.producer_view();
+        auto starting_state{pipeline.init_producer_state()};
+        auto producer_view{pipeline.producer_view()};
     }
 }
 
-}
+
 }

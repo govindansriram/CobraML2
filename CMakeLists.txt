@@ -13,7 +13,7 @@ endif()
 project(cobraml2 VERSION 0.0.0 LANGUAGES CXX CUDA)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -std=c++20")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -std=c++20 --expt-relaxed-constexpr")
 
 option(BENCHMARK "Enable benchmarking" OFF)
 if(BENCHMARK)

@@ -300,7 +300,7 @@ struct TwoWayPipeline {
 
         if (role == producer_role) {
             if (elect_one_sync()) {
-                for (size_t i = 0; i < ProducerView::static_pipeline_stages; ++i) {
+                for (size_t i{0}; i < ProducerView::static_pipeline_stages; ++i) {
                     producer_barrier[i].init(ProducerView::arrival_count); 
                     consumer_barrier[i].init(ConsumerView::arrival_count); 
                 }

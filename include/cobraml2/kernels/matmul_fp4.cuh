@@ -77,7 +77,52 @@ __global__ void gemm_kernel(
     extern __shared__ char shared_memory[];
     ThreadRoleType thread_role{ThreadRoleManager::assign_role(threadIdx.x)};
 
+    // one thread from the producer prefetches both tmas you can do this by calling 
+    // post_init
+
     SharedStorageType& shared_storage{*reinterpret_cast<SharedStorageType *>(shared_memory)};
+
+    // slice out the local tile from gmem
+    // partition using the tiled_mma partition_A(gA)
+    // this can then be passed into tma_partition
+    
+
+    // cutlass example 
+
+    /**
+     *   1. load_init() (setup, once) — lines 527-543:
+  // tma_partition happens here, returns LoadParams struct
+  auto [tAgA_mkl, tAsA] = tma_partition(*tma_load_a_, ...);
+  auto [tBgB_nkl, tBsB] = tma_partition(*tma_load_b_, ...);
+  return LoadParams{tAgA_mkl, tBgB_nkl, tAsA, tBsB, mcast_masks...};
+
+  2. load() (producer mainloop) — lines 586-626:
+  // unpack the partitioned tensors
+  auto [tAgA_mkl, tBgB_nkl, tAsA, tBsB, ...] = load_inputs;
+
+  // slice to this CTA's M/N coord
+  Tensor tAgA = tAgA_mkl(_, m_coord, _, l_coord);
+  Tensor tBgB = tBgB_nkl(_, n_coord, _, l_coord);
+
+  auto barrier_token = pipeline.producer_try_acquire(state);  // <-- your check_barrier
+
+  while (k_tile_count > 0) {
+      pipeline.producer_acquire(state, barrier_token);         // <-- your get_tiles wait
+
+      BarrierType* tma_barrier = pipeline.producer_get_barrier(state);  // get full_barrier[i]
+      int write_stage = state.index();
+      ++state;
+      barrier_token = pipeline.producer_try_acquire(state);    // prefetch next barrier
+
+      if (elect_one_sync()) {                                  // only leader
+          copy(tma_a->with(*tma_barrier, mcast_mask_a), tAgA(_, k_tile), tAsA(_, write_stage));
+          copy(tma_b->with(*tma_barrier, mcast_mask_b), tBgB(_, k_tile), tBsB(_, write_stage));
+      }
+      --k_tile_count;
+      ++k_tile_iter;
+  }
+     * 
+     */
 
     PipelineType pipeline(
         shared_storage.full_barrier, 

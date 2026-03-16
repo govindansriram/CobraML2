@@ -12,8 +12,6 @@ template<
     typename AType,
     typename BType,
     typename CType,
-    typename LoadPipelineType,
-    typename MMAPipelineType,
     size_t MMA_M,
     size_t MMA_N,
     size_t pipeline_stages
@@ -74,6 +72,9 @@ struct GemmConfigTmaUmma {
 
     static constexpr auto cluster_shape{make_shape(Int<1>{}, Int<1>{}, Int<1>{})};
     static constexpr Layout cluster_layout_vmnk{tiled_divide(make_layout(cluster_shape), make_tile(typename decltype(tiled_mma)::AtomThrID{}))};
+
+    using ProducerViewType = pipelines::sm100::TMAProducerView<decltype(a_smem_layout), decltype(b_smem_layout), AType, BType, pipeline_stages>;
+    using ConsumerViewType = pipelines::sm100::UMMAConsumerView<decltype(a_smem_layout), decltype(b_smem_layout), AType, BType, pipeline_stages>;
 };
 }
 

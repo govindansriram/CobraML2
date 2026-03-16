@@ -31,7 +31,7 @@ struct ThreadRoleManager{
     }
 };
 
-template<typename ConfigType>
+template<typename AType, typename BType, typename ConfigType>
 struct SharedStorage {
     using ProducerBarrierType = cutlass::arch::ClusterTransactionBarrier;
     using ConsumerBarrierType = cutlass::arch::ClusterBarrier;
@@ -45,16 +45,16 @@ struct SharedStorage {
 };
 
 template<
-    typename TmaDescriptorAType,
-    typename TmaDescriptorBType,
+    typename CopyAtomAType,
+    typename CopyAtomBType,
     typename TensorAType,
     typename TensorBType,
     typename TensorCType,
     typename ConfigType
 >
 __global__ void gemm_kernel(
-    __grid_constant__ TmaDescriptorAType const tma_a,
-    __grid_constant__ TmaDescriptorBType const tma_b,
+    __grid_constant__ CopyAtomAType const tma_a,
+    __grid_constant__ CopyAtomBType const tma_b,
     TensorAType a,
     TensorBType b,
     TensorCType c,
@@ -64,23 +64,28 @@ __global__ void gemm_kernel(
     using AType = typename TensorAType::value_type;
     using BType = typename TensorBType::value_type;
     using CType = typename TensorCType::value_type;
-    using GemmType = GEMM<AType, BType, CType>;
-    using SharedStorageType = typename GemmType::template SharedStorage<ConfigType>;
-    using PipelineType = typename GemmType::template Pipeline<ConfigType>;
+
+    using SharedStorageType = SharedStorage<AType, BType, ConfigType>;
+
+    using ProducerViewType = typename ConfigType::ProducerViewType;
+    using ConsumerViewType = typename ConfigType::ConsumerViewType;
 
     using ThreadRoleType = typename ThreadRoleManager::ThreadRole;
+
+    using PipelineType = cobraml::pipelines::TwoWayPipeline<ProducerViewType, ConsumerViewType, ThreadRoleType>;
 
     extern __shared__ char shared_memory[];
     ThreadRoleType thread_role{ThreadRoleManager::assign_role(threadIdx.x)};
 
     SharedStorageType& shared_storage{*reinterpret_cast<SharedStorageType *>(shared_memory)};
-    ThreadRoleEnum role{GemmType::get_thread_role()};
-    PipelineType pipeline(shared_storage, role);
 
-    if (role == ThreadRoleEnum::Producer) {
-        auto starting_state{pipeline.init_producer_state()};
-        auto producer_view{pipeline.producer_view()};
-    }
+    PipelineType pipeline(
+        shared_storage.full_barrier, 
+        shared_storage.empty_barrier,
+        ThreadRoleType::Producer,
+        ThreadRoleType::Consumer,  
+        thread_role
+    );
 }
 
 struct GEMM {
@@ -89,13 +94,9 @@ struct GEMM {
         typename AType,
         typename BType,
         typename CType,
-        typename CopyPipeline,
-        typename MMAPipeline,
-        size_t MMA_M,
-        size_t MMA_N,
+        typename ConfigType,
         size_t static_N,
-        size_t static_K,
-        size_t pipeline_stages
+        size_t static_K
     >
     void operator()(
         const AType * __restrict__ a,
@@ -103,67 +104,62 @@ struct GEMM {
         CType *__restrict__ c,
         size_t M,
         const GEMMShapeManager<AType, BType, CType, static_N, static_K> &shape_manager,
-        const configs::sm100::GemmConfigTmaUmma<AType, BType, CType, CopyPipeline, MMAPipeline, MMA_M, MMA_N, pipeline_stages> &config
+        const ConfigType &config
     ) {
+
+        using ProducerViewType = typename ConfigType::ProducerViewType;
+        using LoadTypeA = typename ProducerViewType::LoadTypeA;
+        using LoadTypeB = typename ProducerViewType::LoadTypeB;
 
         auto [tensor_a, tensor_b, tensor_c] = shape_manager.init_tensors(a, b, c);
 
-        auto tma_descriptor_a{make_tma_atom_A_sm100<AType>(
-            typename ConfigType::CopyAtomA{},
+        auto copy_atom_a{LoadTypeA::create_copy_atom(
             tensor_a,
-            ConfigType::a_smem_layout(_,_,_,cute::Int<0>{}),
-            ConfigType::mma_tiler,
-            ConfigType::tiled_mma,
-            ConfigType::cluster_layout_vmnk)};
+            config.a_smem_layout(_,_,_,cute::Int<0>{}),
+            config.mma_tiler,
+            config.tiled_mma,
+            config.cluster_layout_vmnk
+        )};
 
-        auto tma_descriptor_b{make_tma_atom_B_sm100<BType>(
-            typename ConfigType::CopyAtomB{},
+        auto copy_atom_b{LoadTypeB::create_copy_atom(
             tensor_b,
-            ConfigType::b_smem_layout(_,_,_,cute::Int<0>{}),
-            ConfigType::mma_tiler,
-            ConfigType::tiled_mma,
-            ConfigType::cluster_layout_vmnk)};
+            config.b_smem_layout(_,_,_,cute::Int<0>{}),
+            config.mma_tiler,
+            config.tiled_mma,
+            config.cluster_layout_vmnk
+        )};
 
-        constexpr size_t scheduler_warp{0};
-        constexpr size_t epilogue_warp{0};
-        constexpr size_t load_warp{1};
-        constexpr size_t mma_warp{1};
-
-        constexpr size_t total_warps{
-            scheduler_warp + epilogue_warp + load_warp + mma_warp
-        };
-
-        constexpr dim3 block_dim{total_warps * 32, 1, 1};
+        constexpr dim3 block_dim{ThreadRoleManager::total_warps * 32, 1, 1};
         const dim3 grid_dim{
-            static_cast<uint32_t>(ceil_div(M, ConfigType::bM) * get<0>(ConfigType::cluster_shape)),
-            static_cast<uint32_t>(ceil_div(ConfigType::static_N, ConfigType::bN) * get<1>(ConfigType::cluster_shape))
+            static_cast<uint32_t>(ceil_div(M, config.bM) * get<0>(config.cluster_shape)),
+            static_cast<uint32_t>(ceil_div(static_N, config.bN) * get<1>(config.cluster_shape))
         };
 
         const dim3 cluster_dim{
-            get<0>(ConfigType::cluster_shape),
-            get<1>(ConfigType::cluster_shape),
-            get<2>(ConfigType::cluster_shape)
+            get<0>(config.cluster_shape),
+            get<1>(config.cluster_shape),
+            get<2>(config.cluster_shape)
         };
 
-        using SharedStorageType = SharedStorage<ConfigType>;
+        using SharedStorageType = SharedStorage<AType, BType, ConfigType>;
         constexpr size_t smem_size{sizeof(SharedStorageType)};
 
-        void const* kernel = (void const*) gemm_device<
-            decltype(tma_descriptor_a),
-            decltype(tma_descriptor_b),
+        void const* kernel = (void const*) gemm_kernel<
+            decltype(copy_atom_a),
+            decltype(copy_atom_b),
             decltype(tensor_a),
             decltype(tensor_b),
             decltype(tensor_c),
             ConfigType>;
 
         void* kernel_params[] = {
-            &tma_descriptor_a,
-            &tma_descriptor_b,
+            &copy_atom_a,
+            &copy_atom_b,
             &tensor_a,
             &tensor_b,
             &tensor_c,
             &M,
-            &config
+            const_cast<ConfigType*>(&config)
         };
 
         cudaStream_t stream = nullptr;

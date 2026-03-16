@@ -27,31 +27,29 @@ struct TMALoad{
         const TiledMMAType tiled_mma,
         const ClusterLayoutType cluster_layout
     ){
-        return {
-            if constexpr(is_A){
-                return make_tma_atom_A_sm100<DType>(
-                    CopyAtom{},
-                    gmem_tensor,
-                    a_smem_layout,
-                    mma_tiler,
-                    tiled_mma,
-                    cluster_layout
-                )
-            }else{
-                return make_tma_atom_B_sm100<DType>(
-                    CopyAtom{},
-                    gmem_tensor,
-                    a_smem_layout,
-                    mma_tiler,
-                    tiled_mma,
-                    cluster_layout
-                )
-            }
-        };
+        if constexpr(is_A){
+            return make_tma_atom_A_sm100<DType>(
+                CopyAtom{},
+                gmem_tensor,
+                a_smem_layout,
+                mma_tiler,
+                tiled_mma,
+                cluster_layout
+            );
+        }else{
+            return make_tma_atom_B_sm100<DType>(
+                CopyAtom{},
+                gmem_tensor,
+                a_smem_layout,
+                mma_tiler,
+                tiled_mma,
+                cluster_layout
+            );
+        }
     }
 
     template<typename TmaAtomType>
-    COBRA_S_DEVICE post_init(TmaATomType &atom){
+    COBRA_S_DEVICE void post_init(TmaAtomType &atom){
         cute::prefetch_tma_descriptor(atom.get_tma_descriptor());
     }
 };

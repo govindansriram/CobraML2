@@ -7,7 +7,7 @@
 #include "./load.cuh"
 
 
-namespace cobraml::structures{
+namespace cobraml::pipelines{
 using namespace cute;
 
 template<typename V>
@@ -290,8 +290,8 @@ struct TwoWayPipeline {
     COBRA_DEVICE TwoWayPipeline(
         ProducerBarrierArrayType &producer_barrier,
         ConsumerBarrierArrayType &consumer_barrier,
-        const ThreadRoleType& producer_role,
-        const ThreadRoleType& consumer_role,
+        const ThreadRoleType producer_role,
+        const ThreadRoleType consumer_role,
         const ThreadRoleType& role
     ): 
             producer_barrier(producer_barrier), consumer_barrier(consumer_barrier),

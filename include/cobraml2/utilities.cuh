@@ -55,7 +55,7 @@ namespace cobraml {
             const AType * __restrict__ a,
             const BType *__restrict__ b,
             CType *__restrict__ c
-        ){
+        ) const {
 
             auto layout_a{
                 make_layout(make_shape(M, KType{}), LayoutRight{})

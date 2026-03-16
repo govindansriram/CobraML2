@@ -12,8 +12,8 @@ void test_gemm(int M) {
   using BType = cutlass::bfloat16_t;
   using CType = float;
 
-  using GemmType = kernels::SM100::GEMM<AType, BType, CType>;
-  GemmType::Config<N, K, MMA_M, MMA_N, pipeline_stages> config;
+  configs::sm100::GemmConfigTmaUmma<AType, BType, CType, MMA_M, MMA_N, pipeline_stages> config;
+  GEMMShapeManager<AType, BType, CType, N, K> shape_manager(M);
 
   // Allocate device memory
   AType * d_a;
@@ -32,8 +32,8 @@ void test_gemm(int M) {
   cudaMemset(d_b, 0, b_bytes);
   cudaMemset(d_c, 0, c_bytes);
 
-  GemmType gemm;
-  gemm(d_a, d_b, d_c, M, config);
+  kernels::sm100::GEMM gemm;
+  gemm(d_a, d_b, d_c, M, shape_manager, config);
 
   cudaFree(d_a);
   cudaFree(d_b);

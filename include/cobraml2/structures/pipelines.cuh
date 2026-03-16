@@ -4,6 +4,7 @@
 #include <cute/tensor.hpp>
 #include <cutlass/arch/barrier.h>
 #include "../macros.cuh"
+#include "./load.cuh"
 
 
 namespace cobraml::structures{
@@ -54,6 +55,7 @@ enum class ThreadRole {
     MMA
 };
 
+namespace sm100{
 template<
     typename TileLayoutTypeA,
     typename TileLayoutTypeB,
@@ -62,6 +64,9 @@ template<
     size_t pipeline_stages
 >
 struct TMAProducerView {
+
+    using LoadTypeA = loadop::sm100::TMALoad<AType, true>;
+    using LoadTypeB = loadop::sm100::TMALoad<BType, false>;
 
     using ProducerBarrierType = cutlass::arch::ClusterTransactionBarrier;
     using ConsumerBarrierType = cutlass::arch::ClusterBarrier;
@@ -223,7 +228,7 @@ struct UMMAConsumerView {
         return State{0, 0};
     }
 };
-
+}
 
 
 /**

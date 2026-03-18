@@ -35,9 +35,7 @@ class MultiHeadAttention:
         if causal:
             q_positions = torch.arange(N_q, device=q.device, dtype=torch.int64)
             kv_positions = torch.arange(N_kv, device=q.device, dtype=torch.int64)
-            mask = kv_positions.view(1, N_kv) > (
-                start_pos + q_positions.view(N_q, 1)
-            )
+            mask = kv_positions.view(1, N_kv) > (start_pos + q_positions.view(N_q, 1))
             attn = attn.masked_fill(mask, float("-inf"))
 
         attn = torch.softmax(attn, dim=-1)

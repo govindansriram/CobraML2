@@ -62,8 +62,7 @@ struct FMHADispatcher {
   FMHADispatcher() { init_impl(std::make_index_sequence<num_configs>{}); }
 
   void dispatch(float *Q, float *K, float *V, float *O, bool causal, uint32_t B,
-                uint32_t N_q, uint32_t N_kv, uint32_t start_pos, int H,
-                int d) {
+                uint32_t N_q, uint32_t N_kv, uint32_t start_pos, int H, int d) {
     for (auto &entry : table) {
       if (entry.heads == H && entry.head_dim == d && entry.causal == causal) {
         entry.fn(Q, K, V, O, B, N_q, N_kv, start_pos);
@@ -114,11 +113,11 @@ torch::Tensor fmha_forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V,
 
   torch::Tensor O{torch::empty_like(Q)};
 
-  const int64_t B{Q.size(0)}; // batch
-  const int64_t N_q{Q.size(1)}; // query sequence length
+  const int64_t B{Q.size(0)};    // batch
+  const int64_t N_q{Q.size(1)};  // query sequence length
   const int64_t N_kv{K.size(1)}; // key/value sequence length
-  const int64_t H{Q.size(2)}; // heads
-  const int64_t d{Q.size(3)}; // head dim
+  const int64_t H{Q.size(2)};    // heads
+  const int64_t d{Q.size(3)};    // head dim
 
   if (Q_dtype == torch::kFloat32) {
     fmha_forward_fp32(Q, K, V, O, causal, start_pos, B, N_q, N_kv, H, d);
@@ -131,7 +130,8 @@ torch::Tensor fmha_forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V,
 }
 
 TORCH_LIBRARY(cobraml, m) {
-  m.def("fmha(Tensor Q, Tensor K, Tensor V, bool causal, int start_pos=0) -> Tensor");
+  m.def("fmha(Tensor Q, Tensor K, Tensor V, bool causal, int start_pos=0) -> "
+        "Tensor");
 }
 
 TORCH_LIBRARY_IMPL(cobraml, CUDA, m) { m.impl("fmha", &fmha_forward); }

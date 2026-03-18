@@ -31,14 +31,14 @@ namespace naive {
  */
 template <typename MHAType, typename TiledCopyTypeQK, typename TiledCopyTypeV,
           typename TiledMMAType>
-__global__ void
-mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
-           const typename MHAType::TensorDType *__restrict__ K,
-           const typename MHAType::TensorDType *__restrict__ V,
-           typename MHAType::TensorDType *__restrict__ O,
-           const int N_q, const int N_kv, const int start_pos,
-           const typename MHAType::TensorDType scale, TiledCopyTypeQK tc_qk,
-           TiledCopyTypeV tc_v, TiledMMAType t_mma) {
+__global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
+                           const typename MHAType::TensorDType *__restrict__ K,
+                           const typename MHAType::TensorDType *__restrict__ V,
+                           typename MHAType::TensorDType *__restrict__ O,
+                           const int N_q, const int N_kv, const int start_pos,
+                           const typename MHAType::TensorDType scale,
+                           TiledCopyTypeQK tc_qk, TiledCopyTypeV tc_v,
+                           TiledMMAType t_mma) {
 
   using DType = typename MHAType::TensorDType;
   size_t batch_size{gridDim.y};
@@ -54,20 +54,20 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
       reinterpret_cast<SharedStorageType *>(shared_memory)};
 
   auto shared_q{make_tensor(make_smem_ptr(shared_storage->Q.begin()),
-                              typename SharedStorageType::QLayoutType{})};
+                            typename SharedStorageType::QLayoutType{})};
 
   auto shared_k{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
-                              typename SharedStorageType::KLayoutType{})};
+                            typename SharedStorageType::KLayoutType{})};
 
   auto shared_v{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
-                              typename SharedStorageType::VLayoutType{})};
+                            typename SharedStorageType::VLayoutType{})};
 
   auto trans_shared_v{
       make_tensor(make_smem_ptr(shared_storage->KV.begin()),
                   typename SharedStorageType::VTransposedLayoutType{})};
 
   auto shared_p{make_tensor(make_smem_ptr(shared_storage->P.begin()),
-                              typename SharedStorageType::PLayoutType{})};
+                            typename SharedStorageType::PLayoutType{})};
 
   // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
 
@@ -82,14 +82,12 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   auto kv_tiler{make_shape(B_c, d)};
   auto scores_tiler{make_shape(B_r, B_c)};
 
-  auto q_iterator{
-      local_tile(q_head, q_tiler, q_coord)}; // (B_r, d)
+  auto q_iterator{local_tile(q_head, q_tiler, q_coord)}; // (B_r, d)
   auto k_iterator{
       local_tile(k_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
   auto v_iterator{
       local_tile(v_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
-  auto o_iterator{
-      local_tile(o_head, q_tiler, q_coord)}; // (B_r, d)
+  auto o_iterator{local_tile(o_head, q_tiler, q_coord)}; // (B_r, d)
 
   auto iters{size<2>(k_iterator)}; // N_kv
 
@@ -124,13 +122,12 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   auto kv_head_idty{MHAType::identity_slice_head(batch_size, N_kv)};
 
   // make q identity tensor
-  auto q_iterator_idty{
-      local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
+  auto q_iterator_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
   auto tQ_idty_part{thr_copy_qk.partition_S(q_iterator_idty)};
 
   // make k identity tensor
-  auto kv_iterator_idty{
-      local_tile(kv_head_idty, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
+  auto kv_iterator_idty{local_tile(kv_head_idty, kv_tiler,
+                                   kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
   auto k_idty_part{thr_copy_qk.partition_S(kv_iterator_idty)};
 
   // make v identity tensor
@@ -144,8 +141,7 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   auto scores_slice_idty{thr_mma_qk.partition_C(scores_tile_idty)};
 
   // out identity tensor
-  auto o_iterator_idty{
-      local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
+  auto o_iterator_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
   auto o_mma_idty{thr_mma_qk.partition_C(o_iterator_idty)};
 
   // predicated copy
@@ -648,8 +644,8 @@ struct FMHA {
     cudaFuncSetAttribute(kernel_fptr,
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(Q, K, V, O, N_q, N_kv, start_pos, scale, tc_qk,
-                                                    tc_v, tmma);
+    kernel_fptr<<<grid_dim, block_dim, smem_size>>>(
+        Q, K, V, O, N_q, N_kv, start_pos, scale, tc_qk, tc_v, tmma);
   }
 };
 

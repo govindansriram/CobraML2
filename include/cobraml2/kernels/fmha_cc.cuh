@@ -43,30 +43,30 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   using DType = typename MHAType::TensorDType;
   size_t batch_size{gridDim.y};
 
-  const Tensor q_head{MHAType::slice_head(Q, batch_size, N_q)};
-  const Tensor k_head{MHAType::slice_head(K, batch_size, N_kv)};
-  const Tensor v_head{MHAType::slice_head(V, batch_size, N_kv)};
-  Tensor o_head{MHAType::slice_head<true>(O, batch_size, N_q)};
+  auto q_head{MHAType::slice_head(Q, batch_size, N_q)};
+  const auto k_head{MHAType::slice_head(K, batch_size, N_kv)};
+  const auto v_head{MHAType::slice_head(V, batch_size, N_kv)};
+  auto o_head{MHAType::slice_head<true>(O, batch_size, N_q)};
 
   extern __shared__ char shared_memory[];
   using SharedStorageType = typename MHAType::SharedStorage;
   SharedStorageType *shared_storage{
       reinterpret_cast<SharedStorageType *>(shared_memory)};
 
-  Tensor shared_q{make_tensor(make_smem_ptr(shared_storage->Q.begin()),
+  auto shared_q{make_tensor(make_smem_ptr(shared_storage->Q.begin()),
                               typename SharedStorageType::QLayoutType{})};
 
-  Tensor shared_k{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
+  auto shared_k{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
                               typename SharedStorageType::KLayoutType{})};
 
-  Tensor shared_v{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
+  auto shared_v{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
                               typename SharedStorageType::VLayoutType{})};
 
-  Tensor trans_shared_v{
+  auto trans_shared_v{
       make_tensor(make_smem_ptr(shared_storage->KV.begin()),
                   typename SharedStorageType::VTransposedLayoutType{})};
 
-  Tensor shared_p{make_tensor(make_smem_ptr(shared_storage->P.begin()),
+  auto shared_p{make_tensor(make_smem_ptr(shared_storage->P.begin()),
                               typename SharedStorageType::PLayoutType{})};
 
   // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
@@ -75,79 +75,78 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   constexpr typename MHAType::QueryRowsType B_r{};
   constexpr typename MHAType::KVColsType B_c{};
 
-  auto coord{make_coord(_, 0)};
+  auto q_coord{make_coord(blockIdx.z, 0)};
+  auto kv_coord{make_coord(_, 0)};
 
-  auto q_tiler{make_shape(B_r, d, ceil(N_q / B_r))};
-  auto kv_tiler{make_shape(B_c, d, ceil(N_kv / B_c))};
+  auto q_tiler{make_shape(B_r, d)};
+  auto kv_tiler{make_shape(B_c, d)};
   auto scores_tiler{make_shape(B_r, B_c)};
 
-  Tensor q_iterator{
-      local_tile(q_head, q_tiler, coord)}; // (B_r, d, ceil(N_q / B_r))
-  Tensor k_iterator{
-      local_tile(k_head, kv_tiler, coord)}; // (B_c, d, ceil(N_kv / B_c))
-  Tensor v_iterator{
-      local_tile(v_head, kv_tiler, coord)}; // (B_c, d, ceil(N_kv / B_c))
-  Tensor o_iterator{
-      local_tile(o_head, q_tiler, coord)}; // (B_c, d, ceil(N_q / B_r))
+  auto q_iterator{
+      local_tile(q_head, q_tiler, q_coord)}; // (B_r, d)
+  auto k_iterator{
+      local_tile(k_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
+  auto v_iterator{
+      local_tile(v_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
+  auto o_iterator{
+      local_tile(o_head, q_tiler, q_coord)}; // (B_r, d)
 
   auto iters{size<2>(k_iterator)}; // N_kv
 
-  Tensor q_slice{q_iterator(_, _, blockIdx.z)};
-  Tensor out_slice{o_iterator(_, _, blockIdx.z)};
+  auto q_slice{q_iterator};
+  auto out_slice{o_iterator};
 
   // t prefix means unique to this thread
   ThrCopy thr_copy_qk{tc_qk.get_slice(threadIdx.x)};
   ThrCopy thr_copy_v{tc_v.get_slice(threadIdx.x)};
 
-  const Tensor tQ_global_part{thr_copy_qk.partition_S(q_slice)};
-  Tensor tQ_shared_part{thr_copy_qk.partition_D(shared_q)};
+  const auto tQ_global_part{thr_copy_qk.partition_S(q_slice)};
+  auto tQ_shared_part{thr_copy_qk.partition_D(shared_q)};
 
-  const Tensor tK_global_part_iter{thr_copy_qk.partition_S(k_iterator)};
-  Tensor tK_shared_part{thr_copy_qk.partition_D(shared_k)};
+  const auto tK_global_part_iter{thr_copy_qk.partition_S(k_iterator)};
+  auto tK_shared_part{thr_copy_qk.partition_D(shared_k)};
 
-  const Tensor tV_global_part_iter{thr_copy_v.partition_S(v_iterator)};
-  Tensor tV_shared_part{thr_copy_v.partition_D(shared_v)};
+  const auto tV_global_part_iter{thr_copy_v.partition_S(v_iterator)};
+  auto tV_shared_part{thr_copy_v.partition_D(shared_v)};
 
   ThrMMA thr_mma_qk{t_mma.get_slice(threadIdx.x)};
 
-  Tensor q_mma{thr_mma_qk.partition_A(shared_q)};
-  Tensor k_mma{thr_mma_qk.partition_B(shared_k)};
-  Tensor p_mma{thr_mma_qk.partition_C(shared_p)};
+  auto q_mma{thr_mma_qk.partition_A(shared_q)};
+  auto k_mma{thr_mma_qk.partition_B(shared_k)};
+  auto p_mma{thr_mma_qk.partition_C(shared_p)};
 
-  Tensor p_mma2{thr_mma_qk.partition_A(shared_p)};
-  Tensor v_mma{thr_mma_qk.partition_B(trans_shared_v)};
-  Tensor g_out_mma{thr_mma_qk.partition_C(out_slice)};
-  Tensor r_out_mma{thr_mma_qk.make_fragment_C(g_out_mma)};
+  auto p_mma2{thr_mma_qk.partition_A(shared_p)};
+  auto v_mma{thr_mma_qk.partition_B(trans_shared_v)};
+  auto g_out_mma{thr_mma_qk.partition_C(out_slice)};
+  auto r_out_mma{thr_mma_qk.make_fragment_C(g_out_mma)};
 
-  Tensor q_head_idty{MHAType::identity_slice_head(batch_size, N_q)};
-  Tensor kv_head_idty{MHAType::identity_slice_head(batch_size, N_kv)};
+  auto q_head_idty{MHAType::identity_slice_head(batch_size, N_q)};
+  auto kv_head_idty{MHAType::identity_slice_head(batch_size, N_kv)};
 
   // make q identity tensor
-  Tensor q_iterator_idty{
-      local_tile(q_head_idty, q_tiler, coord)}; // (B_r, d, ceil(N_q / B_r))
-  Tensor q_head_slice_idty{q_iterator_idty(_, _, blockIdx.z)};
-  Tensor tQ_idty_part{thr_copy_qk.partition_S(q_head_slice_idty)};
+  auto q_iterator_idty{
+      local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
+  auto tQ_idty_part{thr_copy_qk.partition_S(q_iterator_idty)};
 
   // make k identity tensor
-  Tensor kv_iterator_idty{
-      local_tile(kv_head_idty, kv_tiler, coord)}; // (B_c, d, ceil(N_kv / B_c))
-  Tensor k_idty_part{thr_copy_qk.partition_S(kv_iterator_idty)};
+  auto kv_iterator_idty{
+      local_tile(kv_head_idty, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
+  auto k_idty_part{thr_copy_qk.partition_S(kv_iterator_idty)};
 
   // make v identity tensor
-  Tensor v_idty_part{thr_copy_v.partition_S(kv_iterator_idty)};
+  auto v_idty_part{thr_copy_v.partition_S(kv_iterator_idty)};
 
   // scores identity tensor
-  Tensor scores_idty{make_identity_tensor(make_shape(N_q, N_kv))};
-  Tensor scores_tile_idty{
+  auto scores_idty{make_identity_tensor(make_shape(N_q, N_kv))};
+  auto scores_tile_idty{
       local_tile(scores_idty, scores_tiler,
                  make_coord(blockIdx.z, _))}; // (B_r, B_c, ceil(N / B_c))
-  Tensor scores_slice_idty{thr_mma_qk.partition_C(scores_tile_idty)};
+  auto scores_slice_idty{thr_mma_qk.partition_C(scores_tile_idty)};
 
   // out identity tensor
-  Tensor o_iterator_idty{
-      local_tile(q_head_idty, q_tiler, coord)}; // (B_r, d, ceil(N_q / B_r))
-  Tensor o_head_slice_idty{o_iterator_idty(_, _, blockIdx.z)};
-  Tensor o_mma_idty{thr_mma_qk.partition_C(o_head_slice_idty)};
+  auto o_iterator_idty{
+      local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
+  auto o_mma_idty{thr_mma_qk.partition_C(o_iterator_idty)};
 
   // predicated copy
   MHAType::predicate_copy_tensor(tQ_idty_part, tQ_global_part, tQ_shared_part,
@@ -155,12 +154,12 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   auto mma_m{select<1>(q_mma.shape())};
 
-  Tensor r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
+  auto r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
   clear(r_scores_mma); // Zero the accumulator
 
   // start with the lowest possible value
-  Tensor m{make_tensor<DType>(mma_m)};
-  Tensor l{make_tensor<DType>(mma_m)};
+  auto m{make_tensor<DType>(mma_m)};
+  auto l{make_tensor<DType>(mma_m)};
   fill(m, -INFINITY);
   clear(l); // zero the sums
 
@@ -196,10 +195,10 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
                     N_kv);
   }
 
-  constexpr Layout mma_shape{get<0>(r_out_mma.layout())};
-  constexpr size_t m_rows{size(get<1>(r_out_mma.layout()))};
+  using MMAShape = decltype(get<0>(r_out_mma.layout()));
+  auto m_rows{size(get<1>(r_out_mma.layout()))};
 
-  static_assert(rank(mma_shape) == 1,
+  static_assert(rank(MMAShape{}) == 1,
                 "only rank 1 mma shape is currently supported");
 
   CUTE_UNROLL
@@ -212,7 +211,7 @@ mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
     }
   }
 
-  constexpr int write_rows{size(get<1>(g_out_mma.shape()))};
+  auto write_rows{size(get<1>(g_out_mma.shape()))};
 
   CUTE_UNROLL
   for (size_t i{0}; i < write_rows; ++i) {
@@ -319,14 +318,14 @@ struct FMHA {
         "Must point to DType");
 
     const auto projection_layout{get_tensor_layout<is_o>(batch_size, N)};
-    const Tensor projection{
+    const auto projection{
         make_tensor(make_gmem_ptr<DType>(g_ptr), projection_layout)};
     return projection(blockIdx.y, _, blockIdx.x, _);
   }
 
   COBRA_S_DEVICE auto identity_slice_head(int batch_size, int N) {
     const auto projection_layout{get_tensor_layout(batch_size, N)};
-    const Tensor projection{make_identity_tensor(projection_layout.shape())};
+    const auto projection{make_identity_tensor(projection_layout.shape())};
     return projection(blockIdx.y, _, blockIdx.x, _);
   }
 
@@ -369,7 +368,7 @@ struct FMHA {
 
     // one warp computes one row
 
-    TiledMMA t_mma = make_tiled_mma(
+    auto t_mma = make_tiled_mma(
         UniversalFMA<DType, DType, DType>{},
         Layout<Shape<RowType, _32>, Stride<_32, _1>>{}); // 16x16x1 UniversalFMA
 
@@ -524,8 +523,10 @@ struct FMHA {
     static_assert(rank_v<MaxTensorLayoutType> == 1,
                   "Per register, row maxes, muse be 1 dimensional");
 
+    using MMAShape = decltype(get<0>(ScoresTensorLayoutType{}));
     constexpr size_t mma_m{size(get<1>(ScoresTensorLayoutType{}))};
-    constexpr Layout mma_shape{get<0>(ScoresTensorLayoutType{})};
+
+    static_assert(rank(MMAShape{}) == 1, "not yet implemented");
 
     CUTE_UNROLL
     for (size_t m{0}; m < mma_m; ++m) {
@@ -534,9 +535,6 @@ struct FMHA {
       auto scores_idty_slice{scores_idty_tensor(_, m, _)};
       auto p_slice{(prob_tensor(_, m, _))};
       auto o_slice{(out_tensor(_, m, _))};
-
-      if constexpr (rank(mma_shape) > 1)
-        static_assert(rank(mma_shape) > 1, "not yet implemented");
 
       auto &current_max{max_tensor(m)};
       auto old_max{current_max};

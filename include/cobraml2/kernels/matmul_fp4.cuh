@@ -53,8 +53,8 @@ template<
     typename ConfigType
 >
 __global__ void gemm_kernel(
-    __grid_constant__ CopyAtomAType const tma_a,
-    __grid_constant__ CopyAtomBType const tma_b,
+    __grid_constant__ CopyAtomAType const copy_a,
+    __grid_constant__ CopyAtomBType const copy_b,
     TensorAType a,
     TensorBType b,
     TensorCType c,
@@ -77,10 +77,58 @@ __global__ void gemm_kernel(
     extern __shared__ char shared_memory[];
     ThreadRoleType thread_role{ThreadRoleManager::assign_role(threadIdx.x)};
 
-    // one thread from the producer prefetches both tmas you can do this by calling 
-    // post_init
+    using LoadTypeA = typename ProducerViewType::LoadTypeA;
+    using LoadTypeB = typename ProducerViewType::LoadTypeB;
 
     SharedStorageType& shared_storage{*reinterpret_cast<SharedStorageType *>(shared_memory)};
+
+    
+
+    // one thread from the producer prefetches both tmas if it is tma
+    if (thread_role == ThreadRoleType::Producer){
+        if (elect_one_sync()){
+            LoadTypeA::post_init(copy_a);
+            LoadTypeB::post_init(copy_b);
+        }
+    }
+
+    constexpr Layout cluster_vmnk{
+        config::cluster_layout_vmnk
+    }
+
+    auto coord_vmnk{make_coord(
+        blockIdx.x % size<0>(cluster_layout_vmnk), // Peer CTA coordinate, when 2sm this flips between 0 and 1 
+        blockIdx.x / size<0>(cluster_layout_vmnk), //    MMA-M coordinate
+        blockIdx.y,                                //    MMA-N coordinate
+        _                                          //    MMA-K coordinate
+    )};
+    
+    auto coord_slice{
+        select<1, 2, 3>(coord_vmnk)
+    };
+
+    // BM, BN, BK
+    constexpr auto mma_tiler{
+        config.mma_tiler
+    };
+
+    Tensor global_a_iter{
+        local_tile(
+            a, mma_tiler, coord_slice, Step<_1, X, _1>{} 
+        )
+    };
+
+    Tensor global_b_iter{
+        local_tile(
+            b, mma_tiler, coord_slice, Step<X, _1, _1>{} 
+        )
+    };
+
+    Tensor global_b_iter{
+        local_tile(
+            b, mma_tiler, coord_slice, Step<_1, _1, X>{} 
+        )
+    };
 
     // slice out the local tile from gmem
     // partition using the tiled_mma partition_A(gA)
@@ -181,9 +229,9 @@ struct GEMM {
         };
 
         const dim3 cluster_dim{
-            get<0>(config.cluster_shape),
             get<1>(config.cluster_shape),
-            get<2>(config.cluster_shape)
+            get<2>(config.cluster_shape),
+            get<3>(config.cluster_shape)
         };
 
         using SharedStorageType = SharedStorage<AType, BType, ConfigType>;

@@ -71,6 +71,10 @@ struct GemmConfigTmaUmma {
     constexpr static auto b_smem_layout{get_smem_layout<false>(bN, bK)};
 
     static constexpr auto cluster_shape{make_shape(Int<1>{}, Int<1>{}, Int<1>{})};
+
+    // AtomThrID, will either be 2 or 1 based on number of SM's participating in the UMMA
+    // tiled divide puts the tile dimenstion first and everything else last e.g. : Cluster (4, 4, 1)
+    // AtomThrID (2) then tiled_divde(Cluster, AtomThrID) ((2), 2, 4, 1)
     static constexpr Layout cluster_layout_vmnk{tiled_divide(make_layout(cluster_shape), make_tile(typename decltype(tiled_mma)::AtomThrID{}))};
 
     using ProducerViewType = pipelines::sm100::TMAProducerView<decltype(a_smem_layout), decltype(b_smem_layout), AType, BType, pipeline_stages>;

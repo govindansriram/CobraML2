@@ -53,21 +53,21 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   SharedStorageType *shared_storage{
       reinterpret_cast<SharedStorageType *>(shared_memory)};
 
-  auto shared_q{make_tensor(make_smem_ptr(shared_storage->Q.begin()),
-                            typename SharedStorageType::QLayoutType{})};
+  Tensor shared_q{make_tensor(make_smem_ptr(shared_storage->Q.begin()),
+                              typename SharedStorageType::QLayoutType{})};
 
-  auto shared_k{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
-                            typename SharedStorageType::KLayoutType{})};
+  Tensor shared_k{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
+                              typename SharedStorageType::KLayoutType{})};
 
-  auto shared_v{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
-                            typename SharedStorageType::VLayoutType{})};
+  Tensor shared_v{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
+                              typename SharedStorageType::VLayoutType{})};
 
-  auto trans_shared_v{
+  Tensor trans_shared_v{
       make_tensor(make_smem_ptr(shared_storage->KV.begin()),
                   typename SharedStorageType::VTransposedLayoutType{})};
 
-  auto shared_p{make_tensor(make_smem_ptr(shared_storage->P.begin()),
-                            typename SharedStorageType::PLayoutType{})};
+  Tensor shared_p{make_tensor(make_smem_ptr(shared_storage->P.begin()),
+                              typename SharedStorageType::PLayoutType{})};
 
   // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
 
@@ -98,32 +98,32 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   ThrCopy thr_copy_qk{tc_qk.get_slice(threadIdx.x)};
   ThrCopy thr_copy_v{tc_v.get_slice(threadIdx.x)};
 
-  const auto tQ_global_part{thr_copy_qk.partition_S(q_slice)};
-  auto tQ_shared_part{thr_copy_qk.partition_D(shared_q)};
+  const Tensor tQ_global_part{thr_copy_qk.partition_S(q_slice)};
+  Tensor tQ_shared_part{thr_copy_qk.partition_D(shared_q)};
 
-  const auto tK_global_part_iter{thr_copy_qk.partition_S(k_iterator)};
-  auto tK_shared_part{thr_copy_qk.partition_D(shared_k)};
+  const Tensor tK_global_part_iter{thr_copy_qk.partition_S(k_iterator)};
+  Tensor tK_shared_part{thr_copy_qk.partition_D(shared_k)};
 
-  const auto tV_global_part_iter{thr_copy_v.partition_S(v_iterator)};
-  auto tV_shared_part{thr_copy_v.partition_D(shared_v)};
+  const Tensor tV_global_part_iter{thr_copy_v.partition_S(v_iterator)};
+  Tensor tV_shared_part{thr_copy_v.partition_D(shared_v)};
 
   ThrMMA thr_mma_qk{t_mma.get_slice(threadIdx.x)};
 
-  auto q_mma{thr_mma_qk.partition_A(shared_q)};
-  auto k_mma{thr_mma_qk.partition_B(shared_k)};
-  auto p_mma{thr_mma_qk.partition_C(shared_p)};
+  Tensor q_mma{thr_mma_qk.partition_A(shared_q)};
+  Tensor k_mma{thr_mma_qk.partition_B(shared_k)};
+  Tensor p_mma{thr_mma_qk.partition_C(shared_p)};
 
-  auto p_mma2{thr_mma_qk.partition_A(shared_p)};
-  auto v_mma{thr_mma_qk.partition_B(trans_shared_v)};
-  auto g_out_mma{thr_mma_qk.partition_C(out_slice)};
-  auto r_out_mma{thr_mma_qk.make_fragment_C(g_out_mma)};
+  Tensor p_mma2{thr_mma_qk.partition_A(shared_p)};
+  Tensor v_mma{thr_mma_qk.partition_B(trans_shared_v)};
+  Tensor g_out_mma{thr_mma_qk.partition_C(out_slice)};
+  Tensor r_out_mma{thr_mma_qk.make_fragment_C(g_out_mma)};
 
   auto q_head_idty{MHAType::identity_slice_head(batch_size, N_q)};
   auto kv_head_idty{MHAType::identity_slice_head(batch_size, N_kv)};
 
   // make q identity tensor
-  auto q_iterator_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
-  auto tQ_idty_part{thr_copy_qk.partition_S(q_iterator_idty)};
+  auto q_head_slice_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
+  auto tQ_idty_part{thr_copy_qk.partition_S(q_head_slice_idty)};
 
   // make k identity tensor
   auto kv_iterator_idty{local_tile(kv_head_idty, kv_tiler,
@@ -191,10 +191,10 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
                     N_kv);
   }
 
-  using MMAShape = decltype(get<0>(r_out_mma.layout()));
+  auto mma_shape{get<0>(r_out_mma.layout())};
   auto m_rows{size(get<1>(r_out_mma.layout()))};
 
-  static_assert(rank(MMAShape{}) == 1,
+  static_assert(rank(mma_shape) == 1,
                 "only rank 1 mma shape is currently supported");
 
   CUTE_UNROLL
@@ -207,7 +207,7 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
     }
   }
 
-  auto write_rows{size(get<1>(g_out_mma.shape()))};
+  constexpr int write_rows{size(get<1>(g_out_mma.shape()))};
 
   CUTE_UNROLL
   for (size_t i{0}; i < write_rows; ++i) {

@@ -4,6 +4,7 @@
 #include <cute/tensor.hpp>
 #include <cutlass/arch/barrier.h>
 #include "../macros.cuh"
+#include "../utilities.cuh"
 #include "./load.cuh"
 
 
@@ -14,14 +15,10 @@ template<typename V>
 concept PipelineViewType = requires {
     typename V::ProducerBarrierArrayType;
     typename V::ConsumerBarrierArrayType;
-    typename V::TileTensorTypeA;
-    typename V::TileTensorTypeB;
-    { V::arrival_count } -> std::convertible_to<size_t>;
+    { V::static_arrival_count } -> std::convertible_to<size_t>;
     { V::static_pipeline_stages } -> std::convertible_to<size_t>;
 } && std::constructible_from<
     V,
-    typename V::TileTensorTypeA&,
-    typename V::TileTensorTypeB&,
     typename V::ProducerBarrierArrayType&,
     typename V::ConsumerBarrierArrayType&
 >;
@@ -33,9 +30,11 @@ struct State {
     int index{0};
     uint32_t phase{0};
     size_t pipeline_stages{0};
+    size_t counter{0};
 
     COBRA_DEVICE State& operator++() {
         ++index;
+        ++counter;
         if (index >= pipeline_stages) {
             index = 0;
             phase ^= 1;
@@ -50,20 +49,14 @@ enum class BarrierStatus : uint32_t {
     WaitAgain = 0
 };
 
-enum class ThreadRole {
-    Load,
-    MMA
-};
-
 namespace sm100{
 template<
-    typename TileLayoutTypeA,
-    typename TileLayoutTypeB,
     typename AType,
     typename BType,
-    size_t pipeline_stages
+    size_t pipeline_stages,
+    size_t arrival_count
 >
-struct TMAProducerView {
+struct ProducerView {
 
     using LoadTypeA = loadop::sm100::TMALoad<AType, true>;
     using LoadTypeB = loadop::sm100::TMALoad<BType, false>;
@@ -77,33 +70,39 @@ struct TMAProducerView {
     ProducerBarrierArrayType &producer_barrier;
     ConsumerBarrierArrayType &consumer_barrier;
 
-    using TileTensorTypeA = Tensor<ViewEngine<smem_ptr<AType*>>, TileLayoutTypeA>;
-    using TileTensorTypeB = Tensor<ViewEngine<smem_ptr<BType*>>, TileLayoutTypeB>;
-
-    TileTensorTypeA &a_tensor;
-    TileTensorTypeB &b_Tensor;
-
     bool is_leader{false};
+    static constexpr size_t static_arrival_count{arrival_count};
+    static constexpr size_t static_pipeline_stages{pipeline_stages};
 
     private:
-    static constexpr size_t transaction_bytes{
-        (cosize_v<TileLayoutTypeA> * sizeof(AType) + cosize_v<TileLayoutTypeB> * sizeof(BType)) / pipeline_stages
+
+    template<typename SmemTensorAType, typename SmemTensorBType>
+    struct TileIterator{
+        SmemTensorAType &a_tensor;
+        SmemTensorBType &b_tensor;
+
+        COBRA_DEVICE TileIterator(SmemTensorAType &a_tensor, SmemTensorBType &b_tensor): a_tensor(a_tensor), b_tensor(b_tensor){}
+
+        COBRA_DEVICE auto next(State& state, BarrierStatus status){
+            if (status == BarrierStatus::WaitAgain)
+                consumer_barrier[state.index].wait(state.phase);
+
+            return make_tuple(
+                slice_last(a_tensor, state.index),
+                slice_last(b_tensor, state.index),
+                &producer_barrier[state.index]
+            );
+        }
     };
 
     public:
-    COBRA_DEVICE TMAProducerView(
-        TileTensorTypeA& a_smem_tensor,
-        TileTensorTypeB& b_smem_tensor,
+
+    COBRA_DEVICE ProducerView(
         ProducerBarrierArrayType& producer_barrier,
         ConsumerBarrierArrayType& consumer_barrier
-    ):
-        a_tensor(a_smem_tensor), b_Tensor(b_smem_tensor),
-        producer_barrier(producer_barrier), consumer_barrier(consumer_barrier) {
+    ): producer_barrier(producer_barrier), consumer_barrier(consumer_barrier) {
         is_leader = (cute::elect_one_sync() == 1);
     }
-
-    static constexpr size_t arrival_count{1};
-    static constexpr size_t static_pipeline_stages{pipeline_stages};
 
     /**
      * @brief preemptively checks if the barrier needs to be waited on
@@ -116,28 +115,17 @@ struct TMAProducerView {
     }
 
     /**
-     * @brief gets the shared memory tiles once they are available 
+     * @brief 
      * 
-     * @param state encapsulates the stage in the pipeline we are on
-     * @param status whether to skip the wait or not
-     * @return a tuple of the a and b slice 
+     * @tparam SmemTensorAType 
+     * @tparam SmemTensorBType 
+     * @param a_tensor 
+     * @param b_tensor 
+     * @return a iterator over all available tiles 
      */
-    COBRA_DEVICE auto get_tiles(State& state, BarrierStatus status){
-        if (status == BarrierStatus::WaitAgain) 
-            consumer_barrier[state.index].wait(state.phase);
-
-        // we set both arrive and expect bytes because: 
-        // if we had just arrive then we would have to wait for the 
-        // pipeline to finish before arriving, if we had just expect bytes
-        // the pipeline would instantly arrive at the start since expect bytes
-        // starts at 0
-        if (is_leader)
-            producer_barrier[state.index].arrive_and_expect_tx(transaction_bytes);
-
-        return make_tuple(
-            a_tensor(_, _, _, state.index), 
-            b_Tensor(_, _, _, state.index)
-        );
+    template<typename SmemTensorAType, typename SmemTensorBType>
+    COBRA_DEVICE auto make_tile_iterator(SmemTensorAType &a_tensor, SmemTensorBType &b_tensor) {
+        return TileIterator<SmemTensorAType, SmemTensorBType>(a_tensor, b_tensor);
     }
 
     COBRA_S_DEVICE State initial_state() {
@@ -147,13 +135,12 @@ struct TMAProducerView {
 
 
 template<
-    typename TileLayoutTypeA,
-    typename TileLayoutTypeB,
     typename AType,
     typename BType,
-    size_t pipeline_stages
+    size_t pipeline_stages,
+    size_t arrival_count
 >
-struct UMMAConsumerView {
+struct ConsumerView {
 
     using ProducerBarrierType = cutlass::arch::ClusterTransactionBarrier;
     using ConsumerBarrierType = cutlass::arch::ClusterBarrier;
@@ -164,33 +151,40 @@ struct UMMAConsumerView {
     ProducerBarrierArrayType &producer_barrier;
     ConsumerBarrierArrayType &consumer_barrier;
 
-    using TileTensorTypeA = Tensor<ViewEngine<smem_ptr<AType*>>, TileLayoutTypeA>;
-    using TileTensorTypeB = Tensor<ViewEngine<smem_ptr<BType*>>, TileLayoutTypeB>;
-
-    TileTensorTypeA &a_tensor;
-    TileTensorTypeB &b_Tensor;
-
     bool is_leader{false};
 
+    static constexpr size_t static_arrival_count{arrival_count};
+    static constexpr size_t static_pipeline_stages{pipeline_stages};
+
     private:
-    static constexpr size_t transaction_bytes{
-        (cosize_v<TileLayoutTypeA> * sizeof(AType) + cosize_v<TileLayoutTypeB> * sizeof(BType)) / pipeline_stages
+
+    template<typename SmemTensorAType, typename SmemTensorBType>
+    struct TileIterator {
+        SmemTensorAType &a_tensor;
+        SmemTensorBType &b_tensor;
+
+        COBRA_DEVICE TileIterator(SmemTensorAType &a_tensor, SmemTensorBType &b_tensor): a_tensor(a_tensor), b_tensor(b_tensor){}
+
+        COBRA_DEVICE auto next(State& state, BarrierStatus status){
+            if (status == BarrierStatus::WaitAgain)
+                producer_barrier[state.index].wait(state.phase);
+
+            return make_tuple(
+                slice_last(a_tensor, state.index),
+                slice_last(b_tensor, state.index),
+                &consumer_barrier[state.index]
+            );
+        }
     };
 
     public:
-    COBRA_DEVICE UMMAConsumerView(
-        TileTensorTypeA& a_smem_tensor,
-        TileTensorTypeB& b_smem_tensor,
+
+    COBRA_DEVICE ConsumerView(
         ProducerBarrierArrayType& producer_barrier,
         ConsumerBarrierArrayType& consumer_barrier
-    ):
-        a_tensor(a_smem_tensor), b_Tensor(b_smem_tensor),
-        producer_barrier(producer_barrier), consumer_barrier(consumer_barrier) {
+    ): producer_barrier(producer_barrier), consumer_barrier(consumer_barrier) {
         is_leader = (cute::elect_one_sync() == 1);
     }
-
-    static constexpr size_t arrival_count{1};
-    static constexpr size_t static_pipeline_stages{pipeline_stages};
 
     /**
      * @brief preemptively checks if the barrier needs to be waited on
@@ -202,26 +196,9 @@ struct UMMAConsumerView {
         return static_cast<BarrierStatus>(producer_barrier[state.index].try_wait(state.phase));
     }
 
-    /**
-     * @brief gets the shared memory tiles once they are available 
-     * 
-     * @param state encapsulates the stage in the pipeline we are on
-     * @param status whether to skip the wait or not
-     * @return a tuple of the a and b slice 
-     */
-    COBRA_DEVICE auto get_tiles(State& state, BarrierStatus status){
-        if (status == BarrierStatus::WaitAgain) 
-            producer_barrier[state.index].wait(state.phase);
-
-        return make_tuple(
-            a_tensor(_, _, _, state.index), 
-            b_Tensor(_, _, _, state.index)
-        );
-    }
-
-    COBRA_DEVICE void commit_work(State& state){
-        uint64_t* smem_ptr{reinterpret_cast<uint64_t*>(&consumer_barrier[state.index])};
-        cutlass::arch::umma_arrive(smem_ptr);
+    template<typename SmemTensorAType, typename SmemTensorBType>
+    COBRA_DEVICE auto make_tile_iterator(SmemTensorAType &a_tensor, SmemTensorBType &b_tensor) {
+        return TileIterator<SmemTensorAType, SmemTensorBType>(a_tensor, b_tensor);
     }
 
     COBRA_S_DEVICE State initial_state() {
@@ -232,19 +209,14 @@ struct UMMAConsumerView {
 
 
 /**
- * @brief A 2 way barrier. Consists of a full barrier which 
- * a producer signals when it is done writing data,
- * and a empty barrier signalled by a consumer when its 
- * done reading data. The producer waits on the empty barrier
- * to write data, and the consumer waits on the full barrier.
- * Synchronization pattern and initialization works best when
- * used with the TMA.
- * 
- * @tparam ProducerView a view of the pipeline with respect to the producers 
- * responsibilities (cp async, tma, etc)
- * @tparam ConsumerView a view of the pipeline with respect to the consumers 
- * responsibilities (umma, wgmma, mma)
- * @tparam ThreadRoleType typically a enum with various supported thread roles
+ * @brief A 2 way pipeline. The producer barrier is signalled when data
+ * has been written (e.g. TMA completes), the consumer barrier is signalled
+ * when data has been consumed. Each view waits on the opposite barrier
+ * and returns a pointer to its own barrier slot for the caller to signal.
+ *
+ * @tparam ProducerView view that loads data, waits on consumer barrier
+ * @tparam ConsumerView view that consumes data, waits on producer barrier
+ * @tparam ThreadRoleType enum used to assign threads to producer/consumer roles
  */
 template<
     PipelineViewType ProducerView,
@@ -253,27 +225,21 @@ template<
 >
 struct TwoWayPipeline {
 
-    static_assert(std::is_same_v<typename ProducerView::TileTensorTypeA, typename ConsumerView::TileTensorTypeA>,
-        "ProducerView and ConsumerView must agree on TileTensorTypeA");
-    static_assert(std::is_same_v<typename ProducerView::TileTensorTypeB, typename ConsumerView::TileTensorTypeB>,
-        "ProducerView and ConsumerView must agree on TileTensorTypeB");
     static_assert(std::is_same_v<typename ProducerView::ProducerBarrierArrayType, typename ConsumerView::ProducerBarrierArrayType>,
         "ProducerView and ConsumerView must agree on ProducerBarrierArrayType");
     static_assert(std::is_same_v<typename ProducerView::ConsumerBarrierArrayType, typename ConsumerView::ConsumerBarrierArrayType>,
         "ProducerView and ConsumerView must agree on ConsumerBarrierArrayType");
+        
     static_assert(ProducerView::static_pipeline_stages == ConsumerView::static_pipeline_stages,
         "ProducerView and ConsumerView must agree on pipeline_stages");
 
     using ProducerBarrierArrayType = typename ProducerView::ProducerBarrierArrayType;
     using ConsumerBarrierArrayType = typename ConsumerView::ConsumerBarrierArrayType;
 
-    using TileTensorTypeA = typename ProducerView::TileTensorTypeA;
-    using TileTensorTypeB = typename ProducerView::TileTensorTypeB;
-
     ProducerBarrierArrayType &producer_barrier;
     ConsumerBarrierArrayType &consumer_barrier;
 
-    const ThreadRoleType producer_role; 
+    const ThreadRoleType producer_role;
     const ThreadRoleType consumer_role;
 
     const ThreadRoleType role;
@@ -301,8 +267,8 @@ struct TwoWayPipeline {
         if (role == producer_role) {
             if (elect_one_sync()) {
                 for (size_t i{0}; i < ProducerView::static_pipeline_stages; ++i) {
-                    producer_barrier[i].init(ProducerView::arrival_count); 
-                    consumer_barrier[i].init(ConsumerView::arrival_count); 
+                    producer_barrier[i].init(ProducerView::static_arrival_count);
+                    consumer_barrier[i].init(ConsumerView::static_arrival_count); 
                 }
             }
         }
@@ -315,26 +281,33 @@ struct TwoWayPipeline {
     }
 
     /**
-     * @brief Get the producer view object
-     * 
-     * @param a_tensor pipelined smem tensor A
-     * @param b_tensor pipelined smem tensor B
-     * @return ProducerView 
+     * @brief Get the producer view, waits on consumer barrier, returns producer barrier slots
+     * @return ProducerView
      */
-    COBRA_DEVICE ProducerView get_producer_view(TileTensorTypeA &a_tensor, TileTensorTypeB &b_tensor) {
-        return ProducerView(a_tensor, b_tensor, producer_barrier, consumer_barrier);
+    COBRA_DEVICE ProducerView get_producer_view() {
+        return ProducerView(producer_barrier, consumer_barrier);
     }
 
     /**
-     * @brief Get the consumer view object
-     * 
-     * @param a_tensor pipelined smem tensor A
-     * @param b_tensor pipelined smem tensor B
-     * @return ConsumerView 
+     * @brief Get the consumer view, waits on producer barrier, returns consumer barrier slots
+     * @return ConsumerView
      */
-    COBRA_DEVICE ConsumerView get_consumer_view(TileTensorTypeA &a_tensor, TileTensorTypeB &b_tensor) {
-        return ConsumerView(a_tensor, b_tensor, producer_barrier, consumer_barrier);
+    COBRA_DEVICE ConsumerView get_consumer_view() {
+        return ConsumerView(producer_barrier, consumer_barrier);
     }
 };
+
+template<typename AType, typename BType, size_t pipeline_stages>
+using UmmaConsumerViewType = ConsumerView<AType, BType, pipeline_stages, 1>;
+
+template<typename AType, typename BType, size_t pipeline_stages>
+using TmaProducerViewType = ProducerView<AType, BType, pipeline_stages, 1>;
+
+template<typename ThreadRoleType, typename AType, typename BType, size_t pipeline_stages>
+using PipelineTmaUmmaType = TwoWayPipeline<
+    TmaProducerViewType<AType, BType, pipeline_stages>, 
+    UmmaConsumerViewType<AType, BType, pipeline_stages>, 
+    ThreadRoleType
+>;
 
 }

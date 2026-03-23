@@ -42,6 +42,16 @@ struct SharedStorage {
 
     alignas(16) ProducerBarrierType full_barrier[ConfigType::static_pipeline_stages];
     alignas(16) ConsumerBarrierType empty_barrier[ConfigType::static_pipeline_stages];
+
+    template<bool is_a>
+    auto get_smem_tensor(){
+        auto ptr{make_smem_ptr(smem_a.begin())};
+        if constexpr(is_a){
+            return make_tensor(ptr, ConfigType::a_smem_layout);
+        }else{
+            return make_tensor(ptr, ConfigType::b_smem_layout);
+        }
+    }
 };
 
 template<
@@ -67,18 +77,14 @@ __global__ void gemm_kernel(
 
     using SharedStorageType = SharedStorage<AType, BType, ConfigType>;
 
-    using ProducerViewType = typename ConfigType::ProducerViewType;
-    using ConsumerViewType = typename ConfigType::ConsumerViewType;
-
     using ThreadRoleType = typename ThreadRoleManager::ThreadRole;
+    using PipelineType = typename ConfigType::template PipelineType<ThreadRoleType>;
 
-    using PipelineType = cobraml::pipelines::TwoWayPipeline<ProducerViewType, ConsumerViewType, ThreadRoleType>;
+    using LoadTypeA = typename ConfigType::LoadTypeA;
+    using LoadTypeB = typename ConfigType::LoadTypeB;
 
     extern __shared__ char shared_memory[];
     ThreadRoleType thread_role{ThreadRoleManager::assign_role(threadIdx.x)};
-
-    using LoadTypeA = typename ProducerViewType::LoadTypeA;
-    using LoadTypeB = typename ProducerViewType::LoadTypeB;
 
     SharedStorageType& shared_storage{*reinterpret_cast<SharedStorageType *>(shared_memory)};
     constexpr auto tiled_mma{config.tiled_mma};
@@ -96,12 +102,12 @@ __global__ void gemm_kernel(
     };
 
     auto coord_vmnk{make_coord(
-        blockIdx.x % size<0>(cluster_vmnk_layout), // Peer CTA coordinate, when 2sm this flips between 0 and 1 
+        blockIdx.x % size<0>(cluster_vmnk_layout), // Peer CTA coordinate, when 2sm this flips between 0 and 1
         blockIdx.x / size<0>(cluster_vmnk_layout), //    MMA-M coordinate
         blockIdx.y,                                //    MMA-N coordinate
         _                                          //    MMA-K coordinate
     )};
-    
+
     auto coord_slice{
         select<1, 2, 3>(coord_vmnk)
     };
@@ -115,26 +121,51 @@ __global__ void gemm_kernel(
     };
 
     Tensor global_a_iter{
-        local_tile(
-            a, mma_tiler, coord_slice, Step<_1, X, _1>{} 
-        )
+        cta_mma.partition_A(local_tile(a, mma_tiler, coord_slice, Step<_1, X, _1>{}))
     };
 
     Tensor global_b_iter{
-        local_tile(
-            b, mma_tiler, coord_slice, Step<X, _1, _1>{} 
-        )
+        cta_mma.partition_B(local_tile(b, mma_tiler, coord_slice, Step<X, _1, _1>{}))
     };
 
     Tensor global_c_iter{
-        local_tile(
-            b, mma_tiler, coord_slice, Step<_1, _1, X>{} 
-        )
+        cta_mma.partition_C(local_tile(c, mma_tiler, coord_slice, Step<_1, _1, X>{}))
     };
 
-    if (thread0()){
-        print(cta_mma.partition_A(global_a_iter)); print("\n"); print(global_b_iter); print("\n"); print(global_c_iter);
+    Tensor shared_a_tensor{shared_storage.get_smem_tensor<true>()};
+    Tensor shared_b_tensor{shared_storage.get_smem_tensor<false>()};
+
+    PipelineType pipeline(
+        shared_storage.full_barrier, 
+        shared_storage.empty_barrier,
+        ThreadRoleType::Producer,
+        ThreadRoleType::Consumer,  
+        thread_role
+    );
+
+    auto a_pair{LoadTypeA::partition_copy_pair(
+        copy_a,
+        global_a_iter,
+        shared_a_tensor
+    )};
+
+    auto global_tma_view_a{get<0>(a_pair)};
+    auto shared_tma_view_a{get<1>(a_pair)};
+
+    auto b_pair{LoadTypeB::partition_copy_pair(
+        copy_b,
+        global_b_iter,
+        shared_b_tensor
+    )};
+
+    auto global_tma_view_b{get<0>(b_pair)};
+    auto shared_tma_view_b{get<1>(b_pair)};
+
+    if (thread_role == ThreadRoleType::Producer){
+        
     }
+
+
 
     // slice out the local tile from gmem
     // partition using the tiled_mma partition_A(gA)
@@ -177,14 +208,6 @@ __global__ void gemm_kernel(
   }
      * 
      */
-
-    PipelineType pipeline(
-        shared_storage.full_barrier, 
-        shared_storage.empty_barrier,
-        ThreadRoleType::Producer,
-        ThreadRoleType::Consumer,  
-        thread_role
-    );
 }
 
 struct GEMM {
@@ -206,9 +229,8 @@ struct GEMM {
         const ConfigType &config
     ) {
 
-        using ProducerViewType = typename ConfigType::ProducerViewType;
-        using LoadTypeA = typename ProducerViewType::LoadTypeA;
-        using LoadTypeB = typename ProducerViewType::LoadTypeB;
+        using LoadTypeA = typename ConfigType::LoadTypeA;
+        using LoadTypeB = typename ConfigType::LoadTypeB;
 
         auto [tensor_a, tensor_b, tensor_c] = shape_manager.init_tensors(a, b, c);
 

@@ -7,6 +7,21 @@ namespace cobraml {
 
     using namespace cute;
 
+    template<int N, typename IndexType>
+    CUTE_HOST_DEVICE constexpr auto make_slice_last(IndexType idx) {
+        if constexpr (N == 1) {
+            return cute::make_tuple(idx);
+        } else {
+            return cute::tuple_cat(cute::make_tuple(cute::_), make_slice_last<N - 1>(idx));
+        }
+    }
+
+    template<typename TensorType, typename IndexType>
+    CUTE_HOST_DEVICE auto slice_last(TensorType &tensor, IndexType idx) {
+        auto coord = make_slice_last<rank_v<typename TensorType::layout_type>>(idx);
+        return std::apply([&](auto... args) { return tensor(args...); }, coord);
+    }
+
     bool is_row_major(std::pair<size_t, size_t> stride, size_t fast_mode) {
         if (stride.first != fast_mode)
             return false;

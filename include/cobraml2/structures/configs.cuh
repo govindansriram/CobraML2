@@ -2,6 +2,7 @@
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
 #include "./pipelines.cuh"
+#include "./load.cuh"
 
 namespace cobraml::configs {
 using namespace cute;
@@ -77,8 +78,11 @@ struct GemmConfigTmaUmma {
     // AtomThrID (2) then tiled_divde(Cluster, AtomThrID) ((2), 2, 4, 1)
     static constexpr Layout cluster_layout_vmnk{tiled_divide(make_layout(cluster_shape), make_tile(typename decltype(tiled_mma)::AtomThrID{}))};
 
-    using ProducerViewType = pipelines::sm100::TMAProducerView<decltype(a_smem_layout), decltype(b_smem_layout), AType, BType, pipeline_stages>;
-    using ConsumerViewType = pipelines::sm100::UMMAConsumerView<decltype(a_smem_layout), decltype(b_smem_layout), AType, BType, pipeline_stages>;
+    using LoadTypeA = loadop::sm100::TMALoad<AType, true>;
+    using LoadTypeB = loadop::sm100::TMALoad<BType, false>;
+
+    template<typename ThreadRoleType>
+    using PipelineType = pipelines::sm100::PipelineTmaUmmaType<ThreadRoleType, AType, BType, pipeline_stages>;
 };
 }
 

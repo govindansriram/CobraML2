@@ -75,3 +75,4 @@ cobraml.egg-info/
 
 # extensions
 .cache/
+.claude/

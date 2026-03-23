@@ -81,8 +81,7 @@ __global__ void gemm_kernel(
     using LoadTypeB = typename ProducerViewType::LoadTypeB;
 
     SharedStorageType& shared_storage{*reinterpret_cast<SharedStorageType *>(shared_memory)};
-
-    
+    constexpr auto tiled_mma{config.tiled_mma};
 
     // one thread from the producer prefetches both tmas if it is tma
     if (thread_role == ThreadRoleType::Producer){
@@ -92,13 +91,13 @@ __global__ void gemm_kernel(
         }
     }
 
-    constexpr Layout cluster_vmnk{
-        config::cluster_layout_vmnk
-    }
+    constexpr Layout cluster_vmnk_layout{
+        config.cluster_layout_vmnk
+    };
 
     auto coord_vmnk{make_coord(
-        blockIdx.x % size<0>(cluster_layout_vmnk), // Peer CTA coordinate, when 2sm this flips between 0 and 1 
-        blockIdx.x / size<0>(cluster_layout_vmnk), //    MMA-M coordinate
+        blockIdx.x % size<0>(cluster_vmnk_layout), // Peer CTA coordinate, when 2sm this flips between 0 and 1 
+        blockIdx.x / size<0>(cluster_vmnk_layout), //    MMA-M coordinate
         blockIdx.y,                                //    MMA-N coordinate
         _                                          //    MMA-K coordinate
     )};
@@ -106,6 +105,9 @@ __global__ void gemm_kernel(
     auto coord_slice{
         select<1, 2, 3>(coord_vmnk)
     };
+
+    auto mma_v = get<0>(coord_vmnk);
+    ThrMMA cta_mma{tiled_mma.get_slice(mma_v)};   // Use Peer CTA coordinate
 
     // BM, BN, BK
     constexpr auto mma_tiler{
@@ -124,11 +126,15 @@ __global__ void gemm_kernel(
         )
     };
 
-    Tensor global_b_iter{
+    Tensor global_c_iter{
         local_tile(
             b, mma_tiler, coord_slice, Step<_1, _1, X>{} 
         )
     };
+
+    if (thread0()){
+        print(cta_mma.partition_A(global_a_iter)); print("\n"); print(global_b_iter); print("\n"); print(global_c_iter);
+    }
 
     // slice out the local tile from gmem
     // partition using the tiled_mma partition_A(gA)
@@ -229,9 +235,9 @@ struct GEMM {
         };
 
         const dim3 cluster_dim{
+            get<0>(config.cluster_shape),
             get<1>(config.cluster_shape),
-            get<2>(config.cluster_shape),
-            get<3>(config.cluster_shape)
+            get<2>(config.cluster_shape)
         };
 
         using SharedStorageType = SharedStorage<AType, BType, ConfigType>;

@@ -43,10 +43,10 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   using DType = typename MHAType::TensorDType;
   size_t batch_size{gridDim.y};
 
-  auto q_head{MHAType::slice_head(Q, batch_size, N_q)};
-  const auto k_head{MHAType::slice_head(K, batch_size, N_kv)};
-  const auto v_head{MHAType::slice_head(V, batch_size, N_kv)};
-  auto o_head{MHAType::slice_head<true>(O, batch_size, N_q)};
+  Tensor q_head{MHAType::slice_head(Q, batch_size, N_q)};
+  const Tensor k_head{MHAType::slice_head(K, batch_size, N_kv)};
+  const Tensor v_head{MHAType::slice_head(V, batch_size, N_kv)};
+  Tensor o_head{MHAType::slice_head<true>(O, batch_size, N_q)};
 
   extern __shared__ char shared_memory[];
   using SharedStorageType = typename MHAType::SharedStorage;
@@ -82,23 +82,20 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   auto kv_tiler{make_shape(B_c, d)};
   auto scores_tiler{make_shape(B_r, B_c)};
 
-  auto q_iterator{local_tile(q_head, q_tiler, q_coord)}; // (B_r, d)
-  auto k_iterator{
+  Tensor q_iterator{local_tile(q_head, q_tiler, q_coord)}; // (B_r, d)
+  Tensor k_iterator{
       local_tile(k_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
-  auto v_iterator{
+  Tensor v_iterator{
       local_tile(v_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
-  auto o_iterator{local_tile(o_head, q_tiler, q_coord)}; // (B_r, d)
+  Tensor o_iterator{local_tile(o_head, q_tiler, q_coord)}; // (B_r, d)
 
   auto iters{size<2>(k_iterator)}; // N_kv
-
-  auto q_slice{q_iterator};
-  auto out_slice{o_iterator};
 
   // t prefix means unique to this thread
   ThrCopy thr_copy_qk{tc_qk.get_slice(threadIdx.x)};
   ThrCopy thr_copy_v{tc_v.get_slice(threadIdx.x)};
 
-  const Tensor tQ_global_part{thr_copy_qk.partition_S(q_slice)};
+  const Tensor tQ_global_part{thr_copy_qk.partition_S(q_iterator)};
   Tensor tQ_shared_part{thr_copy_qk.partition_D(shared_q)};
 
   const Tensor tK_global_part_iter{thr_copy_qk.partition_S(k_iterator)};
@@ -115,7 +112,7 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   Tensor p_mma2{thr_mma_qk.partition_A(shared_p)};
   Tensor v_mma{thr_mma_qk.partition_B(trans_shared_v)};
-  Tensor g_out_mma{thr_mma_qk.partition_C(out_slice)};
+  Tensor g_out_mma{thr_mma_qk.partition_C(o_iterator)};
   Tensor r_out_mma{thr_mma_qk.make_fragment_C(g_out_mma)};
 
   auto q_head_idty{MHAType::identity_slice_head(batch_size, N_q)};
@@ -138,11 +135,11 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   auto scores_tile_idty{
       local_tile(scores_idty, scores_tiler,
                  make_coord(blockIdx.z, _))}; // (B_r, B_c, ceil(N / B_c))
-  auto scores_slice_idty{thr_mma_qk.partition_C(scores_tile_idty)};
+  Tensor scores_slice_idty{thr_mma_qk.partition_C(scores_tile_idty)};
 
   // out identity tensor
   auto o_iterator_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
-  auto o_mma_idty{thr_mma_qk.partition_C(o_iterator_idty)};
+  Tensor o_mma_idty{thr_mma_qk.partition_C(o_iterator_idty)};
 
   // predicated copy
   MHAType::predicate_copy_tensor(tQ_idty_part, tQ_global_part, tQ_shared_part,
@@ -150,7 +147,7 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   auto mma_m{select<1>(q_mma.shape())};
 
-  auto r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
+  Tensor r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
   clear(r_scores_mma); // Zero the accumulator
 
   // start with the lowest possible value
@@ -314,14 +311,14 @@ struct FMHA {
         "Must point to DType");
 
     const auto projection_layout{get_tensor_layout<is_o>(batch_size, N)};
-    const auto projection{
+    const Tensor projection{
         make_tensor(make_gmem_ptr<DType>(g_ptr), projection_layout)};
     return projection(blockIdx.y, _, blockIdx.x, _);
   }
 
   COBRA_S_DEVICE auto identity_slice_head(int batch_size, int N) {
     const auto projection_layout{get_tensor_layout(batch_size, N)};
-    const auto projection{make_identity_tensor(projection_layout.shape())};
+    const Tensor projection{make_identity_tensor(projection_layout.shape())};
     return projection(blockIdx.y, _, blockIdx.x, _);
   }
 
@@ -364,9 +361,9 @@ struct FMHA {
 
     // one warp computes one row
 
-    auto t_mma = make_tiled_mma(
+    auto t_mma{make_tiled_mma(
         UniversalFMA<DType, DType, DType>{},
-        Layout<Shape<RowType, _32>, Stride<_32, _1>>{}); // 16x16x1 UniversalFMA
+        Layout<Shape<RowType, _32>, Stride<_32, _1>>{})}; // 16x16x1 UniversalFMA
 
     return t_mma;
   }
@@ -619,6 +616,13 @@ struct FMHA {
     }
   }
 
+  // start_pos is the KV-cache offset: it tells the attention kernel that
+  // the current query tokens sit at position [start_pos, start_pos + N_q)
+  // in the full sequence, and the KV cache already holds tokens [0, start_pos).
+  // The causal mask uses this to compute absolute positions so that during
+  // decode (single-token query) it correctly attends to all prior cached keys
+  // rather than masking them out, and during prefill-after-decode the mask
+  // is reapplied at the right offsets.
   void operator()(DType *Q, DType *K, DType *V, DType *O, uint32_t batch_size,
                   uint32_t N_q, uint32_t N_kv, uint32_t start_pos) {
     dim3 grid_dim{head_count, batch_size, ceil_div(N_q, B_r)};

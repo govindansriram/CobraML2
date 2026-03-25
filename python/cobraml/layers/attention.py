@@ -60,10 +60,6 @@ class FusedMultiHeadAttention(MultiHeadAttention):
         causal=True,
         start_pos: int = 0,
     ):
-        # Keep compatibility with both the legacy 4-argument op schema and the
-        # newer schema that accepts an explicit start position.
-        if start_pos == 0:
-            return torch.ops.cobraml.fmha(q, k, v, causal)
         return torch.ops.cobraml.fmha(q, k, v, causal, start_pos)
 
     def post_process(self, out_tensor):

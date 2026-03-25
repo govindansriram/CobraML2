@@ -361,9 +361,10 @@ struct FMHA {
 
     // one warp computes one row
 
-    auto t_mma{make_tiled_mma(
-        UniversalFMA<DType, DType, DType>{},
-        Layout<Shape<RowType, _32>, Stride<_32, _1>>{})}; // 16x16x1 UniversalFMA
+    auto t_mma{
+        make_tiled_mma(UniversalFMA<DType, DType, DType>{},
+                       Layout<Shape<RowType, _32>,
+                              Stride<_32, _1>>{})}; // 16x16x1 UniversalFMA
 
     return t_mma;
   }

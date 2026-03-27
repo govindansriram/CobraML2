@@ -32,7 +32,7 @@ struct FMHADispatcher {
   }
 
   using KernelFn = void (*)(float *, float *, float *, float *, uint32_t,
-                            uint32_t);
+                            uint32_t, uint32_t, uint32_t);
 
   struct Entry {
     int heads, head_dim;
@@ -46,11 +46,12 @@ struct FMHADispatcher {
     constexpr Config config{idx_to_config(I)};
     table[I] = {
         config.heads, config.head_dim, config.causal,
-        [](float *Q, float *K, float *V, float *O, uint32_t B, uint32_t N) {
+        [](float *Q, float *K, float *V, float *O, uint32_t B, uint32_t N_q,
+           uint32_t N_kv, uint32_t start_pos) {
           constexpr Config inner_config{idx_to_config(I)};
           cobraml::kernels::FMHA<inner_config.heads, inner_config.head_dim, 64,
                                  64, float, 128, inner_config.causal, true>{}(
-              Q, K, V, O, B, N);
+              Q, K, V, O, B, N_q, N_kv, start_pos);
         }};
   }
 
@@ -61,10 +62,10 @@ struct FMHADispatcher {
   FMHADispatcher() { init_impl(std::make_index_sequence<num_configs>{}); }
 
   void dispatch(float *Q, float *K, float *V, float *O, bool causal, uint32_t B,
-                uint32_t N, int H, int d) {
+                uint32_t N_q, uint32_t N_kv, uint32_t start_pos, int H, int d) {
     for (auto &entry : table) {
       if (entry.heads == H && entry.head_dim == d && entry.causal == causal) {
-        entry.fn(Q, K, V, O, B, N);
+        entry.fn(Q, K, V, O, B, N_q, N_kv, start_pos);
         return;
       }
     }
@@ -75,8 +76,10 @@ struct FMHADispatcher {
 
 // dispatches to flash attention supports all hardware
 void fmha_forward_fp32(torch::Tensor &Q, torch::Tensor &K, torch::Tensor &V,
-                       torch::Tensor &O, const bool causal, const int64_t B,
-                       const int64_t N, const int64_t H, const int64_t d) {
+                       torch::Tensor &O, const bool causal,
+                       const int64_t start_pos, const int64_t B,
+                       const int64_t N_q, const int64_t N_kv, const int64_t H,
+                       const int64_t d) {
   // fp32 Flash Attention is only performant with
   // head dimension of 64. This is due to occupancy
   // problems caused by the larger amounts of SMEM used
@@ -84,12 +87,14 @@ void fmha_forward_fp32(torch::Tensor &Q, torch::Tensor &K, torch::Tensor &V,
   static FMHADispatcher<1, 32, 1, 64, 64, 64> dispatcher;
   dispatcher.dispatch(Q.data_ptr<float>(), K.data_ptr<float>(),
                       V.data_ptr<float>(), O.data_ptr<float>(), causal,
-                      static_cast<uint32_t>(B), static_cast<uint32_t>(N),
-                      static_cast<int>(H), static_cast<int>(d));
+                      static_cast<uint32_t>(B), static_cast<uint32_t>(N_q),
+                      static_cast<uint32_t>(N_kv),
+                      static_cast<uint32_t>(start_pos), static_cast<int>(H),
+                      static_cast<int>(d));
 }
 
 torch::Tensor fmha_forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V,
-                           bool causal) {
+                           bool causal, int64_t start_pos) {
 
   c10::ScalarType Q_dtype{Q.scalar_type()};
   c10::ScalarType K_dtype{K.scalar_type()};
@@ -98,18 +103,24 @@ torch::Tensor fmha_forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V,
   TORCH_CHECK(Q_dtype == K_dtype && Q_dtype == V_dtype,
               "dtypes of all three projections must be the same");
 
-  TORCH_CHECK(Q.sizes() == K.sizes() && Q.sizes() == V.sizes(),
-              "shapes of all three projections must be the same");
+  TORCH_CHECK(Q.dim() == 4 && K.dim() == 4 && V.dim() == 4,
+              "Q, K, and V must be rank-4 tensors [B, N, H, d]");
+  TORCH_CHECK(K.sizes() == V.sizes(), "K and V shapes must match");
+  TORCH_CHECK(Q.size(0) == K.size(0) && Q.size(2) == K.size(2) &&
+                  Q.size(3) == K.size(3),
+              "Q and K/V must match on batch, heads, and head_dim");
+  TORCH_CHECK(start_pos >= 0, "start_pos must be non-negative");
 
   torch::Tensor O{torch::empty_like(Q)};
 
-  const int64_t B{Q.size(0)}; // batch
-  const int64_t N{Q.size(1)}; // sequence length
-  const int64_t H{Q.size(2)}; // heads
-  const int64_t d{Q.size(3)}; // head dim
+  const int64_t B{Q.size(0)};    // batch
+  const int64_t N_q{Q.size(1)};  // query sequence length
+  const int64_t N_kv{K.size(1)}; // key/value sequence length
+  const int64_t H{Q.size(2)};    // heads
+  const int64_t d{Q.size(3)};    // head dim
 
   if (Q_dtype == torch::kFloat32) {
-    fmha_forward_fp32(Q, K, V, O, causal, B, N, H, d);
+    fmha_forward_fp32(Q, K, V, O, causal, start_pos, B, N_q, N_kv, H, d);
 
     return O;
   } else {
@@ -119,7 +130,8 @@ torch::Tensor fmha_forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V,
 }
 
 TORCH_LIBRARY(cobraml, m) {
-  m.def("fmha(Tensor Q, Tensor K, Tensor V, bool causal) -> Tensor");
+  m.def("fmha(Tensor Q, Tensor K, Tensor V, bool causal, int start_pos=0) -> "
+        "Tensor");
 }
 
 TORCH_LIBRARY_IMPL(cobraml, CUDA, m) { m.impl("fmha", &fmha_forward); }

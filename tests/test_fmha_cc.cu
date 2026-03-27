@@ -63,7 +63,8 @@ void test_fmha(int batch_size, int sequence_length) {
 #endif
 
   for (size_t i{0}; i < warmup_iters; ++i) {
-    mha(q_ptr, k_ptr, v_ptr, o_ptr, batch_size, sequence_length);
+    mha(q_ptr, k_ptr, v_ptr, o_ptr, batch_size, sequence_length,
+        sequence_length, 0);
   }
   cudaDeviceSynchronize();
 
@@ -77,7 +78,8 @@ void test_fmha(int batch_size, int sequence_length) {
 
   for (size_t i{0}; i < total_iters; ++i) {
     cudaEventRecord(start);
-    mha(q_ptr, k_ptr, v_ptr, o_ptr, batch_size, sequence_length);
+    mha(q_ptr, k_ptr, v_ptr, o_ptr, batch_size, sequence_length,
+        sequence_length, 0);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&ms, start, stop);

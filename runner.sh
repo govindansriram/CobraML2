@@ -14,6 +14,7 @@ FORMAT_FILE=""
 PROFILE_TARGET=""
 PROFILE_OPTS=""
 PROFILE_OUTPUT=""
+CUDA_ARCH=""
 RUN_ARGS=()
 
 usage() {
@@ -30,6 +31,7 @@ usage() {
     echo "  -p, --profile <target>    Build and profile target with ncu"
     echo "  -o, --output <name>       Name for the .ncu-rep file (default: target name)"
     echo "  --profile-opts <opts>     Additional ncu options"
+    echo "  --bw                      Set CUDA arch to 100a (Blackwell)"
     echo "  --no-tests                Disable building tests"
     echo "  --                        Remaining args passed to executable/ctest"
     echo ""
@@ -45,6 +47,7 @@ usage() {
     echo "  $0 -r test_mha -- --gtest_filter=*Perf*"
     echo "  $0 -p test_fmha_cc        # Build and profile with ncu"
     echo "  $0 -p test_fmha_cc -o my_profile  # Custom report name"
+    echo "  $0 --bw -r test_mha       # Build for Blackwell (sm_100a) and run"
     echo "  $0 -p test_fmha_cc --profile-opts '--kernel-name fmha'"
 }
 
@@ -98,6 +101,10 @@ while [[ $# -gt 0 ]]; do
             PROFILE_OPTS="$2"
             shift 2
             ;;
+        --bw)
+            CUDA_ARCH="100a"
+            shift
+            ;;
         --no-tests)
             TESTS=OFF
             shift
@@ -141,9 +148,16 @@ mkdir -p "$BUILD_DIR"
 
 # Configure
 echo "Configuring (BENCHMARK=${BENCHMARK})..."
+CMAKE_EXTRA_ARGS=""
+if [ -n "$CUDA_ARCH" ]; then
+    CMAKE_EXTRA_ARGS="-DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCH"
+    echo "CUDA architecture: $CUDA_ARCH"
+fi
+
 cmake -B "$BUILD_DIR" \
     -DCOBRAML2_BUILD_TESTS="$TESTS" \
-    -DBENCHMARK="$BENCHMARK"
+    -DBENCHMARK="$BENCHMARK" \
+    $CMAKE_EXTRA_ARGS
 
 # Build
 if [ -n "$TARGET" ]; then

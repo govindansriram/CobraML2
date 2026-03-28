@@ -1,5 +1,6 @@
 from .config import ModelConfig, GPT2Config
 from .gpt2 import GPT2LMHeadModel
+from .sampling import sample_next_token
 from .weights import (
     TransposeGPT2Conv1D,
     load_hf_weight,
@@ -17,4 +18,5 @@ __all__ = [
     "DropBuffers",
     "DropGPT2Buffers",
     "AddPrefix",
+    "sample_next_token",
 ]

@@ -3,6 +3,7 @@
 #include "../macros.cuh"
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
+#include <thrust/device_vector.h>
 
 // Fused Multi Head Attention, that runs purely on cuda cores
 // Based on the Flash Attention 1 algorithm.
@@ -13,40 +14,69 @@ using namespace cute;
 
 namespace naive {
 
-// num_heads, batch_size, ceil(N / B_r)
+  // TODO make this binary search
+template<typename TensorEngine, typename TensorLayout>
+__device__ int index_search(Tensor<TensorEngine, TensorLayout> sequence_tensor, int starting_token){
+
+  int tensor_size{static_cast<int>(size(sequence_tensor))};
+
+  for (size_t i{0}; i < tensor_size; ++i){
+    if (starting_token < sequence_tensor(i))
+      return i - 1;
+  }
+
+  return -1;
+}
 
 /**
- * @brief performs naive gpu mha
+ * @brief performs cuda core gpu mha
  *
  * @tparam num_heads an equal sized chunk of projection
  * this allows the model to localize attention to that specific chunk
  * hence multi head attention.
- * @tparam d the length of each head
- * @param Q the query projection [batch, N, num_heads, d]
- * @param K the key projection [batch, N, num_heads, d]
- * @param V the value projection [batch, N, num_heads, d]
- * @param O the output [batch, N, num_heads, d]
+ * @param Q the query projection [N, num_heads, d]
+ * @param K the key projection [N, num_heads, d]
+ * @param V the value projection [N, num_heads, d]
+ * @param flat_seq_q contains the start and stop index of each batch
+ * a has 32 sequences, 64 has 100, c has 32 -> [0, 32, 96, 128]
  * @param N sequence length: tokens per sequence
  * @return void
  */
-template <typename MHAType, typename TiledCopyTypeQK, typename TiledCopyTypeV,
+template <typename MHAType,
+          typename TensorTypeQ,
+          typename TensorTypeK,
+          typename TensorTypeV,
+          typename TensorTypeO,
+          typename TensorTypeFlatQ,
+          typename TensorTypeFlatKV,
+          typename TiledCopyTypeQK, 
+          typename TiledCopyTypeV,
           typename TiledMMAType>
-__global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
-                           const typename MHAType::TensorDType *__restrict__ K,
-                           const typename MHAType::TensorDType *__restrict__ V,
-                           typename MHAType::TensorDType *__restrict__ O,
-                           const int N_q, const int N_kv, const int start_pos,
+__global__ void mha_kernel(const TensorTypeQ Q,
+                           const TensorTypeK K,
+                           const TensorTypeV V,
+                           TensorTypeO O,
+                           const TensorTypeFlatQ flat_seq_q, 
+                           const TensorTypeFlatKV flat_seq_kv,
                            const typename MHAType::TensorDType scale,
-                           TiledCopyTypeQK tc_qk, TiledCopyTypeV tc_v,
+                           TiledCopyTypeQK tc_qk, 
+                           TiledCopyTypeV tc_v,
                            TiledMMAType t_mma) {
 
   using DType = typename MHAType::TensorDType;
-  size_t batch_size{gridDim.y};
+  size_t n_block{blockIdx.y};
 
-  Tensor q_head{MHAType::slice_head(Q, batch_size, N_q)};
-  const Tensor k_head{MHAType::slice_head(K, batch_size, N_kv)};
-  const Tensor v_head{MHAType::slice_head(V, batch_size, N_kv)};
-  Tensor o_head{MHAType::slice_head<true>(O, batch_size, N_q)};
+  const Tensor q_head_all{Q(_, blockIdx.x, _)}; // (Nq_total, d)
+  const Tensor k_head_all{K(_, blockIdx.x, _)}; // (Nkv_total, d)
+  const Tensor v_head_all{V(_, blockIdx.x, _)}; // (Nkv_total, d)
+  Tensor o_head_all{O(_, blockIdx.x, _)}; // (Nq_total, d)
+
+  // if (thread0()){
+  //   print_tensor(flat_seq_q);
+  //   print("\n"); 
+  //   print_tensor(flat_seq_kv);
+  //   print("\n"); 
+  // }
 
   extern __shared__ char shared_memory[];
   using SharedStorageType = typename MHAType::SharedStorage;
@@ -75,18 +105,37 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   constexpr typename MHAType::QueryRowsType B_r{};
   constexpr typename MHAType::KVColsType B_c{};
 
-  auto q_coord{make_coord(blockIdx.z, 0)};
-  auto kv_coord{make_coord(_, 0)};
+  int start_index{index_search(flat_seq_q, n_block * B_r)};
+  int end_index{start_index + 1};
+
+  size_t q_block{n_block - (flat_seq_q[start_index] / B_r)};
+
+  size_t N_q{flat_seq_q[end_index] - flat_seq_q[start_index]};
+  size_t N_kv{flat_seq_kv[end_index] - flat_seq_kv[start_index]};
+
+  auto slice_head{[&](auto &tensor, size_t offset, auto seq_len) {
+    auto ptr{tensor(offset, _).data()};
+    auto layout{make_layout(make_shape(seq_len, d), tensor.layout().stride())};
+    return make_tensor(ptr, layout);
+  }};
+
+  auto q_head{slice_head(q_head_all, flat_seq_q[start_index], N_q)};
+  auto o_head{slice_head(o_head_all, flat_seq_q[start_index], N_q)};
+  auto k_head{slice_head(k_head_all, flat_seq_kv[start_index], N_kv)};
+  auto v_head{slice_head(v_head_all, flat_seq_kv[start_index], N_kv)};
 
   auto q_tiler{make_shape(B_r, d)};
   auto kv_tiler{make_shape(B_c, d)};
   auto scores_tiler{make_shape(B_r, B_c)};
 
+  auto q_coord{make_coord(q_block, 0)};
+  auto kv_coord{make_coord(_, 0)};
+
   Tensor q_iterator{local_tile(q_head, q_tiler, q_coord)}; // (B_r, d)
   Tensor k_iterator{
-      local_tile(k_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
+      local_tile(k_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(total_N_kv / B_c))
   Tensor v_iterator{
-      local_tile(v_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
+      local_tile(v_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(total_N_kv / B_c))
   Tensor o_iterator{local_tile(o_head, q_tiler, q_coord)}; // (B_r, d)
 
   auto iters{size<2>(k_iterator)}; // N_kv
@@ -115,8 +164,8 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor g_out_mma{thr_mma_qk.partition_C(o_iterator)};
   Tensor r_out_mma{thr_mma_qk.make_fragment_C(g_out_mma)};
 
-  auto q_head_idty{MHAType::identity_slice_head(batch_size, N_q)};
-  auto kv_head_idty{MHAType::identity_slice_head(batch_size, N_kv)};
+  auto q_head_idty{make_identity_tensor(q_head.layout().shape())};
+  auto kv_head_idty{make_identity_tensor(k_head.layout().shape())};
 
   // make q identity tensor
   auto q_head_slice_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
@@ -129,12 +178,19 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   // make v identity tensor
   auto v_idty_part{thr_copy_v.partition_S(kv_iterator_idty)};
+  const size_t start_pos{N_kv - N_q};
+
+  // if (thread(0, 16)){
+  //   print(start_pos);
+  //   print("\n"); 
+  //   print(blockIdx.x); print(" "); print(blockIdx.y);
+  // }
 
   // scores identity tensor
   auto scores_idty{make_identity_tensor(make_shape(N_q, N_kv))};
   auto scores_tile_idty{
       local_tile(scores_idty, scores_tiler,
-                 make_coord(blockIdx.z, _))}; // (B_r, B_c, ceil(N / B_c))
+                 make_coord(q_block, _))}; // (B_r, B_c, ceil(N / B_c))
   Tensor scores_slice_idty{thr_mma_qk.partition_C(scores_tile_idty)};
 
   // out identity tensor
@@ -227,13 +283,11 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
  * @tparam thread_count
  */
 template <int head_count, int head_dim, int B_r, int B_c, typename DType,
-          int thread_count = 128, bool causal_mask = false,
-          bool qkv_contigous_buffer = false>
+          int thread_count = 128, bool qkv_contigous_buffer = false>
 struct FMHA {
 
   using TensorDType = DType;
-  using Self = FMHA<head_count, head_dim, B_r, B_c, DType, thread_count,
-                    causal_mask, qkv_contigous_buffer>;
+  using Self = FMHA<head_count, head_dim, B_r, B_c, DType, thread_count, qkv_contigous_buffer>;
 
   using NumHeadsType = Int<head_count>;
   using HeadDimType = Int<head_dim>;
@@ -285,42 +339,6 @@ struct FMHA {
   };
 
   static constexpr int threads_per_block{thread_count};
-
-  template <bool is_o = false>
-  COBRA_S_DEVICE auto get_tensor_layout(size_t batch_size, size_t N) {
-
-    if constexpr (qkv_contigous_buffer && !is_o) {
-      Int<head_dim * head_count * 3> embed3{};
-      return make_layout(
-          make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}),
-          make_stride(embed3.value * N, embed3, HeadDimType{}, _1{}));
-    } else {
-      return make_layout(
-          make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}),
-          LayoutRight{});
-    }
-  }
-
-  template <bool is_o = false, typename PtrType>
-  COBRA_S_DEVICE auto slice_head(PtrType g_ptr, int batch_size, int N) {
-
-    using BaseType = std::decay_t<std::remove_pointer_t<PtrType>>;
-    static_assert(std::is_pointer_v<PtrType>, "Must be a pointer");
-    static_assert(
-        std::is_same_v<std::remove_cv_t<std::remove_pointer_t<PtrType>>, DType>,
-        "Must point to DType");
-
-    const auto projection_layout{get_tensor_layout<is_o>(batch_size, N)};
-    const Tensor projection{
-        make_tensor(make_gmem_ptr<DType>(g_ptr), projection_layout)};
-    return projection(blockIdx.y, _, blockIdx.x, _);
-  }
-
-  COBRA_S_DEVICE auto identity_slice_head(int batch_size, int N) {
-    const auto projection_layout{get_tensor_layout(batch_size, N)};
-    const Tensor projection{make_identity_tensor(projection_layout.shape())};
-    return projection(blockIdx.y, _, blockIdx.x, _);
-  }
 
   template <typename LoadType> static constexpr auto get_tiled_copy() {
 
@@ -536,32 +554,21 @@ struct FMHA {
 
       constexpr size_t slice_size{size(r_score_slice)};
 
-      int adjusted_bound;
-
-      if constexpr (causal_mask) {
-        adjusted_bound = get<0>(scores_idty_slice(0)) + start_pos + 1;
-      } else if constexpr (predicate) {
-        adjusted_bound = bound;
-      } else {
-        adjusted_bound = 0;
-      }
+      size_t adjusted_bound{
+        cuda::std::min(get<0>(scores_idty_slice(0)) + start_pos + 1, static_cast<size_t>(bound))
+      };
 
       CUTE_UNROLL
       for (size_t idx{0}; idx < slice_size; ++idx) {
         // uses hardware unit, removes warp divergence from branch checks
         // each thread may hold multiple values from each row, we find the
         // local maximum first
-        if constexpr (predicate || causal_mask) {
-          auto n{get<1>(scores_idty_slice(idx))};
-          if (n < adjusted_bound) {
-            r_score_slice(idx) =
-                r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
-          } else {
-            r_score_slice(idx) = -INFINITY;
-          }
-        } else {
+        auto n{get<1>(scores_idty_slice(idx))};
+        if (n < adjusted_bound) {
           r_score_slice(idx) =
               r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
+        } else {
+          r_score_slice(idx) = -INFINITY;
         }
 
         current_max = cuda::std::max(r_score_slice(idx), current_max);
@@ -571,12 +578,8 @@ struct FMHA {
 
       // Compute scaling factor for old values
       DType scale_old;
-      if constexpr (causal_mask) {
-        if (old_max == current_max && current_max == -INFINITY) {
-          scale_old = DType(0);
-        } else {
-          scale_old = expf(old_max - current_max);
-        }
+      if (old_max == current_max && current_max == -INFINITY) {
+        scale_old = DType(0);
       } else {
         scale_old = expf(old_max - current_max);
       }
@@ -586,17 +589,13 @@ struct FMHA {
 
       DType local_sum{0};
 
-      // TODO experiment with efficent copies
+      // TODO experiment with efficient copies
 
       CUTE_UNROLL
       for (size_t idx{0}; idx < slice_size; ++idx) {
         auto p_score{r_score_slice(idx)};
-        if constexpr (causal_mask) {
-          if (old_max == current_max && current_max == -INFINITY) {
-            p_score = DType(0);
-          } else {
-            p_score = expf(p_score - current_max);
-          }
+        if (old_max == current_max && current_max == -INFINITY) {
+          p_score = DType(0);
         } else {
           p_score = expf(p_score - current_max);
         }
@@ -617,32 +616,50 @@ struct FMHA {
     }
   }
 
-  // start_pos is the KV-cache offset: it tells the attention kernel that
-  // the current query tokens sit at position [start_pos, start_pos + N_q)
-  // in the full sequence, and the KV cache already holds tokens [0, start_pos).
-  // The causal mask uses this to compute absolute positions so that during
-  // decode (single-token query) it correctly attends to all prior cached keys
-  // rather than masking them out, and during prefill-after-decode the mask
-  // is reapplied at the right offsets.
-  void operator()(DType *Q, DType *K, DType *V, DType *O, uint32_t batch_size,
-                  uint32_t N_q, uint32_t N_kv, uint32_t start_pos) {
-    dim3 grid_dim{head_count, batch_size, ceil_div(N_q, B_r)};
+  // flat_seq_q / flat_seq_kv are prefix-sum arrays on device of sequence lengths per batch.
+  // e.g. batch of [32, 64, 32] tokens -> [0, 32, 96, 128]
+  // seq_stride_q / seq_stride_kv: stride between sequence positions.
+  // Contiguous (N, H, d): H*d. Interleaved QKV split: 3*H*d.
+  void operator()(DType *Q, DType *K, DType *V, DType *O,
+                  const thrust::device_vector<uint32_t> &flat_seq_q,
+                  const thrust::device_vector<uint32_t> &flat_seq_kv,
+                  uint32_t total_q_tokens, uint32_t total_kv_tokens,
+                  size_t seq_stride_q, size_t seq_stride_kv) {
 
+    dim3 grid_dim{head_count, static_cast<uint32_t>(cute::ceil_div(total_q_tokens, B_r))};
     dim3 block_dim{thread_count};
 
     DType scale{rsqrt(static_cast<DType>(head_dim))};
 
     const auto tc_qk{get_tiled_copy<VectorizedLoadType>()};
     const auto tc_v{get_tiled_copy<ScalarLoadType>()};
-
     const auto tmma{get_tiled_mma()};
 
-    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc_qk), decltype(tc_v),
+    auto make_tensor_3d{[](auto *ptr, uint32_t seq_len, size_t seq_stride) {
+      return make_tensor(make_gmem_ptr(ptr),
+          make_layout(make_shape(seq_len, Int<head_count>{}, Int<head_dim>{}),
+                      make_stride(seq_stride, Int<head_dim>{}, _1{})));
+    }};
+
+    auto q_tensor{make_tensor_3d(Q, total_q_tokens, seq_stride_q)};
+    auto k_tensor{make_tensor_3d(K, total_kv_tokens, seq_stride_kv)};
+    auto v_tensor{make_tensor_3d(V, total_kv_tokens, seq_stride_kv)};
+    auto o_tensor{make_tensor_3d(O, total_q_tokens, seq_stride_q)};
+
+    auto flat_q_tensor{make_tensor(make_gmem_ptr(thrust::raw_pointer_cast(flat_seq_q.data())),
+                                   make_shape(static_cast<uint32_t>(flat_seq_q.size())))};
+    auto flat_kv_tensor{make_tensor(make_gmem_ptr(thrust::raw_pointer_cast(flat_seq_kv.data())),
+                                    make_shape(static_cast<uint32_t>(flat_seq_kv.size())))};
+
+    auto kernel_fptr{naive::mha_kernel<Self,
+                                       decltype(q_tensor), decltype(k_tensor),
+                                       decltype(v_tensor), decltype(o_tensor),
+                                       decltype(flat_q_tensor), decltype(flat_kv_tensor),
+                                       decltype(tc_qk), decltype(tc_v),
                                        decltype(tmma)>};
 
     size_t smem_size{sizeof(SharedStorage)};
 
-    // Set L1 to be SMEM only
     cudaFuncSetAttribute(
         kernel_fptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
@@ -650,7 +667,9 @@ struct FMHA {
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
     kernel_fptr<<<grid_dim, block_dim, smem_size>>>(
-        Q, K, V, O, N_q, N_kv, start_pos, scale, tc_qk, tc_v, tmma);
+        q_tensor, k_tensor, v_tensor, o_tensor,
+        flat_q_tensor, flat_kv_tensor,
+        scale, tc_qk, tc_v, tmma);
   }
 };
 

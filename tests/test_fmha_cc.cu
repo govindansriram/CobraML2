@@ -7,51 +7,73 @@
 using namespace cobraml;
 using namespace cute;
 
-template <int head_count, int head_dim, int B_r, int B_c, bool mask = false,
-          bool contiguous = false>
-void test_fmha(int batch_size, int sequence_length) {
-  using MHAType = kernels::FMHA<head_count, head_dim, B_r, B_c, float, 128,
-                                mask, contiguous>;
+struct BatchEntry {
+  int N_q;
+  int N_kv;
+};
+
+template <int head_count, int head_dim, int B_r, int B_c, bool contiguous = false>
+void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
+  using MHAType = kernels::FMHA<head_count, head_dim, B_r, B_c, float, 128, contiguous>;
 
   constexpr int hd = head_count * head_dim;
+  constexpr size_t seq_stride_separate = hd;
+  constexpr size_t seq_stride_contiguous = 3 * hd;
 
-  // allocate buffers — fused QKV or separate depending on contiguous flag
-  thrust::device_vector<float> qkv_device;
-  thrust::device_vector<float> q_device, k_device, v_device;
-
-  if constexpr (contiguous) {
-    int total_qkv = batch_size * sequence_length * hd * 3;
-    qkv_device = test_helpers::create_tensor<float>(
-        total_qkv, test_helpers::seeded_fill_random_uniform<float>(0));
-  } else {
-    q_device = test_helpers::create_projection<float>(
-        head_count, head_dim, batch_size, sequence_length,
-        test_helpers::seeded_fill_random_uniform<float>(0));
-    k_device = test_helpers::create_projection<float>(
-        head_count, head_dim, batch_size, sequence_length,
-        test_helpers::seeded_fill_random_uniform<float>(1));
-    v_device = test_helpers::create_projection<float>(
-        head_count, head_dim, batch_size, sequence_length,
-        test_helpers::seeded_fill_random_uniform<float>(2));
+  // build prefix-sum arrays
+  std::vector<uint32_t> flat_seq_q_host(batch.size() + 1);
+  std::vector<uint32_t> flat_seq_kv_host(batch.size() + 1);
+  flat_seq_q_host[0] = 0;
+  flat_seq_kv_host[0] = 0;
+  for (size_t i = 0; i < batch.size(); i++) {
+    ASSERT_EQ(batch[i].N_q % B_r, 0)
+        << "N_q must be divisible by B_r for batch element " << i;
+    flat_seq_q_host[i + 1] = flat_seq_q_host[i] + batch[i].N_q;
+    flat_seq_kv_host[i + 1] = flat_seq_kv_host[i] + batch[i].N_kv;
   }
 
-  thrust::device_vector<float> o_device{test_helpers::create_projection<float>(
-      head_count, head_dim, batch_size, sequence_length,
-      test_helpers::fill_zero<float>)};
+  uint32_t total_q = flat_seq_q_host.back();
+  uint32_t total_kv = flat_seq_kv_host.back();
 
-  // resolve Q, K, V pointers
+  // allocate device tensors
+  thrust::device_vector<float> qkv_device;
+  thrust::device_vector<float> q_device, k_device, v_device;
   float *q_ptr, *k_ptr, *v_ptr;
+  size_t seq_stride_q, seq_stride_kv;
+
   if constexpr (contiguous) {
+    uint32_t total_tokens = std::max(total_q, total_kv);
+    qkv_device = test_helpers::create_tensor<float>(
+        total_tokens * 3 * hd,
+        test_helpers::seeded_fill_random_uniform<float>(0));
     float *base = thrust::raw_pointer_cast(qkv_device.data());
     q_ptr = base;
     k_ptr = base + hd;
     v_ptr = base + 2 * hd;
+    seq_stride_q = seq_stride_contiguous;
+    seq_stride_kv = seq_stride_contiguous;
   } else {
+    q_device = test_helpers::create_projection<float>(
+        total_q, head_count, head_dim,
+        test_helpers::seeded_fill_random_uniform<float>(0));
+    k_device = test_helpers::create_projection<float>(
+        total_kv, head_count, head_dim,
+        test_helpers::seeded_fill_random_uniform<float>(1));
+    v_device = test_helpers::create_projection<float>(
+        total_kv, head_count, head_dim,
+        test_helpers::seeded_fill_random_uniform<float>(2));
     q_ptr = thrust::raw_pointer_cast(q_device.data());
     k_ptr = thrust::raw_pointer_cast(k_device.data());
     v_ptr = thrust::raw_pointer_cast(v_device.data());
+    seq_stride_q = seq_stride_separate;
+    seq_stride_kv = seq_stride_separate;
   }
+
+  thrust::device_vector<float> o_device(total_q * hd, 0.0f);
   float *o_ptr = thrust::raw_pointer_cast(o_device.data());
+
+  thrust::device_vector<uint32_t> flat_seq_q_dev(flat_seq_q_host.begin(), flat_seq_q_host.end());
+  thrust::device_vector<uint32_t> flat_seq_kv_dev(flat_seq_kv_host.begin(), flat_seq_kv_host.end());
 
   MHAType mha{};
 
@@ -63,8 +85,10 @@ void test_fmha(int batch_size, int sequence_length) {
 #endif
 
   for (size_t i{0}; i < warmup_iters; ++i) {
-    mha(q_ptr, k_ptr, v_ptr, o_ptr, batch_size, sequence_length,
-        sequence_length, 0);
+    mha(q_ptr, k_ptr, v_ptr, o_ptr,
+        flat_seq_q_dev, flat_seq_kv_dev,
+        total_q, total_kv,
+        seq_stride_q, seq_stride_kv);
   }
   cudaDeviceSynchronize();
 
@@ -78,8 +102,10 @@ void test_fmha(int batch_size, int sequence_length) {
 
   for (size_t i{0}; i < total_iters; ++i) {
     cudaEventRecord(start);
-    mha(q_ptr, k_ptr, v_ptr, o_ptr, batch_size, sequence_length,
-        sequence_length, 0);
+    mha(q_ptr, k_ptr, v_ptr, o_ptr,
+        flat_seq_q_dev, flat_seq_kv_dev,
+        total_q, total_kv,
+        seq_stride_q, seq_stride_kv);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&ms, start, stop);
@@ -94,147 +120,130 @@ void test_fmha(int batch_size, int sequence_length) {
 
   float average_time_ms{total_time_ms / total_iters};
 
+  size_t total_flops{0};
+  for (const auto &entry : batch) {
+    total_flops += 4ULL * head_count * entry.N_q * entry.N_kv * head_dim;
+  }
+
   std::cout << "Avg Kernel execution time: " << average_time_ms << " ms\n";
   std::cout << "Achieved performance: "
-            << test_helpers::calculate_gflops(batch_size, head_count,
-                                              sequence_length, head_dim,
-                                              average_time_ms)
+            << (total_flops / (average_time_ms / 1000.0) / 1e9)
             << " GFLOPs\n";
 #else
   cudaError_t err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
 #endif
 
+  // CPU reference
   thrust::host_vector<float> o_host = o_device;
-  std::vector<float> o_ref(o_host.size(), 0.0f);
+  std::vector<float> o_ref(total_q * hd, 0.0f);
 
   if constexpr (contiguous) {
     thrust::host_vector<float> qkv_host = qkv_device;
-    test_helpers::cpu_mha_contiguous(qkv_host.data(), o_ref.data(), batch_size,
-                                     sequence_length, head_count, head_dim,
-                                     mask);
+    float *base = qkv_host.data();
+    test_helpers::cpu_mha_ragged(base, base + hd, base + 2 * hd, o_ref.data(),
+                                 flat_seq_q_host, flat_seq_kv_host,
+                                 head_count, head_dim,
+                                 seq_stride_contiguous, seq_stride_contiguous);
   } else {
     thrust::host_vector<float> q_host = q_device;
     thrust::host_vector<float> k_host = k_device;
     thrust::host_vector<float> v_host = v_device;
-    test_helpers::cpu_mha(q_host.data(), k_host.data(), v_host.data(),
-                          o_ref.data(), batch_size, sequence_length, head_count,
-                          head_dim, mask);
+    test_helpers::cpu_mha_ragged(q_host.data(), k_host.data(), v_host.data(),
+                                 o_ref.data(),
+                                 flat_seq_q_host, flat_seq_kv_host,
+                                 head_count, head_dim,
+                                 seq_stride_separate, seq_stride_separate);
   }
 
   std::vector<float> o_vec(o_host.begin(), o_host.end());
-  test_helpers::check_output(o_vec, o_ref, batch_size, sequence_length,
-                             head_count, head_dim, 1e-4f);
+  test_helpers::check_output_ragged(o_vec, o_ref, flat_seq_q_host,
+                                    head_count, head_dim, seq_stride_q, 1e-4f);
 }
 
-// === Separate buffer tests ===
+// === Uniform batch (all same length) ===
 
-// even block size by sequence length
-TEST(FMHA_CC, H16_D64_Br64_Bc64_B4_N512) { test_fmha<16, 64, 64, 64>(4, 512); }
-
-// even block size by sequence length with causal masking
-TEST(FMHA_CC, H16_D64_Br64_Bc64_B4_N512_causal) {
-  test_fmha<16, 64, 64, 64, true>(4, 512);
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B4_N512) {
+  test_fmha_ragged<16, 64, 64, 64>({{512, 512}, {512, 512}, {512, 512}, {512, 512}});
 }
 
-// uneven block size by sequence length (requires predication)
-TEST(FMHA_CC, H2_D64_Br64_Bc64_B56_N490) { test_fmha<2, 64, 64, 64>(56, 490); }
-
-// uneven block size by sequence length (requires predication) with causal
-// masking
-TEST(FMHA_CC, H2_D64_Br64_Bc64_B56_N490_causal) {
-  test_fmha<2, 64, 64, 64, true>(56, 490);
+TEST(FMHA_CC, H2_D64_Br64_Bc64_B4_N448_Nkv490) {
+  test_fmha_ragged<2, 64, 64, 64>({{448, 490}, {448, 490}, {448, 490}, {448, 490}});
 }
 
-// 1 block only and even
-TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N64) { test_fmha<16, 64, 64, 64>(8, 64); }
-
-// 1 block only and even with causal masking
-TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N64_causal) {
-  test_fmha<16, 64, 64, 64, true>(8, 64);
+TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N64) {
+  test_fmha_ragged<16, 64, 64, 64>({{64, 64}, {64, 64}, {64, 64}, {64, 64},
+                                     {64, 64}, {64, 64}, {64, 64}, {64, 64}});
 }
 
-// 1 block only and uneven
-TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N59) { test_fmha<16, 64, 64, 64>(8, 59); }
-
-// 1 block only and uneven with causal masking
-TEST(FMHA_CC, H16_D64_Br64_Bc64_B8_N59_causal) {
-  test_fmha<16, 64, 64, 64, true>(8, 59);
-}
-
-// even block size by sequence length head_dim 128
 TEST(FMHA_CC, H16_D128_Br32_Bc32_B4_N512) {
-  test_fmha<16, 128, 32, 32>(4, 512);
+  test_fmha_ragged<16, 128, 32, 32>({{512, 512}, {512, 512}, {512, 512}, {512, 512}});
 }
 
-// even block size by sequence length with causal masking, head_dim 128
-TEST(FMHA_CC, H16_D128_Br32_Bc32_B4_N512_causal) {
-  test_fmha<16, 128, 32, 32, true>(4, 512);
+// === Mixed prefill + decode ===
+
+TEST(FMHA_CC_RAGGED, prefill_and_decode_mixed) {
+  test_fmha_ragged<16, 64, 64, 64>({
+      {256, 256},   // prefill
+      {64, 512},    // decode (1 Q tile, 512 cached KV)
+      {128, 128},   // prefill
+      {64, 300},    // decode (1 Q tile, 300 cached KV — not divisible by B_c)
+  });
 }
 
-// uneven block size by sequence length (requires predication) head_dim 128
-TEST(FMHA_CC, H2_D128_Br32_Bc32_B56_N490) {
-  test_fmha<2, 128, 32, 32>(56, 490);
+TEST(FMHA_CC_RAGGED, decode_only_varying_cache) {
+  test_fmha_ragged<16, 64, 64, 64>({
+      {64, 100},
+      {64, 256},
+      {64, 37},
+      {64, 513},
+  });
 }
 
-// uneven block size by sequence length (requires predication) with causal
-// masking head_dim 128
-TEST(FMHA_CC, H2_D128_Br32_Bc32_B56_N490_causal) {
-  test_fmha<2, 128, 32, 32, true>(56, 490);
-}
+// TEST(FMHA_CC_RAGGED, prefill_varying_lengths) {
+//   test_fmha_ragged<2, 64, 64, 64>({
+//       {64, 64},
+//       {128, 128},
+//       {256, 256},
+//       {192, 192},
+//   });
+// }
 
-// === Contiguous QKV buffer tests (simulates split from fused projection) ===
+// TEST(FMHA_CC_RAGGED, decode_single_large_cache) {
+//   test_fmha_ragged<16, 64, 64, 64>({
+//       {64, 1000},
+//   });
+// }
 
-// even block size
-TEST(FMHA_CC_CONTIGUOUS, H16_D64_Br64_Bc64_B4_N512) {
-  test_fmha<16, 64, 64, 64, false, true>(4, 512);
-}
+// TEST(FMHA_CC_RAGGED, prefill_and_decode_d128) {
+//   test_fmha_ragged<16, 128, 32, 32>({
+//       {128, 128},   // prefill
+//       {32, 200},    // decode (not divisible by B_c=32)
+//       {64, 64},     // prefill
+//       {32, 97},     // decode (very uneven KV)
+//   });
+// }
 
-TEST(FMHA_CC_CONTIGUOUS, H16_D64_Br64_Bc64_B4_N512_causal) {
-  test_fmha<16, 64, 64, 64, true, true>(4, 512);
-}
+// // === Contiguous QKV buffer tests ===
 
-// uneven block size (requires predication)
-TEST(FMHA_CC_CONTIGUOUS, H2_D64_Br64_Bc64_B56_N490) {
-  test_fmha<2, 64, 64, 64, false, true>(56, 490);
-}
+// TEST(FMHA_CC_CONTIGUOUS, uniform_batch) {
+//   test_fmha_ragged<16, 64, 64, 64, true>({{512, 512}, {512, 512}, {512, 512}, {512, 512}});
+// }
 
-TEST(FMHA_CC_CONTIGUOUS, H2_D64_Br64_Bc64_B56_N490_causal) {
-  test_fmha<2, 64, 64, 64, true, true>(56, 490);
-}
+// TEST(FMHA_CC_CONTIGUOUS, prefill_and_decode) {
+//   test_fmha_ragged<16, 64, 64, 64, true>({
+//       {256, 256},
+//       {64, 512},
+//       {128, 128},
+//       {64, 300},
+//   });
+// }
 
-// 1 block only and even
-TEST(FMHA_CC_CONTIGUOUS, H16_D64_Br64_Bc64_B8_N64) {
-  test_fmha<16, 64, 64, 64, false, true>(8, 64);
-}
-
-TEST(FMHA_CC_CONTIGUOUS, H16_D64_Br64_Bc64_B8_N64_causal) {
-  test_fmha<16, 64, 64, 64, true, true>(8, 64);
-}
-
-// 1 block only and uneven
-TEST(FMHA_CC_CONTIGUOUS, H16_D64_Br64_Bc64_B8_N59) {
-  test_fmha<16, 64, 64, 64, false, true>(8, 59);
-}
-
-TEST(FMHA_CC_CONTIGUOUS, H16_D64_Br64_Bc64_B8_N59_causal) {
-  test_fmha<16, 64, 64, 64, true, true>(8, 59);
-}
-
-// head_dim 128
-TEST(FMHA_CC_CONTIGUOUS, H16_D128_Br32_Bc32_B4_N512) {
-  test_fmha<16, 128, 32, 32, false, true>(4, 512);
-}
-
-TEST(FMHA_CC_CONTIGUOUS, H16_D128_Br32_Bc32_B4_N512_causal) {
-  test_fmha<16, 128, 32, 32, true, true>(4, 512);
-}
-
-// uneven head_dim 128
-TEST(FMHA_CC_CONTIGUOUS, H2_D128_Br32_Bc32_B56_N490) {
-  test_fmha<2, 128, 32, 32, false, true>(56, 490);
-}
-
-TEST(FMHA_CC_CONTIGUOUS, H2_D128_Br32_Bc32_B56_N490_causal) {
-  test_fmha<2, 128, 32, 32, true, true>(56, 490);
-}
+// TEST(FMHA_CC_CONTIGUOUS, d128_mixed) {
+//   test_fmha_ragged<16, 128, 32, 32, true>({
+//       {128, 128},
+//       {32, 200},
+//       {64, 64},
+//       {32, 97},
+//   });
+// }

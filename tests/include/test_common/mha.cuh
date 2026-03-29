@@ -7,7 +7,7 @@ namespace cobraml::test_helpers {
 // CPU reference for ragged-batched MHA with causal masking.
 // flat_seq_q / flat_seq_kv are prefix-sum arrays: [0, N_q_0, N_q_0+N_q_1, ...]
 // Q/K/V are laid out as (total_tokens, H, d) with the given seq_stride.
-// O uses seq_stride_q.
+// O always uses stride H*d (never interleaved).
 void cpu_mha_ragged(float *Q, float *K, float *V, float *O,
                     const std::vector<uint32_t> &flat_seq_q,
                     const std::vector<uint32_t> &flat_seq_kv,
@@ -32,15 +32,6 @@ void cpu_mha_ragged(float *Q, float *K, float *V, float *O,
 
         // causal bound: Q row i sits at absolute position (N_kv - N_q + i)
         int causal_bound = N_kv - N_q + i + 1;
-
-        // if causal_bound <= 0, this row has nothing to attend to — output zeros
-        if (causal_bound <= 0) {
-          for (int k_idx = 0; k_idx < d; k_idx++) {
-            int o_idx = (q_start + i) * seq_stride_q + h * d + k_idx;
-            O[o_idx] = 0.0f;
-          }
-          continue;
-        }
 
         for (int j = 0; j < N_kv; j++) {
           if (j >= causal_bound) {
@@ -71,7 +62,7 @@ void cpu_mha_ragged(float *Q, float *K, float *V, float *O,
             int v_idx = (kv_start + j) * seq_stride_kv + h * d + k_idx;
             out += (scores[j] / sum_exp) * V[v_idx];
           }
-          int o_idx = (q_start + i) * seq_stride_q + h * d + k_idx;
+          int o_idx = (q_start + i) * (H * d) + h * d + k_idx;
           O[o_idx] = out;
         }
       }
@@ -89,8 +80,10 @@ create_projection(int total_tokens, int head_count, int head_dim, auto fill_fn) 
 void check_output_ragged(const std::vector<float> &result,
                          const std::vector<float> &expected,
                          const std::vector<uint32_t> &flat_seq_q,
-                         int h, int d, size_t seq_stride,
+                         int h, int d,
                          float tolerance) {
+
+  int o_stride{h * d};
 
   for (int b = 0; b < static_cast<int>(flat_seq_q.size()) - 1; b++) {
     int q_start = flat_seq_q[b];
@@ -99,7 +92,7 @@ void check_output_ragged(const std::vector<float> &result,
     for (int seq = q_start; seq < q_end; seq++) {
       for (int head = 0; head < h; head++) {
         for (int idx = 0; idx < d; idx++) {
-          int i = seq * seq_stride + head * d + idx;
+          int i = seq * o_stride + head * d + idx;
           ASSERT_NEAR(result[i], expected[i], tolerance)
               << "Mismatch at batch: " << b
               << ", seq: " << (seq - q_start)

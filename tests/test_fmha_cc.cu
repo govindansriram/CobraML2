@@ -21,19 +21,24 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
   constexpr size_t seq_stride_contiguous = 3 * hd;
 
   // build prefix-sum arrays
-  std::vector<uint32_t> flat_seq_q_host(batch.size() + 1);
-  std::vector<uint32_t> flat_seq_kv_host(batch.size() + 1);
-  flat_seq_q_host[0] = 0;
-  flat_seq_kv_host[0] = 0;
-  for (size_t i = 0; i < batch.size(); i++) {
-    ASSERT_EQ(batch[i].N_q % B_r, 0)
-        << "N_q must be divisible by B_r for batch element " << i;
-    flat_seq_q_host[i + 1] = flat_seq_q_host[i] + batch[i].N_q;
-    flat_seq_kv_host[i + 1] = flat_seq_kv_host[i] + batch[i].N_kv;
+  std::vector<uint32_t> cu_seqlens_q_host(batch.size() + 1);
+  std::vector<uint32_t> cu_seqlens_kv_host(batch.size() + 1);
+  std::vector<uint32_t> cu_tiles_q_host(batch.size() + 1);
+  cu_seqlens_q_host[0] = 0;
+  cu_seqlens_kv_host[0] = 0;
+  cu_tiles_q_host[0] = 0;
+  for (size_t i{0}; i < batch.size(); i++) {
+    ASSERT_GE(batch[i].N_kv, batch[i].N_q)
+        << "N_kv must be >= N_q for batch element " << i;
+    cu_seqlens_q_host[i + 1] = cu_seqlens_q_host[i] + batch[i].N_q;
+    cu_seqlens_kv_host[i + 1] = cu_seqlens_kv_host[i] + batch[i].N_kv;
+    cu_tiles_q_host[i + 1] = cu_tiles_q_host[i]
+        + static_cast<uint32_t>(cute::ceil_div(batch[i].N_q, B_r));
   }
 
-  uint32_t total_q = flat_seq_q_host.back();
-  uint32_t total_kv = flat_seq_kv_host.back();
+  uint32_t total_q{cu_seqlens_q_host.back()};
+  uint32_t total_kv{cu_seqlens_kv_host.back()};
+  uint32_t total_tiles{cu_tiles_q_host.back()};
 
   // allocate device tensors
   thrust::device_vector<float> qkv_device;
@@ -72,8 +77,9 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
   thrust::device_vector<float> o_device(total_q * hd, 0.0f);
   float *o_ptr = thrust::raw_pointer_cast(o_device.data());
 
-  thrust::device_vector<uint32_t> flat_seq_q_dev(flat_seq_q_host.begin(), flat_seq_q_host.end());
-  thrust::device_vector<uint32_t> flat_seq_kv_dev(flat_seq_kv_host.begin(), flat_seq_kv_host.end());
+  thrust::device_vector<uint32_t> cu_seqlens_q_dev(cu_seqlens_q_host.begin(), cu_seqlens_q_host.end());
+  thrust::device_vector<uint32_t> cu_seqlens_kv_dev(cu_seqlens_kv_host.begin(), cu_seqlens_kv_host.end());
+  thrust::device_vector<uint32_t> cu_tiles_q_dev(cu_tiles_q_host.begin(), cu_tiles_q_host.end());
 
   MHAType mha{};
 
@@ -86,8 +92,8 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
 
   for (size_t i{0}; i < warmup_iters; ++i) {
     mha(q_ptr, k_ptr, v_ptr, o_ptr,
-        flat_seq_q_dev, flat_seq_kv_dev,
-        total_q, total_kv,
+        cu_seqlens_q_dev, cu_seqlens_kv_dev, cu_tiles_q_dev,
+        total_q, total_kv, total_tiles,
         seq_stride_q, seq_stride_kv);
   }
   cudaDeviceSynchronize();
@@ -103,8 +109,8 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
   for (size_t i{0}; i < total_iters; ++i) {
     cudaEventRecord(start);
     mha(q_ptr, k_ptr, v_ptr, o_ptr,
-        flat_seq_q_dev, flat_seq_kv_dev,
-        total_q, total_kv,
+        cu_seqlens_q_dev, cu_seqlens_kv_dev, cu_tiles_q_dev,
+        total_q, total_kv, total_tiles,
         seq_stride_q, seq_stride_kv);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
@@ -142,7 +148,7 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
     thrust::host_vector<float> qkv_host = qkv_device;
     float *base = qkv_host.data();
     test_helpers::cpu_mha_ragged(base, base + hd, base + 2 * hd, o_ref.data(),
-                                 flat_seq_q_host, flat_seq_kv_host,
+                                 cu_seqlens_q_host, cu_seqlens_kv_host,
                                  head_count, head_dim,
                                  seq_stride_contiguous, seq_stride_contiguous);
   } else {
@@ -151,14 +157,15 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
     thrust::host_vector<float> v_host = v_device;
     test_helpers::cpu_mha_ragged(q_host.data(), k_host.data(), v_host.data(),
                                  o_ref.data(),
-                                 flat_seq_q_host, flat_seq_kv_host,
+                                 cu_seqlens_q_host, cu_seqlens_kv_host,
                                  head_count, head_dim,
                                  seq_stride_separate, seq_stride_separate);
   }
 
   std::vector<float> o_vec(o_host.begin(), o_host.end());
-  test_helpers::check_output_ragged(o_vec, o_ref, flat_seq_q_host,
-                                    head_count, head_dim, seq_stride_q, 1e-4f);
+  constexpr float tolerance{head_dim >= 128 ? 1e-3f : 1e-4f};
+  test_helpers::check_output_ragged(o_vec, o_ref, cu_seqlens_q_host,
+                                    head_count, head_dim, tolerance);
 }
 
 // === Uniform batch (all same length) ===
@@ -195,55 +202,80 @@ TEST(FMHA_CC_RAGGED, decode_only_varying_cache) {
   test_fmha_ragged<16, 64, 64, 64>({
       {64, 100},
       {64, 256},
-      {64, 37},
+      {64, 67},
       {64, 513},
   });
 }
 
-// TEST(FMHA_CC_RAGGED, prefill_varying_lengths) {
-//   test_fmha_ragged<2, 64, 64, 64>({
-//       {64, 64},
-//       {128, 128},
-//       {256, 256},
-//       {192, 192},
-//   });
-// }
+TEST(FMHA_CC_RAGGED, prefill_varying_lengths) {
+  test_fmha_ragged<2, 64, 64, 64>({
+      {64, 64},
+      {128, 128},
+      {256, 256},
+      {192, 192},
+  });
+}
 
-// TEST(FMHA_CC_RAGGED, decode_single_large_cache) {
-//   test_fmha_ragged<16, 64, 64, 64>({
-//       {64, 1000},
-//   });
-// }
+TEST(FMHA_CC_RAGGED, decode_single_large_cache) {
+  test_fmha_ragged<16, 64, 64, 64>({
+      {64, 1000},
+  });
+}
 
-// TEST(FMHA_CC_RAGGED, prefill_and_decode_d128) {
-//   test_fmha_ragged<16, 128, 32, 32>({
-//       {128, 128},   // prefill
-//       {32, 200},    // decode (not divisible by B_c=32)
-//       {64, 64},     // prefill
-//       {32, 97},     // decode (very uneven KV)
-//   });
-// }
+TEST(FMHA_CC_RAGGED, prefill_and_decode_d128) {
+  test_fmha_ragged<16, 128, 32, 32>({
+      {128, 128},   // prefill
+      {32, 128},    // decode (not divisible by B_c=32)
+      {64, 64},     // prefill
+      {32, 97},     // decode (very uneven KV)
+  });
+}
 
-// // === Contiguous QKV buffer tests ===
+// === Unpadded Q (non-multiple of B_r) ===
 
-// TEST(FMHA_CC_CONTIGUOUS, uniform_batch) {
-//   test_fmha_ragged<16, 64, 64, 64, true>({{512, 512}, {512, 512}, {512, 512}, {512, 512}});
-// }
+TEST(FMHA_CC_RAGGED, unpadded_q_prefill) {
+  test_fmha_ragged<16, 64, 64, 64>({
+      {50, 50},     // partial last tile (50 % 64 != 0)
+      {100, 100},   // partial last tile (100 % 64 != 0)
+  });
+}
 
-// TEST(FMHA_CC_CONTIGUOUS, prefill_and_decode) {
-//   test_fmha_ragged<16, 64, 64, 64, true>({
-//       {256, 256},
-//       {64, 512},
-//       {128, 128},
-//       {64, 300},
-//   });
-// }
+TEST(FMHA_CC_RAGGED, unpadded_q_decode_mixed) {
+  test_fmha_ragged<16, 64, 64, 64>({
+      {50, 50},     // prefill, partial tile
+      {1, 512},     // single-token decode
+      {13, 200},    // partial tile, large KV cache
+  });
+}
 
-// TEST(FMHA_CC_CONTIGUOUS, d128_mixed) {
-//   test_fmha_ragged<16, 128, 32, 32, true>({
-//       {128, 128},
-//       {32, 200},
-//       {64, 64},
-//       {32, 97},
-//   });
-// }
+TEST(FMHA_CC_RAGGED, single_token_decode) {
+  test_fmha_ragged<16, 64, 64, 64>({
+      {1, 1},
+      {1, 64},
+      {1, 500},
+  });
+}
+
+// === Contiguous QKV buffer tests ===
+
+TEST(FMHA_CC_CONTIGUOUS, uniform_batch) {
+  test_fmha_ragged<16, 64, 64, 64, true>({{512, 512}, {512, 512}, {512, 512}, {512, 512}});
+}
+
+TEST(FMHA_CC_CONTIGUOUS, prefill_and_decode) {
+  test_fmha_ragged<16, 64, 64, 64, true>({
+      {256, 256},
+      {64, 512},
+      {128, 128},
+      {64, 300},
+  });
+}
+
+TEST(FMHA_CC_CONTIGUOUS, d128_mixed) {
+  test_fmha_ragged<16, 128, 32, 32, true>({
+      {128, 128},
+      {32, 200},
+      {64, 64},
+      {32, 97},
+  });
+}

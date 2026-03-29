@@ -12,13 +12,14 @@ struct BatchEntry {
   int N_kv;
 };
 
-template <int head_count, int head_dim, int B_r, int B_c, bool contiguous = false>
+template <int head_count, int head_dim, int B_r, int B_c,
+          int q_seq_stride = head_count * head_dim,
+          int kv_seq_stride = head_count * head_dim>
 void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
-  using MHAType = kernels::FMHA<head_count, head_dim, B_r, B_c, float, 128, contiguous>;
+  using MHAType = kernels::FMHA<head_count, head_dim, B_r, B_c, float, 128, q_seq_stride, kv_seq_stride>;
 
-  constexpr int hd = head_count * head_dim;
-  constexpr size_t seq_stride_separate = hd;
-  constexpr size_t seq_stride_contiguous = 3 * hd;
+  constexpr int hd{head_count * head_dim};
+  constexpr bool contiguous{q_seq_stride != hd || kv_seq_stride != hd};
 
   // build prefix-sum arrays
   std::vector<uint32_t> cu_seqlens_q_host(batch.size() + 1);
@@ -44,7 +45,6 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
   thrust::device_vector<float> qkv_device;
   thrust::device_vector<float> q_device, k_device, v_device;
   float *q_ptr, *k_ptr, *v_ptr;
-  size_t seq_stride_q, seq_stride_kv;
 
   if constexpr (contiguous) {
     uint32_t total_tokens = std::max(total_q, total_kv);
@@ -55,8 +55,6 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
     q_ptr = base;
     k_ptr = base + hd;
     v_ptr = base + 2 * hd;
-    seq_stride_q = seq_stride_contiguous;
-    seq_stride_kv = seq_stride_contiguous;
   } else {
     q_device = test_helpers::create_projection<float>(
         total_q, head_count, head_dim,
@@ -70,8 +68,6 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
     q_ptr = thrust::raw_pointer_cast(q_device.data());
     k_ptr = thrust::raw_pointer_cast(k_device.data());
     v_ptr = thrust::raw_pointer_cast(v_device.data());
-    seq_stride_q = seq_stride_separate;
-    seq_stride_kv = seq_stride_separate;
   }
 
   thrust::device_vector<float> o_device(total_q * hd, 0.0f);
@@ -93,8 +89,7 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
   for (size_t i{0}; i < warmup_iters; ++i) {
     mha(q_ptr, k_ptr, v_ptr, o_ptr,
         cu_seqlens_q_dev, cu_seqlens_kv_dev, cu_tiles_q_dev,
-        total_q, total_kv, total_tiles,
-        seq_stride_q, seq_stride_kv);
+        total_q, total_kv, total_tiles);
   }
   cudaDeviceSynchronize();
 
@@ -110,8 +105,7 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
     cudaEventRecord(start);
     mha(q_ptr, k_ptr, v_ptr, o_ptr,
         cu_seqlens_q_dev, cu_seqlens_kv_dev, cu_tiles_q_dev,
-        total_q, total_kv, total_tiles,
-        seq_stride_q, seq_stride_kv);
+        total_q, total_kv, total_tiles);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&ms, start, stop);
@@ -150,7 +144,7 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
     test_helpers::cpu_mha_ragged(base, base + hd, base + 2 * hd, o_ref.data(),
                                  cu_seqlens_q_host, cu_seqlens_kv_host,
                                  head_count, head_dim,
-                                 seq_stride_contiguous, seq_stride_contiguous);
+                                 q_seq_stride, kv_seq_stride);
   } else {
     thrust::host_vector<float> q_host = q_device;
     thrust::host_vector<float> k_host = k_device;
@@ -159,7 +153,7 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
                                  o_ref.data(),
                                  cu_seqlens_q_host, cu_seqlens_kv_host,
                                  head_count, head_dim,
-                                 seq_stride_separate, seq_stride_separate);
+                                 q_seq_stride, kv_seq_stride);
   }
 
   std::vector<float> o_vec(o_host.begin(), o_host.end());
@@ -259,11 +253,11 @@ TEST(FMHA_CC_RAGGED, single_token_decode) {
 // === Contiguous QKV buffer tests ===
 
 TEST(FMHA_CC_CONTIGUOUS, uniform_batch) {
-  test_fmha_ragged<16, 64, 64, 64, true>({{512, 512}, {512, 512}, {512, 512}, {512, 512}});
+  test_fmha_ragged<16, 64, 64, 64, 16*64*3, 16*64*3>({{512, 512}, {512, 512}, {512, 512}, {512, 512}});
 }
 
 TEST(FMHA_CC_CONTIGUOUS, prefill_and_decode) {
-  test_fmha_ragged<16, 64, 64, 64, true>({
+  test_fmha_ragged<16, 64, 64, 64, 16*64*3, 16*64*3>({
       {256, 256},
       {64, 512},
       {128, 128},
@@ -272,7 +266,7 @@ TEST(FMHA_CC_CONTIGUOUS, prefill_and_decode) {
 }
 
 TEST(FMHA_CC_CONTIGUOUS, d128_mixed) {
-  test_fmha_ragged<16, 128, 32, 32, true>({
+  test_fmha_ragged<16, 128, 32, 32, 16*128*3, 16*128*3>({
       {128, 128},
       {32, 200},
       {64, 64},

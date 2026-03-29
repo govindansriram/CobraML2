@@ -15,17 +15,11 @@ using namespace cute;
 namespace naive {
 
   // TODO make this binary search
-template<typename TensorEngine, typename TensorLayout>
-__device__ int index_search(Tensor<TensorEngine, TensorLayout> sequence_tensor, int starting_token){
-
-  int tensor_size{static_cast<int>(size(sequence_tensor))};
-
-  for (size_t i{0}; i < tensor_size; ++i){
-    if (starting_token < sequence_tensor(i))
+__forceinline__ __device__ int index_search(const uint32_t *__restrict__ data, int starting_token){
+  for (int i{0}; ; ++i){
+    if (starting_token < static_cast<int>(data[i]))
       return i - 1;
   }
-
-  return -1;
 }
 
 /**
@@ -43,34 +37,54 @@ __device__ int index_search(Tensor<TensorEngine, TensorLayout> sequence_tensor, 
  * @return void
  */
 template <typename MHAType,
-          typename TensorTypeQ,
-          typename TensorTypeK,
-          typename TensorTypeV,
-          typename TensorTypeO,
-          typename TensorTypeCuSeqQ,
-          typename TensorTypeCuSeqKV,
-          typename TensorTypeCuTilesQ,
+          int seq_stride_q,
+          int seq_stride_kv,
           typename TiledCopyTypeQK,
           typename TiledCopyTypeV,
           typename TiledMMAType>
-__global__ void mha_kernel(const TensorTypeQ Q,
-                           const TensorTypeK K,
-                           const TensorTypeV V,
-                           TensorTypeO O,
-                           const TensorTypeCuSeqQ cu_seqlens_q,
-                           const TensorTypeCuSeqKV cu_seqlens_kv,
-                           const TensorTypeCuTilesQ cu_tiles_q,
+__global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
+                           const typename MHAType::TensorDType *__restrict__ K,
+                           const typename MHAType::TensorDType *__restrict__ V,
+                           typename MHAType::TensorDType *__restrict__ O,
+                           const uint32_t *__restrict__ cu_seqlens_q,
+                           const uint32_t *__restrict__ cu_seqlens_kv,
+                           const uint32_t *__restrict__ cu_tiles_q,
+                           const uint32_t total_q_tokens,
+                           const uint32_t total_kv_tokens,
                            const typename MHAType::TensorDType scale,
                            TiledCopyTypeQK tc_qk,
                            TiledCopyTypeV tc_v,
                            TiledMMAType t_mma) {
 
   using DType = typename MHAType::TensorDType;
+  constexpr typename MHAType::HeadDimType d{};
+  constexpr typename MHAType::QueryRowsType B_r{};
+  constexpr typename MHAType::KVColsType B_c{};
+  constexpr int head_count{MHAType::NumHeadsType::value};
+  constexpr auto hd{Int<head_count * MHAType::HeadDimType::value>{}};
 
-  const Tensor q_head_all{Q(_, blockIdx.x, _)}; // (Nq_total, d)
-  const Tensor k_head_all{K(_, blockIdx.x, _)}; // (Nkv_total, d)
-  const Tensor v_head_all{V(_, blockIdx.x, _)}; // (Nkv_total, d)
-  Tensor o_head_all{O(_, blockIdx.x, _)}; // (Nq_total, d)
+  // map blockIdx.y -> (seq_idx, local tile index)
+  int seq_idx{index_search(cu_tiles_q, blockIdx.y)};
+  size_t q_block{blockIdx.y - cu_tiles_q[seq_idx]};
+
+  size_t N_q{cu_seqlens_q[seq_idx + 1] - cu_seqlens_q[seq_idx]};
+  size_t N_kv{cu_seqlens_kv[seq_idx + 1] - cu_seqlens_kv[seq_idx]};
+  size_t start_pos{N_kv - N_q};
+
+  auto slice_head{[&](auto *ptr, uint32_t total_tokens, auto stride,
+                       size_t seq_offset, auto seq_len) {
+    auto all{make_tensor(make_gmem_ptr(ptr),
+        make_layout(make_shape(total_tokens, Int<head_count>{}, d),
+                    make_stride(stride, d, _1{})))};
+    auto head{all(_, blockIdx.x, _)};
+    auto base{head(seq_offset, _).data()};
+    return make_tensor(base, make_layout(make_shape(seq_len, d), head.layout().stride()));
+  }};
+
+  auto q_head{slice_head(Q, total_q_tokens, Int<seq_stride_q>{}, cu_seqlens_q[seq_idx], N_q)};
+  auto k_head{slice_head(K, total_kv_tokens, Int<seq_stride_kv>{}, cu_seqlens_kv[seq_idx], N_kv)};
+  auto v_head{slice_head(V, total_kv_tokens, Int<seq_stride_kv>{}, cu_seqlens_kv[seq_idx], N_kv)};
+  auto o_head{slice_head(O, total_q_tokens, hd, cu_seqlens_q[seq_idx], N_q)};
 
   extern __shared__ char shared_memory[];
   using SharedStorageType = typename MHAType::SharedStorage;
@@ -94,29 +108,6 @@ __global__ void mha_kernel(const TensorTypeQ Q,
                               typename SharedStorageType::PLayoutType{})};
 
   // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
-
-  constexpr typename MHAType::HeadDimType d{};
-  constexpr typename MHAType::QueryRowsType B_r{};
-  constexpr typename MHAType::KVColsType B_c{};
-
-  // map blockIdx.y -> (seq_idx, local tile index)
-  int seq_idx{index_search(cu_tiles_q, blockIdx.y)};
-  size_t q_block{blockIdx.y - cu_tiles_q[seq_idx]};
-
-  size_t N_q{cu_seqlens_q[seq_idx + 1] - cu_seqlens_q[seq_idx]};
-  size_t N_kv{cu_seqlens_kv[seq_idx + 1] - cu_seqlens_kv[seq_idx]};
-  size_t start_pos{N_kv - N_q};
-
-  auto slice_head{[&](auto &tensor, size_t offset, auto seq_len) {
-    auto ptr{tensor(offset, _).data()};
-    auto layout{make_layout(make_shape(seq_len, d), tensor.layout().stride())};
-    return make_tensor(ptr, layout);
-  }};
-
-  auto q_head{slice_head(q_head_all, cu_seqlens_q[seq_idx], N_q)};
-  auto o_head{slice_head(o_head_all, cu_seqlens_q[seq_idx], N_q)};
-  auto k_head{slice_head(k_head_all, cu_seqlens_kv[seq_idx], N_kv)};
-  auto v_head{slice_head(v_head_all, cu_seqlens_kv[seq_idx], N_kv)};
 
   auto q_tiler{make_shape(B_r, d)};
   auto kv_tiler{make_shape(B_c, d)};
@@ -284,11 +275,13 @@ __global__ void mha_kernel(const TensorTypeQ Q,
  * @tparam thread_count
  */
 template <int head_count, int head_dim, int B_r, int B_c, typename DType,
-          int thread_count = 128, bool qkv_contigous_buffer = false>
+          int thread_count = 128,
+          int q_seq_stride = head_count * head_dim,
+          int kv_seq_stride = head_count * head_dim>
 struct FMHA {
 
   using TensorDType = DType;
-  using Self = FMHA<head_count, head_dim, B_r, B_c, DType, thread_count, qkv_contigous_buffer>;
+  using Self = FMHA<head_count, head_dim, B_r, B_c, DType, thread_count, q_seq_stride, kv_seq_stride>;
 
   using NumHeadsType = Int<head_count>;
   using HeadDimType = Int<head_dim>;
@@ -620,15 +613,13 @@ struct FMHA {
   // e.g. sequences [12, 16, 8] -> [0, 12, 28, 36]
   // cu_tiles_q: prefix-sum of ceil(seqlen_q_i / B_r) per sequence.
   // e.g. sequences [12, 16, 8] with B_r=16 -> [0, 1, 2, 3]
-  // total_tiles: cu_tiles_q[batch_size], totalso blo number of Q tiles across all sequences.
-  // seq_stride_q / seq_stride_kv: stride between sequence positions.
+  // total_tiles: cu_tiles_q[batch_size], total number of Q tiles across all sequences.
   void operator()(DType *Q, DType *K, DType *V, DType *O,
                   const thrust::device_vector<uint32_t> &cu_seqlens_q,
                   const thrust::device_vector<uint32_t> &cu_seqlens_kv,
                   const thrust::device_vector<uint32_t> &cu_tiles_q,
                   uint32_t total_q_tokens, uint32_t total_kv_tokens,
-                  uint32_t total_tiles,
-                  size_t seq_stride_q, size_t seq_stride_kv) {
+                  uint32_t total_tiles) {
 
     dim3 grid_dim{head_count, total_tiles};
     dim3 block_dim{thread_count};
@@ -639,32 +630,11 @@ struct FMHA {
     const auto tc_v{get_tiled_copy<ScalarLoadType>()};
     const auto tmma{get_tiled_mma()};
 
-    auto make_tensor_3d{[](auto *ptr, uint32_t seq_len, size_t seq_stride) {
-      return make_tensor(make_gmem_ptr(ptr),
-          make_layout(make_shape(seq_len, Int<head_count>{}, Int<head_dim>{}),
-                      make_stride(seq_stride, Int<head_dim>{}, _1{})));
-    }};
+    auto *cu_seqlens_q_ptr{thrust::raw_pointer_cast(cu_seqlens_q.data())};
+    auto *cu_seqlens_kv_ptr{thrust::raw_pointer_cast(cu_seqlens_kv.data())};
+    auto *cu_tiles_q_ptr{thrust::raw_pointer_cast(cu_tiles_q.data())};
 
-    auto make_index_tensor{[](const thrust::device_vector<uint32_t> &vec) {
-      return make_tensor(make_gmem_ptr(thrust::raw_pointer_cast(vec.data())),
-                         make_shape(static_cast<uint32_t>(vec.size())));
-    }};
-
-    auto q_tensor{make_tensor_3d(Q, total_q_tokens, seq_stride_q)};
-    auto k_tensor{make_tensor_3d(K, total_kv_tokens, seq_stride_kv)};
-    auto v_tensor{make_tensor_3d(V, total_kv_tokens, seq_stride_kv)};
-    auto o_tensor{make_tensor_3d(O, total_q_tokens, head_count * head_dim)};
-
-    auto cu_seqlens_q_tensor{make_index_tensor(cu_seqlens_q)};
-    auto cu_seqlens_kv_tensor{make_index_tensor(cu_seqlens_kv)};
-    auto cu_tiles_q_tensor{make_index_tensor(cu_tiles_q)};
-
-    auto kernel_fptr{naive::mha_kernel<Self,
-                                       decltype(q_tensor), decltype(k_tensor),
-                                       decltype(v_tensor), decltype(o_tensor),
-                                       decltype(cu_seqlens_q_tensor),
-                                       decltype(cu_seqlens_kv_tensor),
-                                       decltype(cu_tiles_q_tensor),
+    auto kernel_fptr{naive::mha_kernel<Self, q_seq_stride, kv_seq_stride,
                                        decltype(tc_qk), decltype(tc_v),
                                        decltype(tmma)>};
 
@@ -677,8 +647,9 @@ struct FMHA {
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
     kernel_fptr<<<grid_dim, block_dim, smem_size>>>(
-        q_tensor, k_tensor, v_tensor, o_tensor,
-        cu_seqlens_q_tensor, cu_seqlens_kv_tensor, cu_tiles_q_tensor,
+        Q, K, V, O,
+        cu_seqlens_q_ptr, cu_seqlens_kv_ptr, cu_tiles_q_ptr,
+        total_q_tokens, total_kv_tokens,
         scale, tc_qk, tc_v, tmma);
   }
 };

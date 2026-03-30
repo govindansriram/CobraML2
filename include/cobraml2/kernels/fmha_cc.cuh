@@ -3,6 +3,7 @@
 #include "../macros.cuh"
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
+#include <thrust/device_vector.h>
 
 // Fused Multi Head Attention, that runs purely on cuda cores
 // Based on the Flash Attention 1 algorithm.
@@ -13,40 +14,63 @@ using namespace cute;
 
 namespace naive {
 
-// num_heads, batch_size, ceil(N / B_r)
+  // TODO make this binary search
+__forceinline__ __device__ int index_search(const uint32_t *__restrict__ data, int starting_token){
+  for (int i{0}; ; ++i){
+    if (starting_token < static_cast<int>(data[i]))
+      return i - 1;
+  }
+}
 
 /**
- * @brief performs naive gpu mha
+ * @brief performs cuda core gpu mha
  *
  * @tparam num_heads an equal sized chunk of projection
  * this allows the model to localize attention to that specific chunk
  * hence multi head attention.
- * @tparam d the length of each head
- * @param Q the query projection [batch, N, num_heads, d]
- * @param K the key projection [batch, N, num_heads, d]
- * @param V the value projection [batch, N, num_heads, d]
- * @param O the output [batch, N, num_heads, d]
+ * @param Q the query projection [N, num_heads, d]
+ * @param K the key projection [N, num_heads, d]
+ * @param V the value projection [N, num_heads, d]
+ * @param flat_seq_q contains the start and stop index of each batch
+ * a has 32 sequences, 64 has 100, c has 32 -> [0, 32, 96, 128]
  * @param N sequence length: tokens per sequence
  * @return void
  */
-template <typename MHAType, typename TiledCopyTypeQK, typename TiledCopyTypeV,
+template <typename MHAType,
+          int seq_stride_q,
+          int seq_stride_kv,
+          typename TiledCopyTypeQK,
+          typename TiledCopyTypeV,
           typename TiledMMAType>
 __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
                            const typename MHAType::TensorDType *__restrict__ K,
                            const typename MHAType::TensorDType *__restrict__ V,
                            typename MHAType::TensorDType *__restrict__ O,
-                           const int N_q, const int N_kv, const int start_pos,
+                           const uint32_t *__restrict__ cu_seqlens_q,
+                           const uint32_t *__restrict__ cu_seqlens_kv,
+                           const uint32_t *__restrict__ cu_tiles_q,
                            const typename MHAType::TensorDType scale,
-                           TiledCopyTypeQK tc_qk, TiledCopyTypeV tc_v,
+                           TiledCopyTypeQK tc_qk,
+                           TiledCopyTypeV tc_v,
                            TiledMMAType t_mma) {
 
   using DType = typename MHAType::TensorDType;
-  size_t batch_size{gridDim.y};
+  constexpr typename MHAType::HeadDimType d{};
+  constexpr typename MHAType::QueryRowsType B_r{};
+  constexpr typename MHAType::KVColsType B_c{};
+  // map blockIdx.y -> (seq_idx, local tile index)
+  int seq_idx{index_search(cu_tiles_q, blockIdx.y)};
+  int q_block{static_cast<int>(blockIdx.y) - static_cast<int>(cu_tiles_q[seq_idx])};
 
-  Tensor q_head{MHAType::slice_head(Q, batch_size, N_q)};
-  const Tensor k_head{MHAType::slice_head(K, batch_size, N_kv)};
-  const Tensor v_head{MHAType::slice_head(V, batch_size, N_kv)};
-  Tensor o_head{MHAType::slice_head<true>(O, batch_size, N_q)};
+  int N_q{static_cast<int>(cu_seqlens_q[seq_idx + 1] - cu_seqlens_q[seq_idx])};
+  int N_kv{static_cast<int>(cu_seqlens_kv[seq_idx + 1] - cu_seqlens_kv[seq_idx])};
+  int start_pos{N_kv - N_q};
+
+  constexpr int o_stride{MHAType::NumHeadsType::value * MHAType::HeadDimType::value};
+  auto q_head{MHAType::template slice_head<seq_stride_q>(Q, cu_seqlens_q[seq_idx], N_q)};
+  auto k_head{MHAType::template slice_head<seq_stride_kv>(K, cu_seqlens_kv[seq_idx], N_kv)};
+  auto v_head{MHAType::template slice_head<seq_stride_kv>(V, cu_seqlens_kv[seq_idx], N_kv)};
+  auto o_head{MHAType::template slice_head<o_stride>(O, cu_seqlens_q[seq_idx], N_q)};
 
   extern __shared__ char shared_memory[];
   using SharedStorageType = typename MHAType::SharedStorage;
@@ -71,22 +95,18 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
 
-  constexpr typename MHAType::HeadDimType d{};
-  constexpr typename MHAType::QueryRowsType B_r{};
-  constexpr typename MHAType::KVColsType B_c{};
-
-  auto q_coord{make_coord(blockIdx.z, 0)};
-  auto kv_coord{make_coord(_, 0)};
-
   auto q_tiler{make_shape(B_r, d)};
   auto kv_tiler{make_shape(B_c, d)};
   auto scores_tiler{make_shape(B_r, B_c)};
 
+  auto q_coord{make_coord(q_block, 0)};
+  auto kv_coord{make_coord(_, 0)};
+
   Tensor q_iterator{local_tile(q_head, q_tiler, q_coord)}; // (B_r, d)
   Tensor k_iterator{
-      local_tile(k_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
+      local_tile(k_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(total_N_kv / B_c))
   Tensor v_iterator{
-      local_tile(v_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
+      local_tile(v_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(total_N_kv / B_c))
   Tensor o_iterator{local_tile(o_head, q_tiler, q_coord)}; // (B_r, d)
 
   auto iters{size<2>(k_iterator)}; // N_kv
@@ -115,8 +135,8 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   Tensor g_out_mma{thr_mma_qk.partition_C(o_iterator)};
   Tensor r_out_mma{thr_mma_qk.make_fragment_C(g_out_mma)};
 
-  auto q_head_idty{MHAType::identity_slice_head(batch_size, N_q)};
-  auto kv_head_idty{MHAType::identity_slice_head(batch_size, N_kv)};
+  auto q_head_idty{make_identity_tensor(q_head.layout().shape())};
+  auto kv_head_idty{make_identity_tensor(k_head.layout().shape())};
 
   // make q identity tensor
   auto q_head_slice_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
@@ -134,7 +154,7 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   auto scores_idty{make_identity_tensor(make_shape(N_q, N_kv))};
   auto scores_tile_idty{
       local_tile(scores_idty, scores_tiler,
-                 make_coord(blockIdx.z, _))}; // (B_r, B_c, ceil(N / B_c))
+                 make_coord(q_block, _))}; // (B_r, B_c, ceil(N / B_c))
   Tensor scores_slice_idty{thr_mma_qk.partition_C(scores_tile_idty)};
 
   // out identity tensor
@@ -165,6 +185,14 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   MHAType::update_statistics<true>(m, l, r_scores_mma, p_mma, r_out_mma,
                                    scores_slice_idty(_, _, _, iters - 1), scale,
                                    N_kv, start_pos);
+
+  // if (thread(0, 16)) {
+  //   print("blockIdx x, y = "); print(blockIdx.x); print(" "); print(blockIdx.y); print(" "); print(N_q); print("\n");
+
+  //   print_tensor(k_iterator(_, _, iters - 1));
+  //   print("\n");
+  //   print_tensor(shared_k);
+  // }
 
   __syncthreads(); // ensure all K reads done before V overwrites KV buffer
   MHAType::matmul<true>(tV_global_part_iter(_, _, _, iters - 1), tV_shared_part,
@@ -206,9 +234,15 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
 
   constexpr int write_rows{size(get<1>(g_out_mma.shape()))};
 
+  // if (thread(0, 16)) {
+  //   print("blockIdx x, y = "); print(blockIdx.x); print(" "); print(blockIdx.y); print(" "); print(N_q); print("\n");
+  //   print(r_out_mma);
+  //   print_tensor(o_mma_idty);
+  // }
+
   CUTE_UNROLL
   for (size_t i{0}; i < write_rows; ++i) {
-    auto seq_idx{get<1>(o_mma_idty(0, i, 0))};
+    auto seq_idx{get<0>(o_mma_idty(0, i, 0))};
 
     if (seq_idx < N_q)
       copy(r_out_mma(_, i, _), g_out_mma(_, i, _));
@@ -227,13 +261,13 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
  * @tparam thread_count
  */
 template <int head_count, int head_dim, int B_r, int B_c, typename DType,
-          int thread_count = 128, bool causal_mask = false,
-          bool qkv_contigous_buffer = false>
+          int thread_count = 128,
+          int q_seq_stride = head_count * head_dim,
+          int kv_seq_stride = head_count * head_dim>
 struct FMHA {
 
   using TensorDType = DType;
-  using Self = FMHA<head_count, head_dim, B_r, B_c, DType, thread_count,
-                    causal_mask, qkv_contigous_buffer>;
+  using Self = FMHA<head_count, head_dim, B_r, B_c, DType, thread_count, q_seq_stride, kv_seq_stride>;
 
   using NumHeadsType = Int<head_count>;
   using HeadDimType = Int<head_dim>;
@@ -242,6 +276,14 @@ struct FMHA {
 
   using VectorizedLoadType = uint128_t;
   using ScalarLoadType = uint32_t;
+
+  template <int stride_val, typename PtrType, typename SeqLenType>
+  COBRA_S_DEVICE auto slice_head(PtrType ptr, int seq_offset, SeqLenType seq_len) {
+    constexpr auto d{HeadDimType{}};
+    constexpr auto stride{Int<stride_val>{}};
+    auto *base{ptr + seq_offset * stride + blockIdx.x * d};
+    return make_tensor(make_gmem_ptr(base), make_layout(make_shape(seq_len, d), make_stride(stride, _1{})));
+  }
 
   struct SharedStorage {
     // Swizzle atom dimensions
@@ -285,42 +327,6 @@ struct FMHA {
   };
 
   static constexpr int threads_per_block{thread_count};
-
-  template <bool is_o = false>
-  COBRA_S_DEVICE auto get_tensor_layout(size_t batch_size, size_t N) {
-
-    if constexpr (qkv_contigous_buffer && !is_o) {
-      Int<head_dim * head_count * 3> embed3{};
-      return make_layout(
-          make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}),
-          make_stride(embed3.value * N, embed3, HeadDimType{}, _1{}));
-    } else {
-      return make_layout(
-          make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}),
-          LayoutRight{});
-    }
-  }
-
-  template <bool is_o = false, typename PtrType>
-  COBRA_S_DEVICE auto slice_head(PtrType g_ptr, int batch_size, int N) {
-
-    using BaseType = std::decay_t<std::remove_pointer_t<PtrType>>;
-    static_assert(std::is_pointer_v<PtrType>, "Must be a pointer");
-    static_assert(
-        std::is_same_v<std::remove_cv_t<std::remove_pointer_t<PtrType>>, DType>,
-        "Must point to DType");
-
-    const auto projection_layout{get_tensor_layout<is_o>(batch_size, N)};
-    const Tensor projection{
-        make_tensor(make_gmem_ptr<DType>(g_ptr), projection_layout)};
-    return projection(blockIdx.y, _, blockIdx.x, _);
-  }
-
-  COBRA_S_DEVICE auto identity_slice_head(int batch_size, int N) {
-    const auto projection_layout{get_tensor_layout(batch_size, N)};
-    const Tensor projection{make_identity_tensor(projection_layout.shape())};
-    return projection(blockIdx.y, _, blockIdx.x, _);
-  }
 
   template <typename LoadType> static constexpr auto get_tiled_copy() {
 
@@ -389,8 +395,7 @@ struct FMHA {
 
     CUTE_UNROLL
     for (int i{0}; i < rows; ++i) {
-      auto seq_idx{get<1>(identity_tensor(0, i, 0))};
-
+      auto seq_idx{get<0>(identity_tensor(0, i, 0))};
       if (seq_idx < bound) {
         copy(tiled_copy, source_tensor(_, i, _), destination_tensor(_, i, _));
       } else {
@@ -536,32 +541,21 @@ struct FMHA {
 
       constexpr size_t slice_size{size(r_score_slice)};
 
-      int adjusted_bound;
-
-      if constexpr (causal_mask) {
-        adjusted_bound = get<0>(scores_idty_slice(0)) + start_pos + 1;
-      } else if constexpr (predicate) {
-        adjusted_bound = bound;
-      } else {
-        adjusted_bound = 0;
-      }
+      size_t adjusted_bound{
+        cuda::std::min(get<0>(scores_idty_slice(0)) + start_pos + 1, static_cast<size_t>(bound))
+      };
 
       CUTE_UNROLL
       for (size_t idx{0}; idx < slice_size; ++idx) {
         // uses hardware unit, removes warp divergence from branch checks
         // each thread may hold multiple values from each row, we find the
         // local maximum first
-        if constexpr (predicate || causal_mask) {
-          auto n{get<1>(scores_idty_slice(idx))};
-          if (n < adjusted_bound) {
-            r_score_slice(idx) =
-                r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
-          } else {
-            r_score_slice(idx) = -INFINITY;
-          }
-        } else {
+        auto n{get<1>(scores_idty_slice(idx))};
+        if (n < adjusted_bound) {
           r_score_slice(idx) =
               r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
+        } else {
+          r_score_slice(idx) = -INFINITY;
         }
 
         current_max = cuda::std::max(r_score_slice(idx), current_max);
@@ -571,12 +565,8 @@ struct FMHA {
 
       // Compute scaling factor for old values
       DType scale_old;
-      if constexpr (causal_mask) {
-        if (old_max == current_max && current_max == -INFINITY) {
-          scale_old = DType(0);
-        } else {
-          scale_old = expf(old_max - current_max);
-        }
+      if (old_max == current_max && current_max == -INFINITY) {
+        scale_old = DType(0);
       } else {
         scale_old = expf(old_max - current_max);
       }
@@ -586,17 +576,13 @@ struct FMHA {
 
       DType local_sum{0};
 
-      // TODO experiment with efficent copies
+      // TODO experiment with efficient copies
 
       CUTE_UNROLL
       for (size_t idx{0}; idx < slice_size; ++idx) {
         auto p_score{r_score_slice(idx)};
-        if constexpr (causal_mask) {
-          if (old_max == current_max && current_max == -INFINITY) {
-            p_score = DType(0);
-          } else {
-            p_score = expf(p_score - current_max);
-          }
+        if (old_max == current_max && current_max == -INFINITY) {
+          p_score = DType(0);
         } else {
           p_score = expf(p_score - current_max);
         }
@@ -617,32 +603,32 @@ struct FMHA {
     }
   }
 
-  // start_pos is the KV-cache offset: it tells the attention kernel that
-  // the current query tokens sit at position [start_pos, start_pos + N_q)
-  // in the full sequence, and the KV cache already holds tokens [0, start_pos).
-  // The causal mask uses this to compute absolute positions so that during
-  // decode (single-token query) it correctly attends to all prior cached keys
-  // rather than masking them out, and during prefill-after-decode the mask
-  // is reapplied at the right offsets.
-  void operator()(DType *Q, DType *K, DType *V, DType *O, uint32_t batch_size,
-                  uint32_t N_q, uint32_t N_kv, uint32_t start_pos) {
-    dim3 grid_dim{head_count, batch_size, ceil_div(N_q, B_r)};
+  // cu_seqlens_q / cu_seqlens_kv: prefix-sum arrays of real sequence lengths (no padding).
+  // e.g. sequences [12, 16, 8] -> [0, 12, 28, 36]
+  // cu_tiles_q: prefix-sum of ceil(seqlen_q_i / B_r) per sequence.
+  // e.g. sequences [12, 16, 8] with B_r=16 -> [0, 1, 2, 3]
+  // total_tiles: cu_tiles_q[batch_size], total number of Q tiles across all sequences.
+  void operator()(DType *Q, DType *K, DType *V, DType *O,
+                  const uint32_t *cu_seqlens_q,
+                  const uint32_t *cu_seqlens_kv,
+                  const uint32_t *cu_tiles_q,
+                  uint32_t total_tiles) {
 
+    dim3 grid_dim{head_count, total_tiles};
     dim3 block_dim{thread_count};
 
     DType scale{rsqrt(static_cast<DType>(head_dim))};
 
     const auto tc_qk{get_tiled_copy<VectorizedLoadType>()};
     const auto tc_v{get_tiled_copy<ScalarLoadType>()};
-
     const auto tmma{get_tiled_mma()};
 
-    auto kernel_fptr{naive::mha_kernel<Self, decltype(tc_qk), decltype(tc_v),
+    auto kernel_fptr{naive::mha_kernel<Self, q_seq_stride, kv_seq_stride,
+                                       decltype(tc_qk), decltype(tc_v),
                                        decltype(tmma)>};
 
     size_t smem_size{sizeof(SharedStorage)};
 
-    // Set L1 to be SMEM only
     cudaFuncSetAttribute(
         kernel_fptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
@@ -650,7 +636,9 @@ struct FMHA {
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
     kernel_fptr<<<grid_dim, block_dim, smem_size>>>(
-        Q, K, V, O, N_q, N_kv, start_pos, scale, tc_qk, tc_v, tmma);
+        Q, K, V, O,
+        cu_seqlens_q, cu_seqlens_kv, cu_tiles_q,
+        scale, tc_qk, tc_v, tmma);
   }
 };
 

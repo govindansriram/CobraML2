@@ -1,163 +1,215 @@
 import torch
-from cobraml.layers import MultiHeadAttention, FusedMultiHeadAttention
+import math
+from cobraml.layers import (
+    MultiHeadAttention,
+    FusedMultiHeadAttention,
+    build_cu_seqlens,
+    build_cu_tiles_q,
+)
 import pytest
 
+B_r = 64
+
+
+# === Uniform batch: fused vs torch, same sizes, benchmarked ===
 
 @pytest.mark.parametrize(
-    "B,N,H,d,causal",
+    "B,N,H,d",
     [
-        # even block size by sequence length
-        (4, 512, 16, 64, False),
-        (4, 512, 16, 64, True),
-        # uneven block size (requires predication)
-        (56, 490, 2, 64, False),
-        (56, 490, 2, 64, True),
-        # 1 block only, even
-        (8, 64, 16, 64, False),
-        (8, 64, 16, 64, True),
-        # 1 block only, uneven
-        (8, 59, 16, 64, False),
-        (8, 59, 16, 64, True),
-        # longer sequences (vanilla MHA allocates B*H*N*N attention matrix)
-        (1, 2048, 16, 64, False),
-        (1, 2048, 16, 64, True),
-        (2, 2048, 16, 64, False),
-        (1, 3722, 16, 64, False),
-        (1, 3722, 16, 64, True),
-        # longer sequences, uneven
-        (1, 2000, 16, 64, False),
+        (4, 512, 16, 64),
+        (56, 490, 2, 64),
+        (8, 64, 16, 64),
+        (8, 59, 16, 64),
+        (1, 2048, 16, 64),
+        (2, 2048, 16, 64),
+        (1, 3722, 16, 64),
+        (1, 2000, 16, 64),
     ],
 )
-def test_fmha_fp32(benchmark, B, N, H, d, causal):
-    iterations = 1
-
+def test_fmha_uniform(benchmark, B, N, H, d):
     fmha = FusedMultiHeadAttention()
     mha = MultiHeadAttention()
 
     hd = H * d
-    qkv = torch.randn(B, N, 3 * hd, device="cuda", dtype=torch.float32)
-    q, k, v = qkv.split(hd, dim=2)
-    q = q.view(B, N, H, d)
-    k = k.view(B, N, H, d)
-    v = v.view(B, N, H, d)
+    device = torch.device("cuda")
+
+    seq_lens = [N] * B
+    total_tokens = B * N
+
+    cu_seqlens_q = build_cu_seqlens(seq_lens, device)
+    cu_seqlens_kv = cu_seqlens_q
+    cu_tiles_q, total_tiles = build_cu_tiles_q(seq_lens, B_r, device)
+
+    Q = torch.randn(total_tokens, H, d, device=device, dtype=torch.float32)
+    K = torch.randn(total_tokens, H, d, device=device, dtype=torch.float32)
+    V = torch.randn(total_tokens, H, d, device=device, dtype=torch.float32)
+
+    print(f"\nB={B} N={N} H={H} d={d} Q.stride={Q.stride()} K.stride={K.stride()}")
+
+    out_fmha = fmha(Q, K, V, cu_seqlens_q, cu_seqlens_kv, cu_tiles_q, total_tiles)
+    torch.cuda.synchronize()
+
+    # torch reference: reshape to (B, N, H, d) for batched MHA
+    q_batched = Q.view(B, N, H, d)
+    k_batched = K.view(B, N, H, d)
+    v_batched = V.view(B, N, H, d)
+    out_ref = mha(q_batched, k_batched, v_batched, causal=True, start_pos=0)
+    out_ref = out_ref.reshape(total_tokens, H, d)
+
+    assert torch.allclose(out_fmha, out_ref, atol=1e-3, rtol=1e-3), (
+        f"Max diff: {(out_fmha - out_ref).abs().max().item()}"
+    )
 
     if benchmark:
         iterations = 100
-
-        # Warmup
         for _ in range(10):
-            _ = fmha(q, k, v, causal=causal)
-            _ = mha(q, k, v, causal=causal)
+            fmha(Q, K, V, cu_seqlens_q, cu_seqlens_kv, cu_tiles_q, total_tiles)
+            mha(q_batched, k_batched, v_batched, causal=True, start_pos=0)
         torch.cuda.synchronize()
 
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
 
-    # CobraML
+        cobra_total = 0
+        vanilla_total = 0
+        for _ in range(iterations):
+            start.record()
+            fmha(Q, K, V, cu_seqlens_q, cu_seqlens_kv, cu_tiles_q, total_tiles)
+            end.record()
+            torch.cuda.synchronize()
+            cobra_total += start.elapsed_time(end)
 
-    cobra_total = 0
-    vanilla_total = 0
-    for _ in range(iterations):
-        qkv.normal_()
+            start.record()
+            mha(q_batched, k_batched, v_batched, causal=True, start_pos=0)
+            end.record()
+            torch.cuda.synchronize()
+            vanilla_total += start.elapsed_time(end)
 
-        torch.cuda.synchronize()
-
-        start.record()
-        out_cobra = fmha(q, k, v, causal=causal)
-        end.record()
-        torch.cuda.synchronize()
-        cobra_total += start.elapsed_time(end)
-
-        start.record()
-        out_vanilla = mha(q, k, v, causal=causal)
-        end.record()
-        torch.cuda.synchronize()
-        vanilla_total += start.elapsed_time(end)
-
-    cobra_ms = cobra_total / iterations
-    vanilla_ms = vanilla_total / iterations
-
-    assert torch.allclose(out_cobra, out_vanilla, atol=1e-3, rtol=1e-3)
-
-    if benchmark:
+        cobra_ms = cobra_total / iterations
+        vanilla_ms = vanilla_total / iterations
         print(f"CobraML:  {cobra_ms:.3f} ms")
         print(f"Vanilla:  {vanilla_ms:.3f} ms")
         print(f"Speedup:  {vanilla_ms / cobra_ms:.2f}x")
 
 
-@pytest.mark.parametrize(
-    "B,N,H,d,start_pos",
-    [
-        # single-token decode at various positions
-        (1, 128, 16, 64, 0),
-        (1, 128, 16, 64, 1),
-        (1, 128, 16, 64, 63),
-        (1, 128, 16, 64, 64),
-        (1, 128, 16, 64, 127),
-        # multi-batch
-        (4, 256, 16, 64, 100),
-        (4, 256, 2, 64, 255),
-        # uneven sequence lengths
-        (2, 59, 16, 64, 30),
-        (2, 490, 2, 64, 200),
-    ],
-)
-def test_fmha_start_pos(B, N, H, d, start_pos):
-    """
-    Verify start_pos by comparing single-token decode against the
-    corresponding row of a full causal prefill.
+# === Ragged correctness: fused ragged batch vs torch per-element ===
 
-    The fmha binding uses qkv_contigous_buffer=true, so Q/K/V must have
-    the interleaved stride layout (seq stride = 3*H*d). We create decode
-    tensors from their own QKV buffers to get the correct strides.
-    """
+def check_ragged(batch_entries, H, d):
+    fmha = FusedMultiHeadAttention()
+    mha = MultiHeadAttention()
+
+    device = torch.device("cuda")
+
+    seq_lens_q = [e[0] for e in batch_entries]
+    seq_lens_kv = [e[1] for e in batch_entries]
+
+    total_q = sum(seq_lens_q)
+    total_kv = sum(seq_lens_kv)
+
+    cu_seqlens_q = build_cu_seqlens(seq_lens_q, device)
+    cu_seqlens_kv = build_cu_seqlens(seq_lens_kv, device)
+    cu_tiles_q, total_tiles = build_cu_tiles_q(seq_lens_q, B_r, device)
+
+    Q = torch.randn(total_q, H, d, device=device, dtype=torch.float32)
+    K = torch.randn(total_kv, H, d, device=device, dtype=torch.float32)
+    V = torch.randn(total_kv, H, d, device=device, dtype=torch.float32)
+
+    out_fmha = fmha(Q, K, V, cu_seqlens_q, cu_seqlens_kv, cu_tiles_q, total_tiles)
+    torch.cuda.synchronize()
+
+    # per-element reference
+    out_ref = torch.zeros(total_q, H, d, device=device, dtype=torch.float32)
+    for b in range(len(batch_entries)):
+        N_q, N_kv = batch_entries[b]
+        q_start = int(cu_seqlens_q[b].item())
+        q_end = int(cu_seqlens_q[b + 1].item())
+        kv_start = int(cu_seqlens_kv[b].item())
+        kv_end = int(cu_seqlens_kv[b + 1].item())
+
+        start_pos = N_kv - N_q
+
+        q_b = Q[q_start:q_end].unsqueeze(0)
+        k_b = K[kv_start:kv_end].unsqueeze(0)
+        v_b = V[kv_start:kv_end].unsqueeze(0)
+
+        ref_b = mha(q_b, k_b, v_b, causal=True, start_pos=start_pos)
+        out_ref[q_start:q_end] = ref_b.squeeze(0)
+
+    assert torch.allclose(out_fmha, out_ref, atol=1e-3, rtol=1e-3), (
+        f"Max diff: {(out_fmha - out_ref).abs().max().item()}"
+    )
+
+
+@pytest.mark.parametrize("batch_entries,H,d", [
+    # mixed prefill + decode
+    ([(256, 256), (64, 512), (128, 128), (64, 300)], 16, 64),
+    # decode only, varying cache
+    ([(64, 100), (64, 256), (64, 67), (64, 513)], 16, 64),
+    # prefill varying lengths
+    ([(64, 64), (128, 128), (256, 256), (192, 192)], 2, 64),
+    # single decode, large cache
+    ([(64, 1000)], 16, 64),
+    # unpadded Q (non-multiple of B_r)
+    ([(50, 50), (100, 100)], 16, 64),
+    # mixed with single-token decode
+    ([(50, 50), (1, 512), (13, 200)], 16, 64),
+    # single-token decode
+    ([(1, 1), (1, 64), (1, 500)], 16, 64),
+])
+def test_fmha_ragged(batch_entries, H, d):
+    check_ragged(batch_entries, H, d)
+
+
+# === Contiguous QKV buffer ===
+
+@pytest.mark.parametrize("batch_entries,H,d", [
+    ([(512, 512)] * 4, 16, 64),
+    ([(256, 256), (64, 512), (128, 128), (64, 300)], 16, 64),
+])
+def test_fmha_contiguous(batch_entries, H, d):
     fmha = FusedMultiHeadAttention()
     mha = MultiHeadAttention()
 
     hd = H * d
-    N_kv = start_pos + 1
+    device = torch.device("cuda")
 
-    # full prefill QKV buffer
-    qkv = torch.randn(B, N, 3 * hd, device="cuda", dtype=torch.float32)
-    q, k, v = qkv.split(hd, dim=2)
-    q = q.view(B, N, H, d)
-    k = k.view(B, N, H, d)
-    v = v.view(B, N, H, d)
+    seq_lens_q = [e[0] for e in batch_entries]
+    seq_lens_kv = [e[1] for e in batch_entries]
 
-    # full causal prefill (start_pos=0)
-    full_out = fmha(q, k, v, causal=True, start_pos=0)
-    expected = full_out[:, start_pos : start_pos + 1, :, :]
+    total_q = sum(seq_lens_q)
+    total_kv = sum(seq_lens_kv)
+    total_tokens = max(total_q, total_kv)
 
-    # build decode Q in its own QKV-strided buffer so batch stride = 3*hd*1
-    q_decode_buf = torch.zeros(B, 1, 3 * hd, device="cuda", dtype=torch.float32)
-    q_decode_buf[:, :, :hd] = (
-        q[:, start_pos : start_pos + 1, :, :].contiguous().view(B, 1, hd)
-    )
-    q_decode = q_decode_buf[:, :, :hd].view(B, 1, H, d)
+    cu_seqlens_q = build_cu_seqlens(seq_lens_q, device)
+    cu_seqlens_kv = build_cu_seqlens(seq_lens_kv, device)
+    cu_tiles_q, total_tiles = build_cu_tiles_q(seq_lens_q, B_r, device)
 
-    # build decode K/V in their own QKV-strided buffer so batch stride = 3*hd*N_kv
-    kv_decode_buf = torch.zeros(B, N_kv, 3 * hd, device="cuda", dtype=torch.float32)
-    kv_decode_buf[:, :, hd : 2 * hd] = k[:, :N_kv, :, :].contiguous().view(B, N_kv, hd)
-    kv_decode_buf[:, :, 2 * hd :] = v[:, :N_kv, :, :].contiguous().view(B, N_kv, hd)
-    k_decode = kv_decode_buf[:, :, hd : 2 * hd].view(B, N_kv, H, d)
-    v_decode = kv_decode_buf[:, :, 2 * hd :].view(B, N_kv, H, d)
+    # interleaved QKV
+    qkv = torch.randn(total_tokens, 3 * hd, device=device, dtype=torch.float32)
+    Q = qkv[:total_q, :hd].view(total_q, H, d)
+    K = qkv[:total_kv, hd:2*hd].view(total_kv, H, d)
+    V = qkv[:total_kv, 2*hd:].view(total_kv, H, d)
 
-    decode_out_fmha = fmha(
-        q_decode, k_decode, v_decode, causal=True, start_pos=start_pos
-    )
+    out_fmha = fmha(Q, K, V, cu_seqlens_q, cu_seqlens_kv, cu_tiles_q, total_tiles)
+    torch.cuda.synchronize()
 
-    # vanilla MHA works with any strides, use contiguous tensors directly
-    q_mha = q[:, start_pos : start_pos + 1, :, :].contiguous()
-    k_mha = k[:, :N_kv, :, :].contiguous()
-    v_mha = v[:, :N_kv, :, :].contiguous()
-    decode_out_mha = mha(q_mha, k_mha, v_mha, causal=True, start_pos=start_pos)
+    out_ref = torch.zeros(total_q, H, d, device=device, dtype=torch.float32)
+    for b in range(len(batch_entries)):
+        N_q, N_kv = batch_entries[b]
+        q_start = int(cu_seqlens_q[b].item())
+        q_end = int(cu_seqlens_q[b + 1].item())
+        kv_start = int(cu_seqlens_kv[b].item())
+        kv_end = int(cu_seqlens_kv[b + 1].item())
 
-    assert torch.allclose(decode_out_fmha, expected, atol=1e-3, rtol=1e-3), (
-        "fmha decode with start_pos does not match full prefill"
-    )
-    assert torch.allclose(decode_out_mha, expected, atol=1e-3, rtol=1e-3), (
-        "mha decode with start_pos does not match full prefill"
-    )
-    assert torch.allclose(decode_out_fmha, decode_out_mha, atol=1e-3, rtol=1e-3), (
-        "fmha and mha decode outputs do not match"
+        start_pos = N_kv - N_q
+
+        q_b = Q[q_start:q_end].unsqueeze(0)
+        k_b = K[kv_start:kv_end].unsqueeze(0)
+        v_b = V[kv_start:kv_end].unsqueeze(0)
+
+        ref_b = mha(q_b, k_b, v_b, causal=True, start_pos=start_pos)
+        out_ref[q_start:q_end] = ref_b.squeeze(0)
+
+    assert torch.allclose(out_fmha, out_ref, atol=1e-3, rtol=1e-3), (
+        f"contiguous: Max diff: {(out_fmha - out_ref).abs().max().item()}"
     )

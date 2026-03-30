@@ -4,29 +4,45 @@
 
 namespace cobraml::test_helpers {
 
-// CPU reference implementation for correctness verification
-// Computes: O = softmax(Q @ K^T / sqrt(d)) @ V
-// Q, K, V are separate pointers with a configurable seq_stride.
-// Output O always uses standard BSHD layout (seq_stride = H*d).
-void cpu_mha_impl(float *Q, float *K, float *V, float *O, int B, int N, int H,
-                  int d, int seq_stride, bool causal) {
-  for (int b = 0; b < B; b++) {
-    for (int h = 0; h < H; h++) {
-      for (int i = 0; i < N; i++) {
-        float max_score = -INFINITY;
-        std::vector<float> scores(N);
+// CPU reference for ragged-batched MHA with causal masking.
+// flat_seq_q / flat_seq_kv are prefix-sum arrays: [0, N_q_0, N_q_0+N_q_1, ...]
+// Q/K/V are laid out as (total_tokens, H, d) with the given seq_stride.
+// O always uses stride H*d (never interleaved).
+void cpu_mha_ragged(float *Q, float *K, float *V, float *O,
+                    const std::vector<uint32_t> &flat_seq_q,
+                    const std::vector<uint32_t> &flat_seq_kv,
+                    int H, int d,
+                    size_t seq_stride_q, size_t seq_stride_kv) {
 
-        for (int j = 0; j < N; j++) {
-          if (causal && j > i) {
+  int batch_size = static_cast<int>(flat_seq_q.size()) - 1;
+
+  for (int b = 0; b < batch_size; b++) {
+    int q_start = flat_seq_q[b];
+    int q_end = flat_seq_q[b + 1];
+    int N_q = q_end - q_start;
+
+    int kv_start = flat_seq_kv[b];
+    int kv_end = flat_seq_kv[b + 1];
+    int N_kv = kv_end - kv_start;
+
+    for (int h = 0; h < H; h++) {
+      for (int i = 0; i < N_q; i++) {
+        float max_score = -INFINITY;
+        std::vector<float> scores(N_kv);
+
+        // causal bound: Q row i sits at absolute position (N_kv - N_q + i)
+        int causal_bound = N_kv - N_q + i + 1;
+
+        for (int j = 0; j < N_kv; j++) {
+          if (j >= causal_bound) {
             scores[j] = -INFINITY;
             continue;
           }
 
           float score = 0;
           for (int k_idx = 0; k_idx < d; k_idx++) {
-            int q_idx = b * (seq_stride * N) + i * seq_stride + h * d + k_idx;
-            int k_idx_full =
-                b * (seq_stride * N) + j * seq_stride + h * d + k_idx;
+            int q_idx = (q_start + i) * seq_stride_q + h * d + k_idx;
+            int k_idx_full = (kv_start + j) * seq_stride_kv + h * d + k_idx;
             score += Q[q_idx] * K[k_idx_full];
           }
           score /= sqrtf((float)d);
@@ -35,18 +51,18 @@ void cpu_mha_impl(float *Q, float *K, float *V, float *O, int B, int N, int H,
         }
 
         float sum_exp = 0;
-        for (int j = 0; j < N; j++) {
+        for (int j = 0; j < N_kv; j++) {
           scores[j] = expf(scores[j] - max_score);
           sum_exp += scores[j];
         }
 
         for (int k_idx = 0; k_idx < d; k_idx++) {
           float out = 0;
-          for (int j = 0; j < N; j++) {
-            int v_idx = b * (seq_stride * N) + j * seq_stride + h * d + k_idx;
+          for (int j = 0; j < N_kv; j++) {
+            int v_idx = (kv_start + j) * seq_stride_kv + h * d + k_idx;
             out += (scores[j] / sum_exp) * V[v_idx];
           }
-          int o_idx = b * (N * H * d) + i * (H * d) + h * d + k_idx;
+          int o_idx = (q_start + i) * (H * d) + h * d + k_idx;
           O[o_idx] = out;
         }
       }
@@ -54,48 +70,38 @@ void cpu_mha_impl(float *Q, float *K, float *V, float *O, int B, int N, int H,
   }
 }
 
-// Separate Q, K, V buffers (standard BSHD layout)
-void cpu_mha(float *Q, float *K, float *V, float *O, int B, int N, int H, int d,
-             bool causal = false) {
-  cpu_mha_impl(Q, K, V, O, B, N, H, d, H * d, causal);
-}
-
-// Fused QKV buffer (Q at offset 0, K at H*d, V at 2*H*d per sequence position)
-void cpu_mha_contiguous(float *QKV, float *O, int B, int N, int H, int d,
-                        bool causal = false) {
-  int hd = H * d;
-  cpu_mha_impl(QKV, QKV + hd, QKV + 2 * hd, O, B, N, H, d, hd * 3, causal);
-}
-
 template <typename DType>
 thrust::device_vector<DType>
-create_projection(int batch_size, int sequence_length, int head_count,
-                  int head_dim, auto fill_fn) {
-  int total_length{batch_size * sequence_length * head_count * head_dim};
+create_projection(int total_tokens, int head_count, int head_dim, auto fill_fn) {
+  int total_length{total_tokens * head_count * head_dim};
   return create_tensor<DType>(total_length, fill_fn);
 }
 
-void check_output(const std::vector<float> &result,
-                  const std::vector<float> &expected, int b, int N, int h,
-                  int d, float tolerance) {
+void check_output_ragged(const std::vector<float> &result,
+                         const std::vector<float> &expected,
+                         const std::vector<uint32_t> &flat_seq_q,
+                         int h, int d,
+                         float tolerance) {
 
-  ASSERT_EQ(result.size(), expected.size())
-      << "expected and result are incomparable, vector lengths are not the "
-         "same";
+  int o_stride{h * d};
 
-  for (int i = 0; i < expected.size(); i++) {
-    // BSHD: index = batch * (N*h*d) + seq * (h*d) + head * d + idx
-    int batch{i / (N * h * d)};
-    int leftover{i % (N * h * d)};
-    int seq{leftover / (h * d)};
-    leftover = leftover % (h * d);
-    int head{leftover / d};
-    int idx{leftover % d};
+  for (int b = 0; b < static_cast<int>(flat_seq_q.size()) - 1; b++) {
+    int q_start = flat_seq_q[b];
+    int q_end = flat_seq_q[b + 1];
 
-    ASSERT_NEAR(result[i], expected[i], tolerance)
-        << "Mismatch at batch: " << batch << ", seq: " << seq
-        << ", head: " << head << ", idx: " << idx
-        << " ----- result=" << result[i] << ", expected=" << expected[i];
+    for (int seq = q_start; seq < q_end; seq++) {
+      for (int head = 0; head < h; head++) {
+        for (int idx = 0; idx < d; idx++) {
+          int i = seq * o_stride + head * d + idx;
+          ASSERT_NEAR(result[i], expected[i], tolerance)
+              << "Mismatch at batch: " << b
+              << ", seq: " << (seq - q_start)
+              << ", head: " << head << ", idx: " << idx
+              << " ----- result=" << result[i]
+              << ", expected=" << expected[i];
+        }
+      }
+    }
   }
 }
 

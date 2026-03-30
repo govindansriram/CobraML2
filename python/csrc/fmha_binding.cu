@@ -34,7 +34,7 @@ struct FMHADispatcher {
                             const thrust::device_vector<uint32_t> &,
                             const thrust::device_vector<uint32_t> &,
                             const thrust::device_vector<uint32_t> &,
-                            uint32_t, uint32_t, uint32_t);
+                            uint32_t);
 
   struct Entry {
     int heads, head_dim;
@@ -55,7 +55,7 @@ struct FMHADispatcher {
            const thrust::device_vector<uint32_t> &cu_seqlens_q,
            const thrust::device_vector<uint32_t> &cu_seqlens_kv,
            const thrust::device_vector<uint32_t> &cu_tiles_q,
-           uint32_t total_q, uint32_t total_kv, uint32_t total_tiles) {
+           uint32_t total_tiles) {
           constexpr Config inner_config{idx_to_config(I)};
           constexpr int inner_hd{inner_config.heads * inner_config.head_dim};
           constexpr int inner_stride{inner_config.contiguous ? inner_hd * 3 : inner_hd};
@@ -64,7 +64,7 @@ struct FMHADispatcher {
           cobraml::kernels::FMHA<inner_config.heads, inner_config.head_dim, B_r,
                                  B_c, float, 128, inner_stride, inner_stride>{}(
               Q, K, V, O, cu_seqlens_q, cu_seqlens_kv, cu_tiles_q,
-              total_q, total_kv, total_tiles);
+              total_tiles);
         }};
   }
 
@@ -78,12 +78,12 @@ struct FMHADispatcher {
                 const thrust::device_vector<uint32_t> &cu_seqlens_q,
                 const thrust::device_vector<uint32_t> &cu_seqlens_kv,
                 const thrust::device_vector<uint32_t> &cu_tiles_q,
-                uint32_t total_q, uint32_t total_kv, uint32_t total_tiles,
+                uint32_t total_tiles,
                 int H, int d) {
     for (auto &entry : table) {
       if (entry.heads == H && entry.head_dim == d && entry.contiguous == contiguous) {
         entry.fn(Q, K, V, O, cu_seqlens_q, cu_seqlens_kv, cu_tiles_q,
-                 total_q, total_kv, total_tiles);
+                 total_tiles);
         return;
       }
     }
@@ -115,13 +115,10 @@ void fmha_forward_fp32(torch::Tensor &Q, torch::Tensor &K, torch::Tensor &V,
   auto cu_seqlens_kv_dev{wrap_tensor(cu_seqlens_kv)};
   auto cu_tiles_q_dev{wrap_tensor(cu_tiles_q)};
 
-  uint32_t total_q{static_cast<uint32_t>(Q.size(0))};
-  uint32_t total_kv{static_cast<uint32_t>(K.size(0))};
-
   dispatcher.dispatch(Q.data_ptr<float>(), K.data_ptr<float>(),
                       V.data_ptr<float>(), O.data_ptr<float>(), contiguous,
                       cu_seqlens_q_dev, cu_seqlens_kv_dev, cu_tiles_q_dev,
-                      total_q, total_kv, total_tiles,
+                      total_tiles,
                       static_cast<int>(H), static_cast<int>(d));
 }
 

@@ -44,6 +44,8 @@ def test_fmha_uniform(benchmark, B, N, H, d):
     K = torch.randn(total_tokens, H, d, device=device, dtype=torch.float32)
     V = torch.randn(total_tokens, H, d, device=device, dtype=torch.float32)
 
+    print(f"\nB={B} N={N} H={H} d={d} Q.stride={Q.stride()} K.stride={K.stride()}")
+
     out_fmha = fmha(Q, K, V, cu_seqlens_q, cu_seqlens_kv, cu_tiles_q, total_tiles)
     torch.cuda.synchronize()
 

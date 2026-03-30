@@ -49,8 +49,6 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
                            const uint32_t *__restrict__ cu_seqlens_q,
                            const uint32_t *__restrict__ cu_seqlens_kv,
                            const uint32_t *__restrict__ cu_tiles_q,
-                           const uint32_t total_q_tokens,
-                           const uint32_t total_kv_tokens,
                            const typename MHAType::TensorDType scale,
                            TiledCopyTypeQK tc_qk,
                            TiledCopyTypeV tc_v,
@@ -60,31 +58,19 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
   constexpr typename MHAType::HeadDimType d{};
   constexpr typename MHAType::QueryRowsType B_r{};
   constexpr typename MHAType::KVColsType B_c{};
-  constexpr int head_count{MHAType::NumHeadsType::value};
-  constexpr auto hd{Int<head_count * MHAType::HeadDimType::value>{}};
-
   // map blockIdx.y -> (seq_idx, local tile index)
   int seq_idx{index_search(cu_tiles_q, blockIdx.y)};
-  size_t q_block{blockIdx.y - cu_tiles_q[seq_idx]};
+  int q_block{static_cast<int>(blockIdx.y) - static_cast<int>(cu_tiles_q[seq_idx])};
 
-  size_t N_q{cu_seqlens_q[seq_idx + 1] - cu_seqlens_q[seq_idx]};
-  size_t N_kv{cu_seqlens_kv[seq_idx + 1] - cu_seqlens_kv[seq_idx]};
-  size_t start_pos{N_kv - N_q};
+  int N_q{static_cast<int>(cu_seqlens_q[seq_idx + 1] - cu_seqlens_q[seq_idx])};
+  int N_kv{static_cast<int>(cu_seqlens_kv[seq_idx + 1] - cu_seqlens_kv[seq_idx])};
+  int start_pos{N_kv - N_q};
 
-  auto slice_head{[&](auto *ptr, uint32_t total_tokens, auto stride,
-                       size_t seq_offset, auto seq_len) {
-    auto all{make_tensor(make_gmem_ptr(ptr),
-        make_layout(make_shape(total_tokens, Int<head_count>{}, d),
-                    make_stride(stride, d, _1{})))};
-    auto head{all(_, blockIdx.x, _)};
-    auto base{head(seq_offset, _).data()};
-    return make_tensor(base, make_layout(make_shape(seq_len, d), head.layout().stride()));
-  }};
-
-  auto q_head{slice_head(Q, total_q_tokens, Int<seq_stride_q>{}, cu_seqlens_q[seq_idx], N_q)};
-  auto k_head{slice_head(K, total_kv_tokens, Int<seq_stride_kv>{}, cu_seqlens_kv[seq_idx], N_kv)};
-  auto v_head{slice_head(V, total_kv_tokens, Int<seq_stride_kv>{}, cu_seqlens_kv[seq_idx], N_kv)};
-  auto o_head{slice_head(O, total_q_tokens, hd, cu_seqlens_q[seq_idx], N_q)};
+  constexpr int o_stride{MHAType::NumHeadsType::value * MHAType::HeadDimType::value};
+  auto q_head{MHAType::template slice_head<seq_stride_q>(Q, cu_seqlens_q[seq_idx], N_q)};
+  auto k_head{MHAType::template slice_head<seq_stride_kv>(K, cu_seqlens_kv[seq_idx], N_kv)};
+  auto v_head{MHAType::template slice_head<seq_stride_kv>(V, cu_seqlens_kv[seq_idx], N_kv)};
+  auto o_head{MHAType::template slice_head<o_stride>(O, cu_seqlens_q[seq_idx], N_q)};
 
   extern __shared__ char shared_memory[];
   using SharedStorageType = typename MHAType::SharedStorage;
@@ -290,6 +276,14 @@ struct FMHA {
 
   using VectorizedLoadType = uint128_t;
   using ScalarLoadType = uint32_t;
+
+  template <int stride_val, typename PtrType, typename SeqLenType>
+  COBRA_S_DEVICE auto slice_head(PtrType ptr, int seq_offset, SeqLenType seq_len) {
+    constexpr auto d{HeadDimType{}};
+    constexpr auto stride{Int<stride_val>{}};
+    auto *base{ptr + seq_offset * stride + blockIdx.x * d};
+    return make_tensor(make_gmem_ptr(base), make_layout(make_shape(seq_len, d), make_stride(stride, _1{})));
+  }
 
   struct SharedStorage {
     // Swizzle atom dimensions
@@ -618,7 +612,6 @@ struct FMHA {
                   const thrust::device_vector<uint32_t> &cu_seqlens_q,
                   const thrust::device_vector<uint32_t> &cu_seqlens_kv,
                   const thrust::device_vector<uint32_t> &cu_tiles_q,
-                  uint32_t total_q_tokens, uint32_t total_kv_tokens,
                   uint32_t total_tiles) {
 
     dim3 grid_dim{head_count, total_tiles};
@@ -649,7 +642,6 @@ struct FMHA {
     kernel_fptr<<<grid_dim, block_dim, smem_size>>>(
         Q, K, V, O,
         cu_seqlens_q_ptr, cu_seqlens_kv_ptr, cu_tiles_q_ptr,
-        total_q_tokens, total_kv_tokens,
         scale, tc_qk, tc_v, tmma);
   }
 };

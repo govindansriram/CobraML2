@@ -89,7 +89,7 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
   for (size_t i{0}; i < warmup_iters; ++i) {
     mha(q_ptr, k_ptr, v_ptr, o_ptr,
         cu_seqlens_q_dev, cu_seqlens_kv_dev, cu_tiles_q_dev,
-        total_q, total_kv, total_tiles);
+        total_tiles);
   }
   cudaDeviceSynchronize();
 
@@ -105,7 +105,7 @@ void test_fmha_ragged(const std::vector<BatchEntry> &batch) {
     cudaEventRecord(start);
     mha(q_ptr, k_ptr, v_ptr, o_ptr,
         cu_seqlens_q_dev, cu_seqlens_kv_dev, cu_tiles_q_dev,
-        total_q, total_kv, total_tiles);
+        total_tiles);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&ms, start, stop);

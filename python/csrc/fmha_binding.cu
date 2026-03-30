@@ -1,6 +1,5 @@
 #include <cobraml2/kernels/fmha_cc.cuh>
 #include <torch/extension.h>
-#include <thrust/device_vector.h>
 
 template <int H_start, int H_stop, int H_step, int D_start, int D_stop,
           int D_step>
@@ -31,10 +30,8 @@ struct FMHADispatcher {
   }
 
   using KernelFn = void (*)(float *, float *, float *, float *,
-                            const thrust::device_vector<uint32_t> &,
-                            const thrust::device_vector<uint32_t> &,
-                            const thrust::device_vector<uint32_t> &,
-                            uint32_t);
+                            const uint32_t *, const uint32_t *,
+                            const uint32_t *, uint32_t);
 
   struct Entry {
     int heads, head_dim;
@@ -52,9 +49,9 @@ struct FMHADispatcher {
     table[I] = {
         config.heads, config.head_dim, config.contiguous,
         [](float *Q, float *K, float *V, float *O,
-           const thrust::device_vector<uint32_t> &cu_seqlens_q,
-           const thrust::device_vector<uint32_t> &cu_seqlens_kv,
-           const thrust::device_vector<uint32_t> &cu_tiles_q,
+           const uint32_t *cu_seqlens_q,
+           const uint32_t *cu_seqlens_kv,
+           const uint32_t *cu_tiles_q,
            uint32_t total_tiles) {
           constexpr Config inner_config{idx_to_config(I)};
           constexpr int inner_hd{inner_config.heads * inner_config.head_dim};
@@ -75,9 +72,9 @@ struct FMHADispatcher {
   FMHADispatcher() { init_impl(std::make_index_sequence<num_configs>{}); }
 
   void dispatch(float *Q, float *K, float *V, float *O, bool contiguous,
-                const thrust::device_vector<uint32_t> &cu_seqlens_q,
-                const thrust::device_vector<uint32_t> &cu_seqlens_kv,
-                const thrust::device_vector<uint32_t> &cu_tiles_q,
+                const uint32_t *cu_seqlens_q,
+                const uint32_t *cu_seqlens_kv,
+                const uint32_t *cu_tiles_q,
                 uint32_t total_tiles,
                 int H, int d) {
     for (auto &entry : table) {
@@ -92,15 +89,6 @@ struct FMHADispatcher {
   }
 };
 
-// Wrap a torch int32 CUDA tensor as a thrust device_vector (copies data)
-thrust::device_vector<uint32_t> wrap_tensor(const torch::Tensor &t) {
-  TORCH_CHECK(t.is_cuda() && t.is_contiguous(), "tensor must be contiguous CUDA");
-  TORCH_CHECK(t.scalar_type() == torch::kInt32, "tensor must be int32");
-  auto *ptr{reinterpret_cast<uint32_t *>(t.data_ptr<int32_t>())};
-  int n{static_cast<int>(t.numel())};
-  return thrust::device_vector<uint32_t>(ptr, ptr + n);
-}
-
 void fmha_forward_fp32(torch::Tensor &Q, torch::Tensor &K, torch::Tensor &V,
                        torch::Tensor &O, bool contiguous,
                        const torch::Tensor &cu_seqlens_q,
@@ -111,13 +99,11 @@ void fmha_forward_fp32(torch::Tensor &Q, torch::Tensor &K, torch::Tensor &V,
 
   static FMHADispatcher<1, 32, 1, 64, 128, 64> dispatcher;
 
-  auto cu_seqlens_q_dev{wrap_tensor(cu_seqlens_q)};
-  auto cu_seqlens_kv_dev{wrap_tensor(cu_seqlens_kv)};
-  auto cu_tiles_q_dev{wrap_tensor(cu_tiles_q)};
-
   dispatcher.dispatch(Q.data_ptr<float>(), K.data_ptr<float>(),
                       V.data_ptr<float>(), O.data_ptr<float>(), contiguous,
-                      cu_seqlens_q_dev, cu_seqlens_kv_dev, cu_tiles_q_dev,
+                      reinterpret_cast<const uint32_t *>(cu_seqlens_q.data_ptr<int32_t>()),
+                      reinterpret_cast<const uint32_t *>(cu_seqlens_kv.data_ptr<int32_t>()),
+                      reinterpret_cast<const uint32_t *>(cu_tiles_q.data_ptr<int32_t>()),
                       total_tiles,
                       static_cast<int>(H), static_cast<int>(d));
 }

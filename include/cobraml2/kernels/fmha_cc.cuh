@@ -609,9 +609,9 @@ struct FMHA {
   // e.g. sequences [12, 16, 8] with B_r=16 -> [0, 1, 2, 3]
   // total_tiles: cu_tiles_q[batch_size], total number of Q tiles across all sequences.
   void operator()(DType *Q, DType *K, DType *V, DType *O,
-                  const thrust::device_vector<uint32_t> &cu_seqlens_q,
-                  const thrust::device_vector<uint32_t> &cu_seqlens_kv,
-                  const thrust::device_vector<uint32_t> &cu_tiles_q,
+                  const uint32_t *cu_seqlens_q,
+                  const uint32_t *cu_seqlens_kv,
+                  const uint32_t *cu_tiles_q,
                   uint32_t total_tiles) {
 
     dim3 grid_dim{head_count, total_tiles};
@@ -622,10 +622,6 @@ struct FMHA {
     const auto tc_qk{get_tiled_copy<VectorizedLoadType>()};
     const auto tc_v{get_tiled_copy<ScalarLoadType>()};
     const auto tmma{get_tiled_mma()};
-
-    auto *cu_seqlens_q_ptr{thrust::raw_pointer_cast(cu_seqlens_q.data())};
-    auto *cu_seqlens_kv_ptr{thrust::raw_pointer_cast(cu_seqlens_kv.data())};
-    auto *cu_tiles_q_ptr{thrust::raw_pointer_cast(cu_tiles_q.data())};
 
     auto kernel_fptr{naive::mha_kernel<Self, q_seq_stride, kv_seq_stride,
                                        decltype(tc_qk), decltype(tc_v),
@@ -641,7 +637,7 @@ struct FMHA {
 
     kernel_fptr<<<grid_dim, block_dim, smem_size>>>(
         Q, K, V, O,
-        cu_seqlens_q_ptr, cu_seqlens_kv_ptr, cu_tiles_q_ptr,
+        cu_seqlens_q, cu_seqlens_kv, cu_tiles_q,
         scale, tc_qk, tc_v, tmma);
   }
 };

@@ -6,7 +6,6 @@
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
 
-
 namespace cobraml::kernels {
 
 using namespace cute;
@@ -128,10 +127,9 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
           typename SharedStorageType::KLayoutType{});
       auto tK_shared_s = thr_copy_qk.partition_D(shared_k_s);
       if (needs_pred) {
-        MHAType::predicate_copy_tensor(
-            k_idty_part(_, _, _, iter_idx),
-            tK_global_part_iter(_, _, _, iter_idx), tK_shared_s, tc_qk,
-            DType(0), N_kv);
+        MHAType::predicate_copy_tensor(k_idty_part(_, _, _, iter_idx),
+                                       tK_global_part_iter(_, _, _, iter_idx),
+                                       tK_shared_s, tc_qk, DType(0), N_kv);
       } else {
         copy(tc_qk, tK_global_part_iter(_, _, _, iter_idx), tK_shared_s);
       }
@@ -145,10 +143,9 @@ __global__ void mha_kernel(const typename MHAType::TensorDType *__restrict__ Q,
           typename SharedStorageType::VLayoutType{});
       auto tV_shared_s = thr_copy_v.partition_D(shared_v_s);
       if (needs_pred) {
-        MHAType::predicate_copy_tensor(
-            v_idty_part(_, _, _, iter_idx),
-            tV_global_part_iter(_, _, _, iter_idx), tV_shared_s, tc_v,
-            DType(0), N_kv);
+        MHAType::predicate_copy_tensor(v_idty_part(_, _, _, iter_idx),
+                                       tV_global_part_iter(_, _, _, iter_idx),
+                                       tV_shared_s, tc_v, DType(0), N_kv);
       } else {
         copy(tc_v, tV_global_part_iter(_, _, _, iter_idx), tV_shared_s);
       }
@@ -342,8 +339,7 @@ struct FMHA {
     static_assert(head_dim % kSwizzleAtomCols == 0,
                   "head_dim must be divisible by 32 (swizzle atom col size) "
                   "for Q/K layouts");
-    static_assert(kStages >= 1 && kStages <= 4,
-                  "kStages must be in [1, 4]");
+    static_assert(kStages >= 1 && kStages <= 4, "kStages must be in [1, 4]");
 
     ArrayEngine<DType, B_r * head_dim> Q;
     ArrayEngine<DType, kStages * B_c * head_dim> K;

@@ -11,101 +11,518 @@ namespace cobraml::kernels {
 
 using namespace cute;
 
-// num_heads, batch_size, ceil(N / B_r)
+template<
+  typename PagedEngineType,
+  typename PagedLayoutType,
+  int warps,
+  int head_dim,
+  int BKV,
+  int page_size
+>
+struct PagedCopyEngine{
+  using VectorizedWidthType = uint128_t;
+  using ScalarWidthType = uint32_t;
+  static constexpr int width{sizeof(VectorizedWidthType) / sizeof(ScalarWidthType)};
+  using ThreadsType = Int<32 * warps>;
+  using ThreadsPerRowType = Int<head_dim / width>;
+
+  static_assert(ThreadsType::value % ThreadsPerRowType::value == 0, "Configured thread count is unable to distirbute work evenly");
+
+  using RowsPerThreadBlockType = Int<ThreadsType::value / ThreadsPerRowType::value>;
+
+  static constexpr int iters_per_block{ceil_div(BKV, RowsPerThreadBlockType::value)};
+
+  static_assert(BKV % page_size == 0, "KV Cache Block SIze must be a multiple of KV Cache page size");
+
+  const Tensor<PagedEngineType, PagedLayoutType>& paged_table;
+  const int sequence_length;
+
+  COBRA_DEVICE PagedCopyEngine(const Tensor<PagedEngineType, PagedLayoutType> &paged_table, const int sequence_length): 
+    paged_table(paged_table), sequence_length(sequence_length){}
+
+  template<
+    typename SourceEngineType,
+    typename SourceLayout,
+    typename DestEngineType,
+    typename DestLayout
+  >
+  COBRA_DEVICE void predicate_paged_copy(
+    const Tensor<SourceEngineType, SourceLayout> &src_cache, 
+    Tensor<DestEngineType, DestLayout> &dst,
+    const int start_row
+  ){
+
+    const int thread_row{threadIdx.x / ThreadsPerRowType::value};
+    const int thread_col{threadIdx.x % ThreadsPerRowType::value};
+
+    auto coord{make_coord(_, thread_col)};
+    auto dst_tiler{make_shape(_1{}, Int<width>{})};
+
+    Tensor dst_iter{
+      local_tile(dst, dst_tiler, coord)
+    }; // (1, width, block_rows)
+
+    int thread_start_row{start_row + thread_row};
+
+    #pragma unroll
+    for (int iter{0}; iter < iters_per_block; ++iter){
+
+      thread_start_row += RowsPerThreadBlockType::value * iter;
+
+      if (thread_start_row < sequence_length){
+        int page_table_idx{thread_start_row / page_size};
+        int page_idx{paged_table(page_table_idx)};
+
+        Tensor cache_block{src_cache(page_idx, _, _)};
+
+        int page_row{thread_start_row % page_size};
+
+        // this thread's width-wide chunk of the head_dim row
+        Tensor src_chunk{local_tile(cache_block(page_row, _),
+                                    make_shape(Int<width>{}),
+                                    make_coord(thread_col))};
+
+        // vectorized 128-bit copy (== width scalars in one transaction)
+        copy(Copy_Atom<UniversalCopy<VectorizedWidthType>, ScalarWidthType>{},
+             src_chunk, dst_iter(_, _, thread_start_row - start_row));
+
+      }else if ((thread_start_row - start_row) < BKV){
+        fill(dst_iter(_, _, thread_start_row - start_row), 0.0f);
+      }
+
+    }
+
+    __syncthreads();
+
+  }
+
+  template<
+    typename SourceEngineType,
+    typename SourceLayout,
+    typename DestEngineType,
+    typename DestLayout
+  >
+  COBRA_DEVICE void paged_copy(
+    const Tensor<SourceEngineType, SourceLayout> &src_cache, 
+    Tensor<DestEngineType, DestLayout> &dst,
+    const int start_row
+  ){
+
+    const int thread_row{threadIdx.x / ThreadsPerRowType::value};
+    const int thread_col{threadIdx.x % ThreadsPerRowType::value};
+
+    auto coord{make_coord(_, thread_col)};
+    auto dst_tiler{make_shape(_1{}, Int<width>{})};
+
+    Tensor dst_iter{
+      local_tile(dst, dst_tiler, coord)
+    }; // (1, width, block_rows)
+
+    int thread_start_row{start_row + thread_row};
+
+    #pragma unroll
+    for (int iter{0}; iter < iters_per_block; ++iter){
+
+      thread_start_row += RowsPerThreadBlockType::value * iter;
+
+      int page_table_idx{thread_start_row / page_size};
+      int page_idx{paged_table(page_table_idx)};
+
+      Tensor cache_block{src_cache(page_idx, _, _)};
+
+      int page_row{thread_start_row % page_size};
+
+      // this thread's width-wide chunk of the head_dim row
+      Tensor src_chunk{local_tile(cache_block(page_row, _),
+                                  make_shape(Int<width>{}),
+                                  make_coord(thread_col))};
+
+      // vectorized 128-bit copy (== width scalars in one transaction)
+      copy(Copy_Atom<UniversalCopy<VectorizedWidthType>, ScalarWidthType>{},
+            src_chunk, dst_iter(_, _, thread_start_row - start_row));
+
+    }
+    __syncthreads();
+
+  }
+};
+
+
+// template <bool predicate = false, typename SourceEngineTypeTC,
+//           typename SourceLayoutTypeTC, typename DestEngineTypeTC,
+//           typename DestLayoutTypeTC, typename TiledCopyType, typename MMAType,
+//           typename AEngineTypeMMA, typename ALayoutTypeMMA,
+//           typename BEngineTypeMMA, typename BLayoutTypeMMA,
+//           typename CEngineTypeMMA, typename CLayoutTypeMMA,
+//           typename IdentityEngineType, typename IdentityLayoutType>
+// COBRA_DEVICE void
+// matmul(const Tensor<SourceEngineTypeTC, SourceLayoutTypeTC> &source_slice_cp,
+//         Tensor<DestEngineTypeTC, DestLayoutTypeTC> &dest_slice_cp,
+//         const TiledCopyType &tc,
+//         const Tensor<AEngineTypeMMA, ALayoutTypeMMA> &a_mma_slice,
+//         const Tensor<BEngineTypeMMA, BLayoutTypeMMA> &b_mma_slice,
+//         Tensor<CEngineTypeMMA, CLayoutTypeMMA> &c_frag,
+//         const Tensor<IdentityEngineType, IdentityLayoutType> &b_identity,
+//         const MMAType &mma, int N) {
+
+//   if constexpr (predicate) {
+//     predicate_copy_tensor(b_identity, source_slice_cp, dest_slice_cp, tc,
+//                           DType(0), N);
+//   } else {
+//     copy(tc, source_slice_cp, dest_slice_cp);
+//   }
+//   __syncthreads();
+
+//   constexpr size_t mma_m_len{size(get<1>(ALayoutTypeMMA{}))};
+//   constexpr size_t mma_n_len{size(get<1>(BLayoutTypeMMA{}))};
+//   constexpr size_t mma_k_len{size(get<2>(BLayoutTypeMMA{}))};
+
+//   constexpr size_t elements_per_load{sizeof(VectorizedLoadType) /
+//                                       sizeof(TensorDType)};
+
+//   constexpr size_t slice_factor{mma_m_len};
+
+//   constexpr size_t mma_m_size{mma_m_len / slice_factor};
+
+//   float4 a_vecs[mma_m_size];
+//   float4 b_vecs[mma_n_len];
+
+// #pragma unroll 8 // too little unrolling hurts ILP to much causes register
+//                 // spills
+//   for (size_t k{0}; k < mma_k_len; k += elements_per_load) {
+
+//     CUTE_UNROLL
+//     for (size_t m{0}; m < mma_m_len; m += mma_m_size) {
+
+//       // 1. Load all A vectors
+//       CUTE_UNROLL
+//       for (size_t m_local{0}; m_local < mma_m_size; m_local++) {
+//         a_vecs[m_local] =
+//             *reinterpret_cast<float4 *>(&a_mma_slice(0, m + m_local, k));
+//       }
+
+//       // 2. Load all B vectors
+//       CUTE_UNROLL
+//       for (size_t n{0}; n < mma_n_len; n++) {
+//         b_vecs[n] = *reinterpret_cast<float4 *>(&b_mma_slice(0, n, k));
+//       }
+
+//       // 3. FMAs - all .x first, then .y, then .z, then .w
+//       CUTE_UNROLL
+//       for (size_t m_local{0}; m_local < mma_m_size; ++m_local) {
+//         CUTE_UNROLL
+//         for (size_t n{0}; n < mma_n_len; n++) {
+//           c_frag(0, m + m_local, n) += a_vecs[m_local].x * b_vecs[n].x;
+//         }
+//       }
+
+//       CUTE_UNROLL
+//       for (size_t m_local{0}; m_local < mma_m_size; ++m_local) {
+//         CUTE_UNROLL
+//         for (size_t n{0}; n < mma_n_len; n++) {
+//           c_frag(0, m + m_local, n) += a_vecs[m_local].y * b_vecs[n].y;
+//         }
+//       }
+
+//       CUTE_UNROLL
+//       for (size_t m_local{0}; m_local < mma_m_size; ++m_local) {
+//         CUTE_UNROLL
+//         for (size_t n{0}; n < mma_n_len; n++) {
+//           c_frag(0, m + m_local, n) += a_vecs[m_local].z * b_vecs[n].z;
+//         }
+//       }
+
+//       CUTE_UNROLL
+//       for (size_t m_local{0}; m_local < mma_m_size; ++m_local) {
+//         CUTE_UNROLL
+//         for (size_t n{0}; n < mma_n_len; n++) {
+//           c_frag(0, m + m_local, n) += a_vecs[m_local].w * b_vecs[n].w;
+//         }
+//       }
+//     }
+//   }
+// }
+
+// template <bool predicate = false, typename MaxTensorEngineType,
+//           typename RScoresTensorEngineType, typename ProbTensorEngineType,
+//           typename OutTensorEngineType, typename MaxTensorLayoutType,
+//           typename ScoresTensorLayoutType, typename ProbTensorLayoutType,
+//           typename OutTensorLayoutType, typename ScoresIdentityEngineType,
+//           typename ScoresIdentityLayoutType>
+// COBRA_DEVICE void update_statistics(
+//     Tensor<MaxTensorEngineType, MaxTensorLayoutType> &max_tensor,
+//     Tensor<MaxTensorEngineType, MaxTensorLayoutType> &sum_tensor,
+//     Tensor<RScoresTensorEngineType, ScoresTensorLayoutType> &r_scores,
+//     Tensor<ProbTensorEngineType, ProbTensorLayoutType> &prob_tensor,
+//     Tensor<OutTensorEngineType, OutTensorLayoutType> &out_tensor,
+//     const Tensor<ScoresIdentityEngineType, ScoresIdentityLayoutType>
+//         &scores_idty_tensor,
+//     const DType scale, const int bound, const int start_pos = 0) {
+
+//   static_assert(rank_v<ScoresTensorLayoutType> == 3,
+//                 "Per Register Attention scores must be 3 dimensional (mma, "
+//                 "mma_m, mma_n)");
+
+//   static_assert(rank_v<MaxTensorLayoutType> == 1,
+//                 "Per register, row maxes, muse be 1 dimensional");
+
+//   using MMAShape = decltype(get<0>(ScoresTensorLayoutType{}));
+//   constexpr size_t mma_m{size(get<1>(ScoresTensorLayoutType{}))};
+
+//   static_assert(rank(MMAShape{}) == 1, "not yet implemented");
+
+//   CUTE_UNROLL
+//   for (size_t m{0}; m < mma_m; ++m) {
+
+//     auto r_score_slice{r_scores(_, m, _)};
+//     auto scores_idty_slice{scores_idty_tensor(_, m, _)};
+//     auto p_slice{(prob_tensor(_, m, _))};
+//     auto o_slice{(out_tensor(_, m, _))};
+
+//     auto &current_max{max_tensor(m)};
+//     auto old_max{current_max};
+//     auto &current_sum{sum_tensor(m)};
+
+//     constexpr size_t slice_size{size(r_score_slice)};
+
+//     int adjusted_bound;
+
+//     if constexpr (causal_mask) {
+//       adjusted_bound = get<0>(scores_idty_slice(0)) + start_pos + 1;
+//     } else if constexpr (predicate) {
+//       adjusted_bound = bound;
+//     } else {
+//       adjusted_bound = 0;
+//     }
+
+//     CUTE_UNROLL
+//     for (size_t idx{0}; idx < slice_size; ++idx) {
+//       // uses hardware unit, removes warp divergence from branch checks
+//       // each thread may hold multiple values from each row, we find the
+//       // local maximum first
+//       if constexpr (predicate || causal_mask) {
+//         auto n{get<1>(scores_idty_slice(idx))};
+//         if (n < adjusted_bound) {
+//           r_score_slice(idx) =
+//               r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
+//         } else {
+//           r_score_slice(idx) = -INFINITY;
+//         }
+//       } else {
+//         r_score_slice(idx) =
+//             r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
+//       }
+
+//       current_max = cuda::std::max(r_score_slice(idx), current_max);
+//     }
+
+//     current_max = warp_max(current_max);
+
+//     // Compute scaling factor for old values
+//     DType scale_old;
+//     if constexpr (causal_mask) {
+//       if (old_max == current_max && current_max == -INFINITY) {
+//         scale_old = DType(0);
+//       } else {
+//         scale_old = expf(old_max - current_max);
+//       }
+//     } else {
+//       scale_old = expf(old_max - current_max);
+//     }
+
+//     // scale the sum
+//     current_sum = current_sum * scale_old;
+
+//     DType local_sum{0};
+
+//     // TODO experiment with efficent copies
+
+//     CUTE_UNROLL
+//     for (size_t idx{0}; idx < slice_size; ++idx) {
+//       auto p_score{r_score_slice(idx)};
+//       if constexpr (causal_mask) {
+//         if (old_max == current_max && current_max == -INFINITY) {
+//           p_score = DType(0);
+//         } else {
+//           p_score = expf(p_score - current_max);
+//         }
+//       } else {
+//         p_score = expf(p_score - current_max);
+//       }
+
+//       local_sum += p_score;
+//       // write to probs tensor
+//       p_slice(idx) = p_score;
+//       // reset registers
+//       r_score_slice(idx) = 0;
+//     }
+
+//     current_sum += warp_sum(local_sum);
+
+//     CUTE_UNROLL
+//     for (size_t i{0}; i < size(o_slice); i++) {
+//       o_slice(i) *= scale_old;
+//     }
+//   }
+// }
+
+// grid(num_heads, num_requests, ceil(max_seq_len_q / B_r))
+
+/**
+ * q: packed query tokens (all requests in the batch have their query tokens packed 
+ * into a continuous buffer) (N, num_heads, head_dim) 
+ * 
+ * k_cache, the k pool (num_pages, page_size, num_heads, head_dim)
+ * v_cache, the v pool (num_pages, page_size, num_heads, head_dim)
+ * 
+ * KV pool shape (2, num_layers, num_pages, page_size, num_heads, head_dim)
+ * 
+ * o, the output tensor same size as q (N, num_heads, D)
+ * 
+ * page_table: A table of size (max_running_req + 1, ceil_div(max_seq_len, block_size)). 
+ * This is created once upon engine creation, each element details the start index of that 
+ * block.
+ * 
+ * cache_seqlen: How many KV tokens are used for a request [num_requests]
+ * 
+ * cu_seqlens_q: The cumulative sum of q tokens per request detailing the start and stop index of the q segment
+ * [num_requests + 1] -> [0, 4, 7, 11]
+ * 
+ * cu_seqlens_k_new: The cumulative sequence lengths of all new kv tokens per request 
+ * cache_seqlen: [8, 2, 4, 4], cu_seqlens_k_new: [0, 8, 9, 10, 11] means request 1 has 8 new tokens, the rest have 
+ * 1. This info is needed for causal masking
+ */
+
+template<
+  int BQ,
+  int BKV,
+  int head_dim
+>
+struct SharedStorage {
+  using BQType = Int<BQ>;
+  using BKVType = Int<BKV>;
+  using HeadDimType = Int<head_dim>;
+
+  ArrayEngine<float, BQ * head_dim> block_q;
+  ArrayEngine<float, BKV * head_dim> block_KV;
+  ArrayEngine<float, BQ * BKV> block_p;
+
+  using QLayoutType = decltype(make_layout(make_shape(BQType{}, HeadDimType{}), LayoutRight{}));
+  using KVLayoutType = decltype(make_layout(make_shape(BKVType{}, HeadDimType{}), LayoutRight{}));
+  using VTLayoutType = decltype(make_layout(make_shape(HeadDimType{}, BKVType{}), LayoutRight{}));
+  using PLayoutType = decltype(make_layout(make_shape(BQType{}, BKVType{}), LayoutRight{}));
+};
 
 
 template <
-    typename QTensorType,
-    typename KTensorType,
-    typename VTensorType,
-    typename OTensorType,
-    typename PageTableTensorType,
-    typename CacheSeqlenTensorType,
-    typename CuSeqlenQTensorType,
-    typename CuSeqlenKNewTensorType,
-    typename TiledCopyTypeQK,
-    typename TiledCopyTypeV,
+    typename FloatEngineType, // global pointer engine for q/k/v/o (float)
+    typename IntEngineType,    // global pointer engine for index/count tensors (int)
+    typename QOLayoutType,
+    typename KVLayoutType,
+    typename PageTableLayoutType,
+    typename CacheSeqlenLayoutType,
+    typename CuSeqlenQLayoutType,
+    typename CuSeqlenKNewLayoutType,
     typename TiledMMAType,
-    bool causal
+    bool causal,
+    int BQ,
+    int BKV
 >
 __global__ void paged_mha_cc_kernel(
-    const QTensorType q,
-    const KTensorType k_cache,
-    const VTensorType v_cache,
-    OTensorType o,
-    const PageTableTensorType page_table,
-    const CacheSeqlenTensorType cache_seqlen,
-    const CuSeqlenQTensorType cu_seqlens_q,
-    const CuSeqlenKNewTensorType cu_seqlens_k_new,
-    // const int N_q, const int N_kv, const int start_pos,
+    const Tensor<FloatEngineType, QOLayoutType> q,
+    const Tensor<FloatEngineType, KVLayoutType> k_cache,
+    const Tensor<FloatEngineType, KVLayoutType> v_cache,
+    Tensor<FloatEngineType, QOLayoutType> o,
+    const Tensor<IntEngineType, PageTableLayoutType> page_table,
+    const Tensor<IntEngineType, CacheSeqlenLayoutType> cache_seqlen,
+    const Tensor<IntEngineType, CuSeqlenQLayoutType> cu_seqlens_q,
+    const Tensor<IntEngineType, CuSeqlenKNewLayoutType> cu_seqlens_k_new,
     const float scale,
-    TiledCopyTypeQK tc_qk,
-    TiledCopyTypeV tc_v,
     TiledMMAType t_mma) {
 
-  using DType = typename MHAType::TensorDType;
-  size_t batch_size{gridDim.y};
+  uint32_t head{blockIdx.x};
+  uint32_t request{blockIdx.y};
+  uint32_t seq_start{blockIdx.z * BQ};
 
-  Tensor q_head{MHAType::slice_head(Q, batch_size, N_q)};
-  const Tensor k_head{MHAType::slice_head(K, batch_size, N_kv)};
-  const Tensor v_head{MHAType::slice_head(V, batch_size, N_kv)};
-  Tensor o_head{MHAType::slice_head<true>(O, batch_size, N_q)};
+  int q_start{cu_seqlens_q[request]};
+  int q_end{cu_seqlens_q[request + 1]};
+  int N{q_end - q_start}; // sequence length
+  int N_KV{cache_seqlen[request]};
+
+  constexpr int head_dim{shape<3>(KVLayoutType{})};
+
+  if (q_start >= N)
+    return;
+
+  Tensor q_slice{
+    make_tensor(
+      &q(q_start, head, _0{}),
+      make_layout(make_shape(N, shape<2>(q)), LayoutRight{}) 
+    )
+  };
+
+  Tensor o_slice{
+    make_tensor(
+      &o(q_start, head, _0{}),
+      make_layout(make_shape(N, shape<2>(o)), LayoutRight{}) 
+    )
+  };
+
+  Tensor k_cache_view{k_cache(_, _, head, _)};
+  Tensor v_cache_view{k_cache(_, _, head, _)};
+  Tensor pages{page_table(request, _)};
+
+  constexpr Int<head_dim> d{};
 
   extern __shared__ char shared_memory[];
-  using SharedStorageType = typename MHAType::SharedStorage;
+  using SharedStorageType = SharedStorage<BQ, BKV, d>;
   SharedStorageType *shared_storage{
       reinterpret_cast<SharedStorageType *>(shared_memory)};
 
-  Tensor shared_q{make_tensor(make_smem_ptr(shared_storage->Q.begin()),
+  Tensor shared_q{make_tensor(make_smem_ptr(shared_storage->block_q.begin()),
                               typename SharedStorageType::QLayoutType{})};
 
-  Tensor shared_k{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
-                              typename SharedStorageType::KLayoutType{})};
+  Tensor shared_k{make_tensor(make_smem_ptr(shared_storage->block_KV.begin()),
+                              typename SharedStorageType::KVLayoutType{})};
 
-  Tensor shared_v{make_tensor(make_smem_ptr(shared_storage->KV.begin()),
-                              typename SharedStorageType::VLayoutType{})};
+  Tensor shared_v{make_tensor(make_smem_ptr(shared_storage->block_KV.begin()),
+                              typename SharedStorageType::KVLayoutType{})};
 
   Tensor trans_shared_v{
-      make_tensor(make_smem_ptr(shared_storage->KV.begin()),
-                  typename SharedStorageType::VTransposedLayoutType{})};
+      make_tensor(make_smem_ptr(shared_storage->block_KV.begin()),
+                  typename SharedStorageType::VTLayoutType{})};
 
-  Tensor shared_p{make_tensor(make_smem_ptr(shared_storage->P.begin()),
+  Tensor shared_p{make_tensor(make_smem_ptr(shared_storage->block_p.begin()),
                               typename SharedStorageType::PLayoutType{})};
 
-  // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
+  // // https://docs.nvidia.com/cutlass/latest/media/docs/cpp/cute/0x_gemm_tutorial.html#cta-partitioning
 
-  constexpr typename MHAType::HeadDimType d{};
-  constexpr typename MHAType::QueryRowsType B_r{};
-  constexpr typename MHAType::KVColsType B_c{};
+  constexpr Int<BQ> bq{};
+  constexpr Int<BKV> bkv{};
 
-  auto q_coord{make_coo rd(blockIdx.z, 0)};
-  auto kv_coord{make_coord(_, 0)};
+  auto qo_coord{make_coord(blockIdx.z, _0{})};
+  // auto kv_coord{make_coord(_, 0)};
 
-  auto q_tiler{make_shape(B_r, d)};
-  auto kv_tiler{make_shape(B_c, d)};
-  auto scores_tiler{make_shape(B_r, B_c)};
+  auto qo_tiler{make_shape(Int<BQ>{}, d)};
+  auto scores_tiler{make_shape(Int<BQ>{}, Int<BKV>{})};
 
-  Tensor q_iterator{local_tile(q_head, q_tiler, q_coord)}; // (B_r, d)
-  Tensor k_iterator{
-      local_tile(k_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
-  Tensor v_iterator{
-      local_tile(v_head, kv_tiler, kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
-  Tensor o_iterator{local_tile(o_head, q_tiler, q_coord)}; // (B_r, d)
+  Tensor q_iterator{local_tile(q_slice, qo_tiler, qo_coord)}; // (B_r, d)
+  Tensor o_iterator{local_tile(o_slice, qo_tiler, qo_coord)}; // (B_r, d)
 
-  auto iters{size<2>(k_iterator)}; // N_kv
+  int iters{ceil_div(N_KV, BKV)}; // N_kv
 
-  // t prefix means unique to this thread
-  ThrCopy thr_copy_qk{tc_qk.get_slice(threadIdx.x)};
-  ThrCopy thr_copy_v{tc_v.get_slice(threadIdx.x)};
+  // // t prefix means unique to this thread
+  // ThrCopy thr_copy_qk{tc_qk.get_slice(threadIdx.x)};
+  // ThrCopy thr_copy_v{tc_v.get_slice(threadIdx.x)};
 
-  const Tensor tQ_global_part{thr_copy_qk.partition_S(q_iterator)};
-  Tensor tQ_shared_part{thr_copy_qk.partition_D(shared_q)};
+  // const Tensor tQ_global_part{thr_copy_qk.partition_S(q_iterator)};
+  // Tensor tQ_shared_part{thr_copy_qk.partition_D(shared_q)};
 
-  const Tensor tK_global_part_iter{thr_copy_qk.partition_S(k_iterator)};
-  Tensor tK_shared_part{thr_copy_qk.partition_D(shared_k)};
+  // const Tensor tK_global_part_iter{thr_copy_qk.partition_S(k_iterator)};
+  // Tensor tK_shared_part{thr_copy_qk.partition_D(shared_k)};
 
-  const Tensor tV_global_part_iter{thr_copy_v.partition_S(v_iterator)};
-  Tensor tV_shared_part{thr_copy_v.partition_D(shared_v)};
+  // const Tensor tV_global_part_iter{thr_copy_v.partition_S(v_iterator)};
+  // Tensor tV_shared_part{thr_copy_v.partition_D(shared_v)};
 
   ThrMMA thr_mma_qk{t_mma.get_slice(threadIdx.x)};
 
@@ -118,104 +535,104 @@ __global__ void paged_mha_cc_kernel(
   Tensor g_out_mma{thr_mma_qk.partition_C(o_iterator)};
   Tensor r_out_mma{thr_mma_qk.make_fragment_C(g_out_mma)};
 
-  auto q_head_idty{MHAType::identity_slice_head(batch_size, N_q)};
-  auto kv_head_idty{MHAType::identity_slice_head(batch_size, N_kv)};
+  // auto q_head_idty{MHAType::identity_slice_head(batch_size, N_q)};
+  // auto kv_head_idty{MHAType::identity_slice_head(batch_size, N_kv)};
 
-  // make q identity tensor
-  auto q_head_slice_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
-  auto tQ_idty_part{thr_copy_qk.partition_S(q_head_slice_idty)};
+  // // make q identity tensor
+  // auto q_head_slice_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
+  // auto tQ_idty_part{thr_copy_qk.partition_S(q_head_slice_idty)};
 
-  // make k identity tensor
-  auto kv_iterator_idty{local_tile(kv_head_idty, kv_tiler,
-                                   kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
-  auto k_idty_part{thr_copy_qk.partition_S(kv_iterator_idty)};
+  // // make k identity tensor
+  // auto kv_iterator_idty{local_tile(kv_head_idty, kv_tiler,
+  //                                  kv_coord)}; // (B_c, d, ceil(N_kv / B_c))
+  // auto k_idty_part{thr_copy_qk.partition_S(kv_iterator_idty)};
 
-  // make v identity tensor
-  auto v_idty_part{thr_copy_v.partition_S(kv_iterator_idty)};
+  // // make v identity tensor
+  // auto v_idty_part{thr_copy_v.partition_S(kv_iterator_idty)};
 
   // scores identity tensor
-  auto scores_idty{make_identity_tensor(make_shape(N_q, N_kv))};
+  auto scores_idty{make_identity_tensor(make_shape(N, N_KV))};
   auto scores_tile_idty{
       local_tile(scores_idty, scores_tiler,
                  make_coord(blockIdx.z, _))}; // (B_r, B_c, ceil(N / B_c))
   Tensor scores_slice_idty{thr_mma_qk.partition_C(scores_tile_idty)};
 
-  // out identity tensor
-  auto o_iterator_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
-  Tensor o_mma_idty{thr_mma_qk.partition_C(o_iterator_idty)};
+  // // out identity tensor
+  // auto o_iterator_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
+  // Tensor o_mma_idty{thr_mma_qk.partition_C(o_iterator_idty)};
 
   // predicated copy
-  MHAType::predicate_copy_tensor(tQ_idty_part, tQ_global_part, tQ_shared_part,
-                                 tc_qk, DType(0), N_q);
+  // MHAType::predicate_copy_tensor(tQ_idty_part, tQ_global_part, tQ_shared_part,
+  //                                tc_qk, DType(0), N_q);
 
-  auto mma_m{select<1>(q_mma.shape())};
+  // auto mma_m{select<1>(q_mma.shape())};
 
-  Tensor r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
-  clear(r_scores_mma); // Zero the accumulator
+  // Tensor r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
+  // clear(r_scores_mma); // Zero the accumulator
 
-  // start with the lowest possible value
-  auto m{make_tensor<DType>(mma_m)};
-  auto l{make_tensor<DType>(mma_m)};
-  fill(m, -INFINITY);
-  clear(l); // zero the sums
+  // // start with the lowest possible value
+  // auto m{make_tensor<DType>(mma_m)};
+  // auto l{make_tensor<DType>(mma_m)};
+  // fill(m, -INFINITY);
+  // clear(l); // zero the sums
 
-  // Do the block that needs predication first
+  // // Do the block that needs predication first
 
-  MHAType::matmul<true>(tK_global_part_iter(_, _, _, iters - 1), tK_shared_part,
-                        tc_qk, q_mma, k_mma, r_scores_mma,
-                        k_idty_part(_, _, _, iters - 1), t_mma, N_kv);
+  // MHAType::matmul<true>(tK_global_part_iter(_, _, _, iters - 1), tK_shared_part,
+  //                       tc_qk, q_mma, k_mma, r_scores_mma,
+  //                       k_idty_part(_, _, _, iters - 1), t_mma, N_kv);
 
-  MHAType::update_statistics<true>(m, l, r_scores_mma, p_mma, r_out_mma,
-                                   scores_slice_idty(_, _, _, iters - 1), scale,
-                                   N_kv, start_pos);
+  // MHAType::update_statistics<true>(m, l, r_scores_mma, p_mma, r_out_mma,
+  //                                  scores_slice_idty(_, _, _, iters - 1), scale,
+  //                                  N_kv, start_pos);
 
-  __syncthreads(); // ensure all K reads done before V overwrites KV buffer
-  MHAType::matmul<true>(tV_global_part_iter(_, _, _, iters - 1), tV_shared_part,
-                        tc_v, p_mma2, v_mma, r_out_mma,
-                        v_idty_part(_, _, _, iters - 1), t_mma, N_kv);
+  // __syncthreads(); // ensure all K reads done before V overwrites KV buffer
+  // MHAType::matmul<true>(tV_global_part_iter(_, _, _, iters - 1), tV_shared_part,
+  //                       tc_v, p_mma2, v_mma, r_out_mma,
+  //                       v_idty_part(_, _, _, iters - 1), t_mma, N_kv);
 
-  // do the rest of blocks that don't need predication
-  for (int iter{static_cast<int>(iters) - 2}; iter > -1; --iter) {
-    __syncthreads();
-    MHAType::matmul(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc_qk,
-                    q_mma, k_mma, r_scores_mma, k_idty_part(_, _, _, iter),
-                    t_mma, N_kv);
+  // // do the rest of blocks that don't need predication
+  // for (int iter{static_cast<int>(iters) - 2}; iter > -1; --iter) {
+  //   __syncthreads();
+  //   MHAType::matmul(tK_global_part_iter(_, _, _, iter), tK_shared_part, tc_qk,
+  //                   q_mma, k_mma, r_scores_mma, k_idty_part(_, _, _, iter),
+  //                   t_mma, N_kv);
 
-    MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma,
-                               scores_slice_idty(_, _, _, iter), scale, N_kv,
-                               start_pos);
+  //   MHAType::update_statistics(m, l, r_scores_mma, p_mma, r_out_mma,
+  //                              scores_slice_idty(_, _, _, iter), scale, N_kv,
+  //                              start_pos);
 
-    __syncthreads(); // ensure all K reads done before V overwrites KV buffer
-    MHAType::matmul(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc_v,
-                    p_mma2, v_mma, r_out_mma, v_idty_part(_, _, _, iter), t_mma,
-                    N_kv);
-  }
+  //   __syncthreads(); // ensure all K reads done before V overwrites KV buffer
+  //   MHAType::matmul(tV_global_part_iter(_, _, _, iter), tV_shared_part, tc_v,
+  //                   p_mma2, v_mma, r_out_mma, v_idty_part(_, _, _, iter), t_mma,
+  //                   N_kv);
+  // }
 
-  auto mma_shape{get<0>(r_out_mma.layout())};
-  auto m_rows{size(get<1>(r_out_mma.layout()))};
+  // auto mma_shape{get<0>(r_out_mma.layout())};
+  // auto m_rows{size(get<1>(r_out_mma.layout()))};
 
-  static_assert(rank(mma_shape) == 1,
-                "only rank 1 mma shape is currently supported");
+  // static_assert(rank(mma_shape) == 1,
+  //               "only rank 1 mma shape is currently supported");
 
-  CUTE_UNROLL
-  for (size_t m_row{0}; m_row < m_rows; ++m_row) {
-    auto out_slice{r_out_mma(_, m_row, _)};
+  // CUTE_UNROLL
+  // for (size_t m_row{0}; m_row < m_rows; ++m_row) {
+  //   auto out_slice{r_out_mma(_, m_row, _)};
 
-    CUTE_UNROLL
-    for (size_t idx{0}; idx < size(out_slice); ++idx) {
-      out_slice(idx) = out_slice(idx) / l(m_row);
-    }
-  }
+  //   CUTE_UNROLL
+  //   for (size_t idx{0}; idx < size(out_slice); ++idx) {
+  //     out_slice(idx) = out_slice(idx) / l(m_row);
+  //   }
+  // }
 
-  constexpr int write_rows{size(get<1>(g_out_mma.shape()))};
+  // constexpr int write_rows{size(get<1>(g_out_mma.shape()))};
 
-  CUTE_UNROLL
-  for (size_t i{0}; i < write_rows; ++i) {
-    auto seq_idx{get<1>(o_mma_idty(0, i, 0))};
+  // CUTE_UNROLL
+  // for (size_t i{0}; i < write_rows; ++i) {
+  //   auto seq_idx{get<1>(o_mma_idty(0, i, 0))};
 
-    if (seq_idx < N_q)
-      copy(r_out_mma(_, i, _), g_out_mma(_, i, _));
-  }
+  //   if (seq_idx < N_q)
+  //     copy(r_out_mma(_, i, _), g_out_mma(_, i, _));
+  // }
 }
 
 /**
@@ -228,423 +645,86 @@ __global__ void paged_mha_cc_kernel(
  * @tparam DType
  * @tparam thread_count
  */
-template <int head_count, int head_dim, int B_r, int B_c, typename DType,
-          int thread_count = 128, bool causal_mask = false,
-          bool qkv_contigous_buffer = false>
-struct FMHA {
+template <
+          typename FloatEngineType,
+          typename IntEngineType,
+          typename KVLayoutType,
+          typename PagedTableLayout,
+          int BQ = 16,
+          int BKV = 16,
+          int warps_per_block = 4,
+          bool causal_mask = false
+        >
+struct PagedFMHACC {
 
-  using TensorDType = DType;
-  using Self = FMHA<head_count, head_dim, B_r, B_c, DType, thread_count,
-                    causal_mask, qkv_contigous_buffer>;
+  const Tensor<FloatEngineType, KVLayoutType> Kcache;
+  const Tensor<FloatEngineType, KVLayoutType> Vcache;
+  const Tensor<IntEngineType, PagedTableLayout> paged_table;
 
-  using NumHeadsType = Int<head_count>;
-  using HeadDimType = Int<head_dim>;
-  using QueryRowsType = Int<B_r>;
-  using KVColsType = Int<B_c>;
+  static_assert(rank(KVLayoutType{}) == 4, "KV Cache must have 4 modes");
 
-  using VectorizedLoadType = uint128_t;
-  using ScalarLoadType = uint32_t;
+  PagedFMHACC(
+    const Tensor<FloatEngineType, KVLayoutType> Kcache,
+    const Tensor<FloatEngineType, KVLayoutType> Vcache,
+    const Tensor<IntEngineType, PagedTableLayout> paged_table
+  ): Kcache(Kcache), Vcache(Vcache), paged_table(paged_table){}
 
-  struct SharedStorage {
-    // Swizzle atom dimensions
-    static constexpr int kSwizzleAtomRows = 8;
-    static constexpr int kSwizzleAtomCols = 32;
+  using TensorDType = float;
 
-    // Static asserts for tiling compatibility
-    static_assert(
-        B_r % kSwizzleAtomRows == 0,
-        "B_r must be divisible by 8 (swizzle atom row size) for Q layout");
-    static_assert(
-        B_c % kSwizzleAtomCols == 0,
-        "B_c must be divisible by 32 (swizzle atom col size) for V layout");
-    static_assert(head_dim % kSwizzleAtomCols == 0,
-                  "head_dim must be divisible by 32 (swizzle atom col size) "
-                  "for Q/K layouts");
+  using NumHeadsType = decltype(shape<2>(KVLayoutType{}));
+  using HeadDimType = decltype(shape<3>(KVLayoutType{}));
+  using BPagedType = decltype(shape<1>(KVLayoutType{}));
 
-    ArrayEngine<DType, B_r * head_dim> Q;
-    ArrayEngine<DType, B_c * head_dim> KV;
-    ArrayEngine<DType, B_r * B_c> P;
+  using BQType = Int<BQ>;
+  using BKVType = Int<BKV>;
 
-    using swizzle_atom = decltype(composition(
-        Swizzle<3, 2, 3>{},
-        Layout<Shape<_8, Shape<_4, _8>>, Stride<_32, Stride<_1, _4>>>{}));
-
-    using swizzle_atom_T = decltype(composition(
-        Swizzle<3, 2, 3>{},
-        Layout<Shape<Shape<_4, _8>, _8>, Stride<Stride<_1, _4>, _32>>{}));
-
-    using QLayoutType = decltype(tile_to_shape(
-        swizzle_atom{}, make_shape(QueryRowsType{}, HeadDimType{})));
-    using KLayoutType = decltype(tile_to_shape(
-        swizzle_atom{}, make_shape(KVColsType{}, HeadDimType{})));
-    using VTransposedLayoutType = decltype(tile_to_shape(
-        swizzle_atom{}, make_shape(HeadDimType{}, KVColsType{})));
-    using VLayoutType = decltype(tile_to_shape(
-        swizzle_atom_T{}, make_shape(KVColsType{}, HeadDimType{}),
-        LayoutRight{}));
-    using PLayoutType =
-        Layout<Shape<KVColsType, QueryRowsType>, Stride<QueryRowsType, _1>>;
-  };
-
-  static constexpr int threads_per_block{thread_count};
-
-  template <bool is_o = false>
-  COBRA_S_DEVICE auto get_tensor_layout(size_t batch_size, size_t N) {
-
-    if constexpr (qkv_contigous_buffer && !is_o) {
-      Int<head_dim * head_count * 3> embed3{};
-      return make_layout(
-          make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}),
-          make_stride(embed3.value * N, embed3, HeadDimType{}, _1{}));
-    } else {
-      return make_layout(
-          make_shape(batch_size, N, NumHeadsType{}, HeadDimType{}),
-          LayoutRight{});
-    }
-  }
-
-  template <bool is_o = false, typename PtrType>
-  COBRA_S_DEVICE auto slice_head(PtrType g_ptr, int batch_size, int N) {
-
-    using BaseType = std::decay_t<std::remove_pointer_t<PtrType>>;
-    static_assert(std::is_pointer_v<PtrType>, "Must be a pointer");
-    static_assert(
-        std::is_same_v<std::remove_cv_t<std::remove_pointer_t<PtrType>>, DType>,
-        "Must point to DType");
-
-    const auto projection_layout{get_tensor_layout<is_o>(batch_size, N)};
-    const Tensor projection{
-        make_tensor(make_gmem_ptr<DType>(g_ptr), projection_layout)};
-    return projection(blockIdx.y, _, blockIdx.x, _);
-  }
-
-  COBRA_S_DEVICE auto identity_slice_head(int batch_size, int N) {
-    const auto projection_layout{get_tensor_layout(batch_size, N)};
-    const Tensor projection{make_identity_tensor(projection_layout.shape())};
-    return projection(blockIdx.y, _, blockIdx.x, _);
-  }
-
-  template <typename LoadType> static constexpr auto get_tiled_copy() {
-
-    // ensures no repeat across the head dimension
-
-    constexpr int elements_per_load{sizeof(LoadType) / sizeof(DType)};
-    constexpr int threads_per_row{head_dim / elements_per_load};
-
-    static_assert(
-        head_dim % threads_per_row == 0,
-        "the head dimension cannot be properly tiled with this thread layout");
-
-    using TPRType = Int<threads_per_row>;
-    using EPLType = Int<elements_per_load>;
-    constexpr int rows{thread_count / threads_per_row};
-    using RowType = Int<rows>;
-
-    static_assert(
-        thread_count % threads_per_row == 0,
-        "the head dimension cannot be properly tiled with this thread layout");
-
-    static_assert(
-        B_r % rows == 0 && B_c % rows == 0,
-        "the block size cannot be properly tiled with this thread layout");
-
-    return make_tiled_copy(
-        Copy_Atom<UniversalCopy<LoadType>, DType>{},
-        Layout<Shape<RowType, TPRType>, Stride<TPRType, _1>>{},
-        Layout<Shape<_1, EPLType>>{});
-  }
+  static_assert(BKV % BPagedType::value == 0, "The KV Block Size must be a multiple of the Paged Block Size");
+  static constexpr int threads_per_block{warps_per_block * 32};
 
   static constexpr auto get_tiled_mma() {
 
-    static_assert(thread_count % 32 == 0,
+    static_assert(threads_per_block % 32 == 0,
                   "thread_count must be a multiple of warp_size");
 
-    using RowType = Int<thread_count / 32>;
-
-    // one warp computes one row
+    using RowType = Int<threads_per_block / 32>;
 
     auto t_mma{
-        make_tiled_mma(UniversalFMA<DType, DType, DType>{},
+        make_tiled_mma(UniversalFMA<TensorDType, TensorDType, TensorDType>{},
                        Layout<Shape<RowType, _32>,
                               Stride<_32, _1>>{})}; // 16x16x1 UniversalFMA
 
     return t_mma;
   }
 
-  static_assert(B_c % B_r == 0, "B_c must be a multiple of B_r");
+  template<
+    typename QOLayoutType,
+    typename CacheSeqlenLayoutType,
+    typename CuSeqlenQLayoutType,
+    typename CuSeqlenKNewLayoutType
+  >
+  void operator()(
+    const Tensor<FloatEngineType, QOLayoutType> q,
+    Tensor<FloatEngineType, QOLayoutType> o,
+    const Tensor<IntEngineType, CacheSeqlenLayoutType> cache_seqlen,
+    const Tensor<IntEngineType, CuSeqlenQLayoutType> cu_seqlens_q,
+    const Tensor<IntEngineType, CuSeqlenKNewLayoutType> cu_seqlens_k_new,
+    const int num_requests,
+    const int max_seq_len_q) {
 
-  template <typename IdentityTensorEngineType,
-            typename IdentityTensorLayoutType, typename SourceTensorEngineType,
-            typename SourceTensorLayoutType,
-            typename DestinationTensorEngineType,
-            typename DestinationTensorLayoutType, typename TiledCopyType>
-  COBRA_S_DEVICE void predicate_copy_tensor(
-      const Tensor<IdentityTensorEngineType, IdentityTensorLayoutType>
-          &identity_tensor,
-      const Tensor<SourceTensorEngineType, SourceTensorLayoutType>
-          &source_tensor,
-      Tensor<DestinationTensorEngineType, DestinationTensorLayoutType>
-          &destination_tensor,
-      TiledCopyType tiled_copy, DType fill_value, int bound) {
-
-    constexpr int rows{size(get<1>(SourceTensorLayoutType{}))};
-
-    CUTE_UNROLL
-    for (int i{0}; i < rows; ++i) {
-      auto seq_idx{get<1>(identity_tensor(0, i, 0))};
-
-      if (seq_idx < bound) {
-        copy(tiled_copy, source_tensor(_, i, _), destination_tensor(_, i, _));
-      } else {
-        fill(destination_tensor(_, i, _), fill_value);
-      }
-    }
-  }
-
-  template <bool predicate = false, typename SourceEngineTypeTC,
-            typename SourceLayoutTypeTC, typename DestEngineTypeTC,
-            typename DestLayoutTypeTC, typename TiledCopyType, typename MMAType,
-            typename AEngineTypeMMA, typename ALayoutTypeMMA,
-            typename BEngineTypeMMA, typename BLayoutTypeMMA,
-            typename CEngineTypeMMA, typename CLayoutTypeMMA,
-            typename IdentityEngineType, typename IdentityLayoutType>
-  COBRA_S_DEVICE void
-  matmul(const Tensor<SourceEngineTypeTC, SourceLayoutTypeTC> &source_slice_cp,
-         Tensor<DestEngineTypeTC, DestLayoutTypeTC> &dest_slice_cp,
-         const TiledCopyType &tc,
-         const Tensor<AEngineTypeMMA, ALayoutTypeMMA> &a_mma_slice,
-         const Tensor<BEngineTypeMMA, BLayoutTypeMMA> &b_mma_slice,
-         Tensor<CEngineTypeMMA, CLayoutTypeMMA> &c_frag,
-         const Tensor<IdentityEngineType, IdentityLayoutType> &b_identity,
-         const MMAType &mma, int N) {
-
-    if constexpr (predicate) {
-      predicate_copy_tensor(b_identity, source_slice_cp, dest_slice_cp, tc,
-                            DType(0), N);
-    } else {
-      copy(tc, source_slice_cp, dest_slice_cp);
-    }
-    __syncthreads();
-
-    constexpr size_t mma_m_len{size(get<1>(ALayoutTypeMMA{}))};
-    constexpr size_t mma_n_len{size(get<1>(BLayoutTypeMMA{}))};
-    constexpr size_t mma_k_len{size(get<2>(BLayoutTypeMMA{}))};
-
-    constexpr size_t elements_per_load{sizeof(VectorizedLoadType) /
-                                       sizeof(TensorDType)};
-
-    constexpr size_t slice_factor{mma_m_len};
-
-    constexpr size_t mma_m_size{mma_m_len / slice_factor};
-
-    float4 a_vecs[mma_m_size];
-    float4 b_vecs[mma_n_len];
-
-#pragma unroll 8 // too little unrolling hurts ILP to much causes register
-                 // spills
-    for (size_t k{0}; k < mma_k_len; k += elements_per_load) {
-
-      CUTE_UNROLL
-      for (size_t m{0}; m < mma_m_len; m += mma_m_size) {
-
-        // 1. Load all A vectors
-        CUTE_UNROLL
-        for (size_t m_local{0}; m_local < mma_m_size; m_local++) {
-          a_vecs[m_local] =
-              *reinterpret_cast<float4 *>(&a_mma_slice(0, m + m_local, k));
-        }
-
-        // 2. Load all B vectors
-        CUTE_UNROLL
-        for (size_t n{0}; n < mma_n_len; n++) {
-          b_vecs[n] = *reinterpret_cast<float4 *>(&b_mma_slice(0, n, k));
-        }
-
-        // 3. FMAs - all .x first, then .y, then .z, then .w
-        CUTE_UNROLL
-        for (size_t m_local{0}; m_local < mma_m_size; ++m_local) {
-          CUTE_UNROLL
-          for (size_t n{0}; n < mma_n_len; n++) {
-            c_frag(0, m + m_local, n) += a_vecs[m_local].x * b_vecs[n].x;
-          }
-        }
-
-        CUTE_UNROLL
-        for (size_t m_local{0}; m_local < mma_m_size; ++m_local) {
-          CUTE_UNROLL
-          for (size_t n{0}; n < mma_n_len; n++) {
-            c_frag(0, m + m_local, n) += a_vecs[m_local].y * b_vecs[n].y;
-          }
-        }
-
-        CUTE_UNROLL
-        for (size_t m_local{0}; m_local < mma_m_size; ++m_local) {
-          CUTE_UNROLL
-          for (size_t n{0}; n < mma_n_len; n++) {
-            c_frag(0, m + m_local, n) += a_vecs[m_local].z * b_vecs[n].z;
-          }
-        }
-
-        CUTE_UNROLL
-        for (size_t m_local{0}; m_local < mma_m_size; ++m_local) {
-          CUTE_UNROLL
-          for (size_t n{0}; n < mma_n_len; n++) {
-            c_frag(0, m + m_local, n) += a_vecs[m_local].w * b_vecs[n].w;
-          }
-        }
-      }
-    }
-  }
-
-  template <bool predicate = false, typename MaxTensorEngineType,
-            typename RScoresTensorEngineType, typename ProbTensorEngineType,
-            typename OutTensorEngineType, typename MaxTensorLayoutType,
-            typename ScoresTensorLayoutType, typename ProbTensorLayoutType,
-            typename OutTensorLayoutType, typename ScoresIdentityEngineType,
-            typename ScoresIdentityLayoutType>
-  COBRA_S_DEVICE void update_statistics(
-      Tensor<MaxTensorEngineType, MaxTensorLayoutType> &max_tensor,
-      Tensor<MaxTensorEngineType, MaxTensorLayoutType> &sum_tensor,
-      Tensor<RScoresTensorEngineType, ScoresTensorLayoutType> &r_scores,
-      Tensor<ProbTensorEngineType, ProbTensorLayoutType> &prob_tensor,
-      Tensor<OutTensorEngineType, OutTensorLayoutType> &out_tensor,
-      const Tensor<ScoresIdentityEngineType, ScoresIdentityLayoutType>
-          &scores_idty_tensor,
-      const DType scale, const int bound, const int start_pos = 0) {
-
-    static_assert(rank_v<ScoresTensorLayoutType> == 3,
-                  "Per Register Attention scores must be 3 dimensional (mma, "
-                  "mma_m, mma_n)");
-
-    static_assert(rank_v<MaxTensorLayoutType> == 1,
-                  "Per register, row maxes, muse be 1 dimensional");
-
-    using MMAShape = decltype(get<0>(ScoresTensorLayoutType{}));
-    constexpr size_t mma_m{size(get<1>(ScoresTensorLayoutType{}))};
-
-    static_assert(rank(MMAShape{}) == 1, "not yet implemented");
-
-    CUTE_UNROLL
-    for (size_t m{0}; m < mma_m; ++m) {
-
-      auto r_score_slice{r_scores(_, m, _)};
-      auto scores_idty_slice{scores_idty_tensor(_, m, _)};
-      auto p_slice{(prob_tensor(_, m, _))};
-      auto o_slice{(out_tensor(_, m, _))};
-
-      auto &current_max{max_tensor(m)};
-      auto old_max{current_max};
-      auto &current_sum{sum_tensor(m)};
-
-      constexpr size_t slice_size{size(r_score_slice)};
-
-      int adjusted_bound;
-
-      if constexpr (causal_mask) {
-        adjusted_bound = get<0>(scores_idty_slice(0)) + start_pos + 1;
-      } else if constexpr (predicate) {
-        adjusted_bound = bound;
-      } else {
-        adjusted_bound = 0;
-      }
-
-      CUTE_UNROLL
-      for (size_t idx{0}; idx < slice_size; ++idx) {
-        // uses hardware unit, removes warp divergence from branch checks
-        // each thread may hold multiple values from each row, we find the
-        // local maximum first
-        if constexpr (predicate || causal_mask) {
-          auto n{get<1>(scores_idty_slice(idx))};
-          if (n < adjusted_bound) {
-            r_score_slice(idx) =
-                r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
-          } else {
-            r_score_slice(idx) = -INFINITY;
-          }
-        } else {
-          r_score_slice(idx) =
-              r_score_slice(idx) * scale; // scale by 1 / sqrt(d)
-        }
-
-        current_max = cuda::std::max(r_score_slice(idx), current_max);
-      }
-
-      current_max = warp_max(current_max);
-
-      // Compute scaling factor for old values
-      DType scale_old;
-      if constexpr (causal_mask) {
-        if (old_max == current_max && current_max == -INFINITY) {
-          scale_old = DType(0);
-        } else {
-          scale_old = expf(old_max - current_max);
-        }
-      } else {
-        scale_old = expf(old_max - current_max);
-      }
-
-      // scale the sum
-      current_sum = current_sum * scale_old;
-
-      DType local_sum{0};
-
-      // TODO experiment with efficent copies
-
-      CUTE_UNROLL
-      for (size_t idx{0}; idx < slice_size; ++idx) {
-        auto p_score{r_score_slice(idx)};
-        if constexpr (causal_mask) {
-          if (old_max == current_max && current_max == -INFINITY) {
-            p_score = DType(0);
-          } else {
-            p_score = expf(p_score - current_max);
-          }
-        } else {
-          p_score = expf(p_score - current_max);
-        }
-
-        local_sum += p_score;
-        // write to probs tensor
-        p_slice(idx) = p_score;
-        // reset registers
-        r_score_slice(idx) = 0;
-      }
-
-      current_sum += warp_sum(local_sum);
-
-      CUTE_UNROLL
-      for (size_t i{0}; i < size(o_slice); i++) {
-        o_slice(i) *= scale_old;
-      }
-    }
-  }
-
-  // start_pos is the KV-cache offset: it tells the attention kernel that
-  // the current query tokens sit at position [start_pos, start_pos + N_q)
-  // in the full sequence, and the KV cache already holds tokens [0, start_pos).
-  // The causal mask uses this to compute absolute positions so that during
-  // decode (single-token query) it correctly attends to all prior cached keys
-  // rather than masking them out, and during prefill-after-decode the mask
-  // is reapplied at the right offsets.
-  void operator()(DType *Q, DType *K, DType *V, DType *O, uint32_t batch_size,
-                  uint32_t N_q, uint32_t N_kv, uint32_t start_pos) {
-    dim3 grid_dim{head_count, batch_size, ceil_div(N_q, B_r)};
-
-    dim3 block_dim{thread_count};
-
-    DType scale{rsqrt(static_cast<DType>(head_dim))};
-
-    const auto tc_qk{get_tiled_copy<VectorizedLoadType>()};
-    const auto tc_v{get_tiled_copy<ScalarLoadType>()};
+    dim3 grid_dim{NumHeadsType::value, num_requests, ceil_div(max_seq_len_q, BQ)};
+    dim3 block_dim{threads_per_block};
 
     const auto tmma{get_tiled_mma()};
 
-    auto kernel_fptr{mha_kernel<Self, decltype(tc_qk), decltype(tc_v),
-                                decltype(tmma)>};
+    constexpr auto scale{rsqrt(static_cast<TensorDType>(HeadDimType::value))};
 
-    size_t smem_size{sizeof(SharedStorage)};
+    auto kernel_fptr{paged_mha_cc_kernel<
+        FloatEngineType, IntEngineType, QOLayoutType, KVLayoutType,
+        PagedTableLayout, CacheSeqlenLayoutType, CuSeqlenQLayoutType,
+        CuSeqlenKNewLayoutType, decltype(tmma), causal_mask, BQ, BKV>};
 
-    // Set L1 to be SMEM only
+    size_t smem_size{sizeof(SharedStorage<BQ, BKV, HeadDimType::value>)};
+
     cudaFuncSetAttribute(
         kernel_fptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
@@ -652,7 +732,7 @@ struct FMHA {
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
     kernel_fptr<<<grid_dim, block_dim, smem_size>>>(
-        Q, K, V, O, N_q, N_kv, start_pos, scale, tc_qk, tc_v, tmma);
+        q, Kcache, Vcache, o, paged_table, cache_seqlen, cu_seqlens_q, cu_seqlens_k_new, scale, tmma);
   }
 };
 

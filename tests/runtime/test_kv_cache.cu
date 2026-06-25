@@ -10,7 +10,7 @@ TEST(KV_CACHE, MHA_KV_CACHE_GET) {
   KVManager manager(cache);
 
   for (int i{0}; i < num_pages; ++i) {
-    auto [index, page]{manager.get_page()};
+    int index{manager.get_page()};
     ASSERT_EQ(num_pages - 1 - i, index);
   }
 

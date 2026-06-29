@@ -449,6 +449,11 @@ __global__ void paged_mha_cc_kernel(
   int N{q_end - q_start}; // sequence length
   int N_KV{cache_seqlen[request]};
 
+  if (thread0()){
+    print(N); print("\n");
+    print_tensor(cu_seqlens_q);
+  }
+
   constexpr int head_dim{shape<3>(KVLayoutType{})};
 
   if (q_start >= N)
@@ -721,12 +726,12 @@ struct PagedFMHACC {
     const int num_requests,
     const int max_seq_len_q) {
 
-    dim3 grid_dim{NumHeadsType::value, num_requests, ceil_div(max_seq_len_q, BQ)};
+    dim3 grid_dim{NumHeadsType::value, static_cast<uint32_t>(num_requests), static_cast<uint32_t>(ceil_div(max_seq_len_q, BQ))};
     dim3 block_dim{threads_per_block};
 
     const auto tmma{get_tiled_mma()};
 
-    constexpr auto scale{rsqrt(static_cast<TensorDType>(HeadDimType::value))};
+    const auto scale{rsqrt(static_cast<TensorDType>(HeadDimType::value))};
 
     auto kernel_fptr{paged_mha_cc_kernel<
         FloatEngineType, IntEngineType, QOLayoutType, KVLayoutType,

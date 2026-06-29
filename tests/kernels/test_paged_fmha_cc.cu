@@ -14,16 +14,47 @@ using namespace cute;
 
 // TODO: testing code goes here.
 
+template<
+    typename DType,
+    typename LayoutType
+>
+struct OwnedTensor {
+    thrust::device_vector<DType> buffer;
+    const LayoutType layout;
+    OwnedTensor(const thrust::device_vector<DType> &buffer, const LayoutType &layout): buffer(buffer), layout(layout){}
+
+    auto get_tensor() {
+        return make_tensor(
+              make_gmem_ptr(thrust::raw_pointer_cast(this->buffer.data())), 
+              layout
+          );
+    }
+
+};
+
 auto create_cumulative_vector(const std::vector<int> &vector){
     thrust::host_vector<int> cu_vector(vector.size() + 1, 0);
     for (size_t idx{0}; idx < vector.size(); ++idx)
         cu_vector[idx + 1] = cu_vector[idx] + vector[idx];
 
     thrust::device_vector<int> device_vector{cu_vector};
-    return make_tensor(
-        make_gmem_ptr(thrust::raw_pointer_cast(device_vector.data())), 
-        make_shape(vector.size() + 1)
-    );
+    OwnedTensor tensor(device_vector, make_shape(vector.size() + 1));
+    return tensor;
+}
+
+template<int num_heads, int head_dim>
+auto create_qo_vector(const std::vector<int> q_len){
+    int N{std::accumulate(q_len.begin(), q_len.end(), 0)};
+    auto qo_layout = make_layout(make_shape(N, Int<num_heads>{}, Int<head_dim>{}), LayoutRight{});
+    int length{static_cast<int>(size(qo_layout.shape()))};
+
+    thrust::device_vector<float> q_vector(length);
+    thrust::device_vector<float> o_vector(length);
+
+    OwnedTensor q_tensor(q_vector, qo_layout);
+    OwnedTensor o_tensor(o_vector, qo_layout);
+
+    return make_tuple(q_tensor, o_tensor);
 }
 
 template<int block_size>
@@ -64,10 +95,8 @@ auto create_page_map_tensor(std::vector<int> k_len, size_t num_pages){
     }
 
     thrust::device_vector<int> device_page_vector{host_page_vector};
-    return make_tensor(
-        make_gmem_ptr(thrust::raw_pointer_cast(device_page_vector.data())), 
-        page_layout
-    );
+    OwnedTensor page_tensor(device_page_vector, page_layout);
+    return page_tensor;
 }
 
 void test_paged_fmha(std::vector<int>&& q_len_host, std::vector<int>&& kv_len_host, std::vector<int>&& k_new_host) {
@@ -96,8 +125,8 @@ void test_paged_fmha(std::vector<int>&& q_len_host, std::vector<int>&& kv_len_ho
     thrust::device_vector<int> kv_len(kv_len_host);
     // ^ prefill, prefill, prefill, decode, decode, prefill
 
-    Tensor cu_seqlen_q{create_cumulative_vector(q_len_host)};
-    Tensor cu_seqlen_k_new{create_cumulative_vector(k_new_host)};
+    auto owned_cu_seqlen_q{create_cumulative_vector(q_len_host)};
+    auto owned_cu_seqlen_k_new{create_cumulative_vector(k_new_host)};
     Tensor cache_seqlen{
         make_tensor(
             make_gmem_ptr(thrust::raw_pointer_cast(kv_len.data())), 
@@ -105,16 +134,17 @@ void test_paged_fmha(std::vector<int>&& q_len_host, std::vector<int>&& kv_len_ho
         )
     };
 
-    Tensor page_map{create_page_map_tensor<16>(kv_len_host, num_pages)};
+    auto owned_page_map{create_page_map_tensor<16>(kv_len_host, num_pages)};
 
     cudaDeviceSynchronize();
     cudaError_t err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
 
     using ConfigType = kernels::PagedFMHACC_Config<64, 64, 4, false>;
-    kernels::PagedFMHACC paged_attention(cache.get_k_cache<1>(), cache.get_v_cache<1>(), page_map, ConfigType{});
+    kernels::PagedFMHACC paged_attention(cache.get_k_cache<1>(), cache.get_v_cache<1>(), owned_page_map.get_tensor(), ConfigType{});
 
-    
+    auto[q_tensor, o_tensor]{create_qo_vector<16, 64>(q_len_host)};
+    paged_attention(q_tensor.get_tensor(), o_tensor.get_tensor(), owned_cu_seqlen_q.get_tensor(), owned_cu_seqlen_k_new.get_tensor(), cache_seqlen, num_requests, max_q);
 }
 
 TEST(PAGED_FMHA_CC, basic_test){

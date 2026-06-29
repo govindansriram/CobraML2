@@ -14,25 +14,23 @@ using namespace cute;
 
 // TODO: testing code goes here.
 
-thrust::device_vector<int> create_cumulative_vector(const std::vector<int> &vector){
+auto create_cumulative_vector(const std::vector<int> &vector){
     thrust::host_vector<int> cu_vector(vector.size() + 1, 0);
     for (size_t idx{0}; idx < vector.size(); ++idx)
         cu_vector[idx + 1] = cu_vector[idx] + vector[idx];
 
-    Tensor host_page_tensor{
-        make_tensor(
-            make_gmem_ptr(thrust::raw_pointer_cast(thrust::device_vector<int>(cu_vector).data())), 
-            make_shape(vector.size() + 1)
-        )
-    };
-
-    return thrust::device_vector<int>(cu_vector);
+    thrust::device_vector<int> device_vector{cu_vector};
+    return make_tensor(
+        make_gmem_ptr(thrust::raw_pointer_cast(device_vector.data())), 
+        make_shape(vector.size() + 1)
+    );
 }
 
+template<int block_size>
 auto create_page_map_tensor(std::vector<int> k_len, size_t num_pages){
     size_t num_requests{k_len.size()};
     int max_it{*std::max_element(k_len.begin(), k_len.end())};
-    int max_blocks{(max_it + 16 - 1) / 16};
+    int max_blocks{(max_it + block_size - 1) / block_size};
 
     auto page_layout = make_layout(
         make_shape(num_requests, max_blocks), LayoutRight{}
@@ -48,7 +46,7 @@ auto create_page_map_tensor(std::vector<int> k_len, size_t num_pages){
         )
     };
 
-    std::vector<int> available_pages(1000);
+    std::vector<int> available_pages(num_pages);
     std::iota(available_pages.begin(), available_pages.end(), 1);
 
     std::random_device rd;
@@ -72,9 +70,16 @@ auto create_page_map_tensor(std::vector<int> k_len, size_t num_pages){
     );
 }
 
-TEST(PAGED_FMHA_CC, temp) {
+void test_paged_fmha(std::vector<int>&& q_len_host, std::vector<int>&& kv_len_host, std::vector<int>&& k_new_host) {
+
+    ASSERT_EQ(q_len_host.size(), kv_len_host.size());
+    ASSERT_EQ(q_len_host.size(), k_new_host.size());
+
+    int num_requests{static_cast<int>(q_len_host.size())};
+    int max_q{*std::max_element(q_len_host.begin(), q_len_host.end())};
+
     const int num_pages{1000};
-    runtime::KVCacheMHA<float, 1, 16, 64, 16> cache(num_pages);
+    runtime::KVCacheMHA<float, 2, 16, 64, 16> cache(num_pages);
     thrust::host_vector<float> host_cache(cache.elements_per_kv_page * num_pages);
 
     std::uniform_real_distribution<float> dist{0.0f, 1.0f};
@@ -88,24 +93,34 @@ TEST(PAGED_FMHA_CC, temp) {
         cudaMemcpyHostToDevice
     );
 
-    cudaDeviceSynchronize();
+    thrust::device_vector<int> kv_len(kv_len_host);
+    // ^ prefill, prefill, prefill, decode, decode, prefill
 
+    Tensor cu_seqlen_q{create_cumulative_vector(q_len_host)};
+    Tensor cu_seqlen_k_new{create_cumulative_vector(k_new_host)};
+    Tensor cache_seqlen{
+        make_tensor(
+            make_gmem_ptr(thrust::raw_pointer_cast(kv_len.data())), 
+            make_shape(kv_len_host.size())
+        )
+    };
+
+    Tensor page_map{create_page_map_tensor<16>(kv_len_host, num_pages)};
+
+    cudaDeviceSynchronize();
     cudaError_t err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
 
-    std::vector<int> q_len{  32, 10, 16, 1,  1,   5};
-    std::vector<int> kv_len{ 96, 10, 17, 44, 999, 200};
-    std::vector<int> k_new{  32, 10, 16, 1,  1,   5};
-    // ^ prefill, prefill, prefill, decode, decode, prefill
+    using ConfigType = kernels::PagedFMHACC_Config<64, 64, 4, false>;
+    kernels::PagedFMHACC paged_attention(cache.get_k_cache<1>(), cache.get_v_cache<1>(), page_map, ConfigType{});
 
-    thrust::device_vector<int> cu_seqlen_q{create_cumulative_vector(q_len)};
-    thrust::device_vector<int> cu_seqlen_k_new{create_cumulative_vector(k_new)};
-    thrust::device_vector<int> cache_seqlen{kv_len};
+    
+}
 
-    Tensor page_map{create_page_map_tensor(kv_len, num_pages)};
-
-    cudaDeviceSynchronize();
-
-    err = cudaGetLastError();
-    ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
+TEST(PAGED_FMHA_CC, basic_test){
+    test_paged_fmha(
+        {32, 10, 16, 1, 1, 5}, 
+        {96, 10, 17, 44, 999, 200}, 
+        {32, 10, 16, 1, 1, 5}
+    );
 }

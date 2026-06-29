@@ -12,10 +12,10 @@ namespace cobraml::runtime {
 using namespace cute;
 
 template <typename C>
-concept KVCache = requires(C cache, int layer) {
+concept KVCache = requires(C cache) {
   typename C::CacheTensorType;
-  { cache.get_k_cache(layer) } -> std::same_as<typename C::CacheTensorType>;
-  { cache.get_v_cache(layer) } -> std::same_as<typename C::CacheTensorType>;
+  { cache.template get_k_cache<0>() } -> std::same_as<typename C::CacheTensorType>;
+  { cache.template get_v_cache<0>() } -> std::same_as<typename C::CacheTensorType>;
   { cache.num_pages() } -> std::convertible_to<int>;
 };
 
@@ -39,7 +39,7 @@ struct KVCacheMHA {
   using TensorType = decltype(make_tensor(
       make_gmem_ptr(static_cast<TensorDType *>(nullptr)), CacheLayoutType{}));
 
-  using CacheTensorType = decltype(std::declval<TensorType>()(_, _, 0, _, _, _));
+  using CacheTensorType = decltype(std::declval<TensorType>()(_0{}, _0{}, _, _, _, _));
 
   thrust::device_vector<TensorDType> buffer;
   TensorType buffer_tensor;
@@ -61,13 +61,15 @@ struct KVCacheMHA {
         n_pages(pages) {}
 
   TensorType get_cache() const { return buffer_tensor; }
-
-  CacheTensorType get_k_cache(const int layer) const {
-    return buffer_tensor(_0{}, layer, _, _, _, _);
+  
+  template<int layer>
+  CacheTensorType get_k_cache() const {
+    return buffer_tensor(_0{}, Int<layer>{}, _, _, _, _);
   }
 
-  CacheTensorType get_v_cache(const int layer) const {
-    return buffer_tensor(_1{}, layer, _, _, _, _);
+  template<int layer>
+  CacheTensorType get_v_cache() const {
+    return buffer_tensor(_1{}, Int<layer>{}, _, _, _, _);
   }
 
   int num_pages() const { return n_pages; }

@@ -635,6 +635,14 @@ __global__ void paged_mha_cc_kernel(
   // }
 }
 
+template<
+  int BQ = 16,
+  int BKV = 16,
+  int warps_per_block = 4,
+  bool causal_mask = false
+>
+struct PagedFMHACC_Config {};
+
 /**
  * @brief
  *
@@ -650,24 +658,26 @@ template <
           typename IntEngineType,
           typename KVLayoutType,
           typename PagedTableLayout,
-          int BQ = 16,
-          int BKV = 16,
-          int warps_per_block = 4,
-          bool causal_mask = false
+          int BQ,
+          int BKV,
+          int warps_per_block,
+          bool causal_mask
         >
 struct PagedFMHACC {
 
   const Tensor<FloatEngineType, KVLayoutType> Kcache;
   const Tensor<FloatEngineType, KVLayoutType> Vcache;
   const Tensor<IntEngineType, PagedTableLayout> paged_table;
+  const PagedFMHACC_Config<BQ, BKV, warps_per_block, causal_mask> config{};
 
   static_assert(rank(KVLayoutType{}) == 4, "KV Cache must have 4 modes");
 
   PagedFMHACC(
     const Tensor<FloatEngineType, KVLayoutType> Kcache,
     const Tensor<FloatEngineType, KVLayoutType> Vcache,
-    const Tensor<IntEngineType, PagedTableLayout> paged_table
-  ): Kcache(Kcache), Vcache(Vcache), paged_table(paged_table){}
+    const Tensor<IntEngineType, PagedTableLayout> paged_table,
+    const PagedFMHACC_Config<BQ, BKV, warps_per_block, causal_mask> config
+  ): Kcache(Kcache), Vcache(Vcache), paged_table(paged_table), config(config){}
 
   using TensorDType = float;
 

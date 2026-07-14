@@ -11,6 +11,36 @@ namespace cobraml::kernels {
 
 using namespace cute;
 
+template <typename IdentityTensorEngineType,
+            typename IdentityTensorLayoutType, 
+            typename SourceTensorEngineType,
+            typename SourceTensorLayoutType,
+            typename DestinationTensorEngineType,
+            typename DestinationTensorLayoutType, 
+            typename TiledCopyType,
+            typename DType>
+  COBRA_S_DEVICE void tiled_predicate_copy(
+      const Tensor<IdentityTensorEngineType, IdentityTensorLayoutType> &identity_tensor,
+      const Tensor<SourceTensorEngineType, SourceTensorLayoutType> &source_tensor,
+      Tensor<DestinationTensorEngineType, DestinationTensorLayoutType> &destination_tensor,
+      TiledCopyType tiled_copy, 
+      DType fill_value, 
+      int bound) {
+
+    constexpr int num_copy{size(get<1>(SourceTensorLayoutType{}))};
+
+    CUTE_UNROLL
+    for (int i{0}; i < num_copy; ++i) {
+      auto row{get<0>(identity_tensor(0, i, 0))};
+
+      if (row < bound) {
+        copy(tiled_copy, source_tensor(_, i, _), destination_tensor(_, i, _));
+      } else {
+        fill(destination_tensor(_, i, _), fill_value);
+      }
+    }
+  }
+
 template<
   typename PagedEngineType,
   typename PagedLayoutType,
@@ -424,6 +454,7 @@ template <
     typename CuSeqlenQLayoutType,
     typename CuSeqlenKNewLayoutType,
     typename TiledMMAType,
+    typename TiledCopyType,
     bool causal,
     int BQ,
     int BKV
@@ -438,7 +469,8 @@ __global__ void paged_mha_cc_kernel(
     const Tensor<IntEngineType, CuSeqlenQLayoutType> cu_seqlens_q,
     const Tensor<IntEngineType, CuSeqlenKNewLayoutType> cu_seqlens_k_new,
     const float scale,
-    TiledMMAType t_mma) {
+    TiledMMAType t_mma,
+    TiledCopyType tc_q) {
 
   uint32_t head{blockIdx.x};
   uint32_t request{blockIdx.y};
@@ -448,15 +480,9 @@ __global__ void paged_mha_cc_kernel(
   int q_end{cu_seqlens_q[request + 1]};
   int N{q_end - q_start}; // sequence length
   int N_KV{cache_seqlen[request]};
-
-  if (thread0()){
-    print(N); print("\n");
-    print_tensor(cu_seqlens_q);
-  }
-
   constexpr int head_dim{shape<3>(KVLayoutType{})};
 
-  if (q_start >= N)
+  if (seq_start >= N)
     return;
 
   Tensor q_slice{
@@ -465,6 +491,8 @@ __global__ void paged_mha_cc_kernel(
       make_layout(make_shape(N, shape<2>(q)), LayoutRight{}) 
     )
   };
+
+  Tensor q_idty_slice{make_identity_tensor(shape(q_slice))};
 
   Tensor o_slice{
     make_tensor(
@@ -506,22 +534,29 @@ __global__ void paged_mha_cc_kernel(
   constexpr Int<BKV> bkv{};
 
   auto qo_coord{make_coord(blockIdx.z, _0{})};
-  // auto kv_coord{make_coord(_, 0)};
-
   auto qo_tiler{make_shape(Int<BQ>{}, d)};
-  auto scores_tiler{make_shape(Int<BQ>{}, Int<BKV>{})};
 
-  Tensor q_iterator{local_tile(q_slice, qo_tiler, qo_coord)}; // (B_r, d)
-  Tensor o_iterator{local_tile(o_slice, qo_tiler, qo_coord)}; // (B_r, d)
+  Tensor q_tile{local_tile(q_slice, qo_tiler, qo_coord)}; // (B_r, d)
+  Tensor o_tile{local_tile(o_slice, qo_tiler, qo_coord)}; // (B_r, d)
+  Tensor q_tile_idty{local_tile(q_idty_slice, qo_tiler, qo_coord)}; // (B_r, d)
 
   int iters{ceil_div(N_KV, BKV)}; // N_kv
 
-  // // t prefix means unique to this thread
-  // ThrCopy thr_copy_qk{tc_qk.get_slice(threadIdx.x)};
-  // ThrCopy thr_copy_v{tc_v.get_slice(threadIdx.x)};
+  ThrCopy thr_copy_q{tc_q.get_slice(threadIdx.x)};
 
-  // const Tensor tQ_global_part{thr_copy_qk.partition_S(q_iterator)};
-  // Tensor tQ_shared_part{thr_copy_qk.partition_D(shared_q)};
+  const Tensor q_source_part{thr_copy_q.partition_S(q_tile)};
+  const Tensor q_source_idty_part{thr_copy_q.partition_S(q_tile_idty)};
+  Tensor q_dest_part{thr_copy_q.partition_D(shared_q)};
+
+  tiled_predicate_copy(q_source_idty_part, q_source_part, q_dest_part, tc_q, FloatEngineType::element_type(0), N);
+
+  // __syncthreads();
+
+  // if (thread0()) {
+  //   print_tensor(q_source_part); print("\n");
+  //   print_tensor(q_source_idty_part); print("\n");
+  //   print_tensor(shared_q);
+  // }
 
   // const Tensor tK_global_part_iter{thr_copy_qk.partition_S(k_iterator)};
   // Tensor tK_shared_part{thr_copy_qk.partition_D(shared_k)};
@@ -537,8 +572,10 @@ __global__ void paged_mha_cc_kernel(
 
   Tensor p_mma2{thr_mma_qk.partition_A(shared_p)};
   Tensor v_mma{thr_mma_qk.partition_B(trans_shared_v)};
-  Tensor g_out_mma{thr_mma_qk.partition_C(o_iterator)};
+  Tensor g_out_mma{thr_mma_qk.partition_C(o_tile)};
   Tensor r_out_mma{thr_mma_qk.make_fragment_C(g_out_mma)};
+
+  auto scores_tiler{make_shape(Int<BQ>{}, Int<BKV>{})};
 
   // auto q_head_idty{MHAType::identity_slice_head(batch_size, N_q)};
   // auto kv_head_idty{MHAType::identity_slice_head(batch_size, N_kv)};
@@ -677,14 +714,15 @@ struct PagedFMHACC {
 
   static_assert(rank(KVLayoutType{}) == 4, "KV Cache must have 4 modes");
 
+  using VectorizedType = uint128_t;
+  using TensorDType = float;
+
   PagedFMHACC(
     const Tensor<FloatEngineType, KVLayoutType> Kcache,
     const Tensor<FloatEngineType, KVLayoutType> Vcache,
     const Tensor<IntEngineType, PagedTableLayout> paged_table,
     const PagedFMHACC_Config<BQ, BKV, warps_per_block, causal_mask> config
   ): Kcache(Kcache), Vcache(Vcache), paged_table(paged_table), config(config){}
-
-  using TensorDType = float;
 
   using NumHeadsType = decltype(shape<2>(KVLayoutType{}));
   using HeadDimType = decltype(shape<3>(KVLayoutType{}));
@@ -711,6 +749,35 @@ struct PagedFMHACC {
     return t_mma;
   }
 
+static constexpr auto q_copy_atom() {
+  // ensures no repeat across the head dimension
+
+  constexpr int elements_per_load{sizeof(VectorizedType) / sizeof(TensorDType)};
+  constexpr int threads_per_row{HeadDimType::value / elements_per_load};
+
+  static_assert(
+      HeadDimType::value % threads_per_row == 0,
+      "the head dimension cannot be properly tiled with this thread layout");
+
+  using TPRType = Int<threads_per_row>;
+  using EPLType = Int<elements_per_load>;
+  constexpr int rows{threads_per_block / threads_per_row};
+  using RowType = Int<rows>;
+
+  static_assert(
+      threads_per_block % threads_per_row == 0,
+      "the head dimension cannot be properly tiled with this thread count");
+
+  static_assert(
+      BQ % rows == 0,
+      "The Q block dimension cannot be properly tiled with this thread count");
+
+  return make_tiled_copy(
+      Copy_Atom<UniversalCopy<VectorizedType>, TensorDType>{},
+      Layout<Shape<RowType, TPRType>, Stride<TPRType, _1>>{},
+      Layout<Shape<_1, EPLType>>{});
+}
+
   template<
     typename QOLayoutType,
     typename CacheSeqlenLayoutType,
@@ -730,13 +797,13 @@ struct PagedFMHACC {
     dim3 block_dim{threads_per_block};
 
     const auto tmma{get_tiled_mma()};
-
+    const auto tc_q{q_copy_atom()};
     const auto scale{rsqrt(static_cast<TensorDType>(HeadDimType::value))};
 
     auto kernel_fptr{paged_mha_cc_kernel<
         FloatEngineType, IntEngineType, QOLayoutType, KVLayoutType,
         PagedTableLayout, CacheSeqlenLayoutType, CuSeqlenQLayoutType,
-        CuSeqlenKNewLayoutType, decltype(tmma), causal_mask, BQ, BKV>};
+        CuSeqlenKNewLayoutType, decltype(tmma), decltype(tc_q), causal_mask, BQ, BKV>};
 
     size_t smem_size{sizeof(SharedStorage<BQ, BKV, HeadDimType::value>)};
 
@@ -747,7 +814,7 @@ struct PagedFMHACC {
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
     kernel_fptr<<<grid_dim, block_dim, smem_size>>>(
-        q, Kcache, Vcache, o, paged_table, cache_seqlen, cu_seqlens_q, cu_seqlens_k_new, scale, tmma);
+        q, Kcache, Vcache, o, paged_table, cache_seqlen, cu_seqlens_q, cu_seqlens_k_new, scale, tmma, tc_q);
   }
 };
 

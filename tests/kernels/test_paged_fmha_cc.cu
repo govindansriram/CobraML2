@@ -48,7 +48,12 @@ auto create_qo_vector(const std::vector<int> q_len){
     auto qo_layout = make_layout(make_shape(N, Int<num_heads>{}, Int<head_dim>{}), LayoutRight{});
     int length{static_cast<int>(size(qo_layout.shape()))};
 
-    thrust::device_vector<float> q_vector(length);
+    thrust::host_vector<float> q_vector_host(length);
+    std::uniform_real_distribution<float> dist{0.0f, 1.0f};
+    std::mt19937 gen{std::random_device{}()};
+    std::generate(q_vector_host.begin(), q_vector_host.end(), [&]{ return dist(gen); });
+
+    thrust::device_vector<float> q_vector{q_vector_host};
     thrust::device_vector<float> o_vector(length);
 
     OwnedTensor q_tensor(q_vector, qo_layout);
@@ -144,7 +149,7 @@ void test_paged_fmha(std::vector<int>&& q_len_host, std::vector<int>&& kv_len_ho
     kernels::PagedFMHACC paged_attention(cache.get_k_cache<1>(), cache.get_v_cache<1>(), owned_page_map.get_tensor(), ConfigType{});
 
     auto[q_tensor, o_tensor]{create_qo_vector<16, 64>(q_len_host)};
-    paged_attention(q_tensor.get_tensor(), o_tensor.get_tensor(), owned_cu_seqlen_q.get_tensor(), owned_cu_seqlen_k_new.get_tensor(), cache_seqlen, num_requests, max_q);
+    paged_attention(q_tensor.get_tensor(), o_tensor.get_tensor(), cache_seqlen, owned_cu_seqlen_q.get_tensor(), owned_cu_seqlen_k_new.get_tensor(), num_requests, max_q);
 }
 
 TEST(PAGED_FMHA_CC, basic_test){

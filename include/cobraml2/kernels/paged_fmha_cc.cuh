@@ -19,162 +19,96 @@ template <typename IdentityTensorEngineType,
             typename DestinationTensorLayoutType, 
             typename TiledCopyType,
             typename DType>
-  COBRA_S_DEVICE void tiled_predicate_copy(
-      const Tensor<IdentityTensorEngineType, IdentityTensorLayoutType> &identity_tensor,
-      const Tensor<SourceTensorEngineType, SourceTensorLayoutType> &source_tensor,
-      Tensor<DestinationTensorEngineType, DestinationTensorLayoutType> &destination_tensor,
-      TiledCopyType tiled_copy, 
-      DType fill_value, 
-      int bound) {
+COBRA_DEVICE void tiled_predicate_copy(
+    const Tensor<IdentityTensorEngineType, IdentityTensorLayoutType> &identity_tensor,
+    const Tensor<SourceTensorEngineType, SourceTensorLayoutType> &source_tensor,
+    Tensor<DestinationTensorEngineType, DestinationTensorLayoutType> &destination_tensor,
+    TiledCopyType tiled_copy, 
+    DType fill_value, 
+    int bound) {
 
-    constexpr int num_copy{size(get<1>(SourceTensorLayoutType{}))};
+  constexpr int num_copy{size(get<1>(SourceTensorLayoutType{}))};
 
-    CUTE_UNROLL
-    for (int i{0}; i < num_copy; ++i) {
-      auto row{get<0>(identity_tensor(0, i, 0))};
+  CUTE_UNROLL
+  for (int i{0}; i < num_copy; ++i) {
+    auto row{get<0>(identity_tensor(0, i, 0))};
 
-      if (row < bound) {
-        copy(tiled_copy, source_tensor(_, i, _), destination_tensor(_, i, _));
-      } else {
-        fill(destination_tensor(_, i, _), fill_value);
-      }
+    if (row < bound) {
+      copy(tiled_copy, source_tensor(_, i, _), destination_tensor(_, i, _));
+    } else {
+      fill(destination_tensor(_, i, _), fill_value);
     }
   }
+}
 
 template<
-  typename PagedEngineType,
-  typename PagedLayoutType,
-  int warps,
-  int head_dim,
-  int BKV,
-  int page_size
+  typename CacheEngineType,
+  typename CacheLayoutType,
+  typename PageEngineType,
+  typename PageLayoutType,
+  typename DstEngineType,
+  typename DstLayoutType,
+  typename TiledCopyType,
+  int BKV
 >
-struct PagedCopyEngine{
-  using VectorizedWidthType = uint128_t;
-  using ScalarWidthType = uint32_t;
-  static constexpr int width{sizeof(VectorizedWidthType) / sizeof(ScalarWidthType)};
-  using ThreadsType = Int<32 * warps>;
-  using ThreadsPerRowType = Int<head_dim / width>;
+struct PagedCopyManager{
 
-  static_assert(ThreadsType::value % ThreadsPerRowType::value == 0, "Configured thread count is unable to distirbute work evenly");
+  const Tensor<CacheEngineType, CacheLayoutType> & cache;
+  const Tensor<PageEngineType, PageLayoutType> & page_vector;
+  const TiledCopyType & tiled_copy;
+  const int NKV;
 
-  using RowsPerThreadBlockType = Int<ThreadsType::value / ThreadsPerRowType::value>;
+  using ThrCopyType = decltype(std::declval<TiledCopyType>().get_slice(threadIdx.x));
+  ThrCopyType tc;
 
-  static constexpr int iters_per_block{ceil_div(BKV, RowsPerThreadBlockType::value)};
-
-  static_assert(BKV % page_size == 0, "KV Cache Block SIze must be a multiple of KV Cache page size");
-
-  const Tensor<PagedEngineType, PagedLayoutType>& paged_table;
-  const int sequence_length;
-
-  COBRA_DEVICE PagedCopyEngine(const Tensor<PagedEngineType, PagedLayoutType> &paged_table, const int sequence_length): 
-    paged_table(paged_table), sequence_length(sequence_length){}
-
-  template<
-    typename SourceEngineType,
-    typename SourceLayout,
-    typename DestEngineType,
-    typename DestLayout
-  >
-  COBRA_DEVICE void predicate_paged_copy(
-    const Tensor<SourceEngineType, SourceLayout> &src_cache, 
-    Tensor<DestEngineType, DestLayout> &dst,
-    const int start_row
-  ){
-
-    const int thread_row{threadIdx.x / ThreadsPerRowType::value};
-    const int thread_col{threadIdx.x % ThreadsPerRowType::value};
-
-    auto coord{make_coord(_, thread_col)};
-    auto dst_tiler{make_shape(_1{}, Int<width>{})};
-
-    Tensor dst_iter{
-      local_tile(dst, dst_tiler, coord)
-    }; // (1, width, block_rows)
-
-    int thread_start_row{start_row + thread_row};
-
-    #pragma unroll
-    for (int iter{0}; iter < iters_per_block; ++iter){
-
-      thread_start_row += RowsPerThreadBlockType::value * iter;
-
-      if (thread_start_row < sequence_length){
-        int page_table_idx{thread_start_row / page_size};
-        int page_idx{paged_table(page_table_idx)};
-
-        Tensor cache_block{src_cache(page_idx, _, _)};
-
-        int page_row{thread_start_row % page_size};
-
-        // this thread's width-wide chunk of the head_dim row
-        Tensor src_chunk{local_tile(cache_block(page_row, _),
-                                    make_shape(Int<width>{}),
-                                    make_coord(thread_col))};
-
-        // vectorized 128-bit copy (== width scalars in one transaction)
-        copy(Copy_Atom<UniversalCopy<VectorizedWidthType>, ScalarWidthType>{},
-             src_chunk, dst_iter(_, _, thread_start_row - start_row));
-
-      }else if ((thread_start_row - start_row) < BKV){
-        fill(dst_iter(_, _, thread_start_row - start_row), 0.0f);
-      }
-
-    }
-
-    __syncthreads();
-
+  template <int head_dim, int page_size, int bkv>
+  COBRA_S_DEVICE auto create_paged_identity_tensor(const int N_KV) {
+    Tensor idty{make_identity_tensor(make_shape(N_KV, Int<head_dim>{}))};
+    Tensor tiled_idty{local_tile(idty, make_shape(Int<bkv>{}, Int<head_dim>{}), make_coord(_, _0{}))};
+    return local_tile(tiled_idty, make_shape(Int<page_size>{}, Int<head_dim>{}), make_coord(_, _0{}));
   }
 
-  template<
-    typename SourceEngineType,
-    typename SourceLayout,
-    typename DestEngineType,
-    typename DestLayout
-  >
-  COBRA_DEVICE void paged_copy(
-    const Tensor<SourceEngineType, SourceLayout> &src_cache, 
-    Tensor<DestEngineType, DestLayout> &dst,
-    const int start_row
-  ){
+  static constexpr int head_dim{shape<2>(CacheLayoutType{}).value};
+  static constexpr int page_size{shape<1>(CacheLayoutType{}).value};
+  using IdentityTensorType = decltype(create_paged_identity_tensor<head_dim, page_size, BKV>(declval<int>()));
 
-    const int thread_row{threadIdx.x / ThreadsPerRowType::value};
-    const int thread_col{threadIdx.x % ThreadsPerRowType::value};
+  const IdentityTensorType idty_tensor;
 
-    auto coord{make_coord(_, thread_col)};
-    auto dst_tiler{make_shape(_1{}, Int<width>{})};
-
-    Tensor dst_iter{
-      local_tile(dst, dst_tiler, coord)
-    }; // (1, width, block_rows)
-
-    int thread_start_row{start_row + thread_row};
-
-    #pragma unroll
-    for (int iter{0}; iter < iters_per_block; ++iter){
-
-      thread_start_row += RowsPerThreadBlockType::value * iter;
-
-      int page_table_idx{thread_start_row / page_size};
-      int page_idx{paged_table(page_table_idx)};
-
-      Tensor cache_block{src_cache(page_idx, _, _)};
-
-      int page_row{thread_start_row % page_size};
-
-      // this thread's width-wide chunk of the head_dim row
-      Tensor src_chunk{local_tile(cache_block(page_row, _),
-                                  make_shape(Int<width>{}),
-                                  make_coord(thread_col))};
-
-      // vectorized 128-bit copy (== width scalars in one transaction)
-      copy(Copy_Atom<UniversalCopy<VectorizedWidthType>, ScalarWidthType>{},
-            src_chunk, dst_iter(_, _, thread_start_row - start_row));
-
-    }
-    __syncthreads();
-
+  template <int head_dim, int page_size>
+  COBRA_S_DEVICE auto slice_dest(Tensor<DstEngineType, DstLayoutType> & dest, ThrCopyType & thr_copy) {
+    Tensor tiled_tensor{local_tile(dest, make_shape(Int<page_size>{}, Int<head_dim>{}), make_coord(_, _0{}))};
+    return thr_copy.partition_D(tiled_tensor);
   }
+
+  using PagedDestTensorType = decltype(slice_dest<head_dim, page_size>(declval<Tensor<DstEngineType, DstLayoutType> &>(), declval<ThrCopyType &>()));
+  PagedDestTensorType paged_dest;
+
+  COBRA_DEVICE PagedCopyManager(
+    const TiledCopyType & tiled_copy,
+    const Tensor<CacheEngineType, CacheLayoutType> & cache,
+    Tensor<DstEngineType, DstLayoutType> & dest,
+    const Tensor<PageEngineType, PageLayoutType> & page_vector,
+    const int NKV,
+    const Int<BKV> bkv
+  ): 
+  cache(cache), page_vector(page_vector), tiled_copy(tiled_copy), 
+  NKV(NKV), tc(tiled_copy.get_slice(threadIdx.x)), 
+  idty_tensor(create_paged_identity_tensor<head_dim, page_size, BKV>(NKV)),
+  paged_dest(slice_dest<head_dim, page_size>(dest, tc)){}
+
+  // COBRA_DEVICE auto paged_copy(
+  //   int iteration
+  // ){
+  //   int pages_per_block{shape<2>(idty_tensor)};
+  //   int page_idx{iteration * pages_per_block};
+
+  //   for (int i{0}; i < pages_per_block; ++i){
+  //     Tensor page{cache(page_idx, _, _)};
+  //     copy(paged_tiled_copy, cache(page_idx, _, _), dst(_, i, _));
+  //     page_idx++;
+  //   }
+
+  // }
 };
 
 
@@ -454,7 +388,8 @@ template <
     typename CuSeqlenQLayoutType,
     typename CuSeqlenKNewLayoutType,
     typename TiledMMAType,
-    typename TiledCopyType,
+    typename TiledCopyTypeQ,
+    typename TiledCopyTypeK,
     bool causal,
     int BQ,
     int BKV
@@ -470,7 +405,9 @@ __global__ void paged_mha_cc_kernel(
     const Tensor<IntEngineType, CuSeqlenKNewLayoutType> cu_seqlens_k_new,
     const float scale,
     TiledMMAType t_mma,
-    TiledCopyType tc_q) {
+    TiledCopyTypeQ tc_q,
+    TiledCopyTypeK tc_k
+  ) {
 
   uint32_t head{blockIdx.x};
   uint32_t request{blockIdx.y};
@@ -552,14 +489,7 @@ __global__ void paged_mha_cc_kernel(
 
   // __syncthreads();
 
-  // if (thread0()) {
-  //   print_tensor(q_source_part); print("\n");
-  //   print_tensor(q_source_idty_part); print("\n");
-  //   print_tensor(shared_q);
-  // }
-
-  // const Tensor tK_global_part_iter{thr_copy_qk.partition_S(k_iterator)};
-  // Tensor tK_shared_part{thr_copy_qk.partition_D(shared_k)};
+  PagedCopyManager k_manager(tc_k, k_cache_view, shared_k, pages, N_KV, Int<BKV>{});
 
   // const Tensor tV_global_part_iter{thr_copy_v.partition_S(v_iterator)};
   // Tensor tV_shared_part{thr_copy_v.partition_D(shared_v)};
@@ -575,14 +505,10 @@ __global__ void paged_mha_cc_kernel(
   Tensor g_out_mma{thr_mma_qk.partition_C(o_tile)};
   Tensor r_out_mma{thr_mma_qk.make_fragment_C(g_out_mma)};
 
-  auto scores_tiler{make_shape(Int<BQ>{}, Int<BKV>{})};
+  Tensor r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
+  clear(r_scores_mma); // Zero the accumulator
 
-  // auto q_head_idty{MHAType::identity_slice_head(batch_size, N_q)};
   // auto kv_head_idty{MHAType::identity_slice_head(batch_size, N_kv)};
-
-  // // make q identity tensor
-  // auto q_head_slice_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
-  // auto tQ_idty_part{thr_copy_qk.partition_S(q_head_slice_idty)};
 
   // // make k identity tensor
   // auto kv_iterator_idty{local_tile(kv_head_idty, kv_tiler,
@@ -594,6 +520,8 @@ __global__ void paged_mha_cc_kernel(
 
   // scores identity tensor
   auto scores_idty{make_identity_tensor(make_shape(N, N_KV))};
+
+  auto scores_tiler{make_shape(Int<BQ>{}, Int<BKV>{})};
   auto scores_tile_idty{
       local_tile(scores_idty, scores_tiler,
                  make_coord(blockIdx.z, _))}; // (B_r, B_c, ceil(N / B_c))
@@ -603,14 +531,11 @@ __global__ void paged_mha_cc_kernel(
   // auto o_iterator_idty{local_tile(q_head_idty, q_tiler, q_coord)}; // (B_r, d)
   // Tensor o_mma_idty{thr_mma_qk.partition_C(o_iterator_idty)};
 
-  // predicated copy
-  // MHAType::predicate_copy_tensor(tQ_idty_part, tQ_global_part, tQ_shared_part,
-  //                                tc_qk, DType(0), N_q);
+  auto mma_m{select<1>(q_mma.shape())};
 
-  // auto mma_m{select<1>(q_mma.shape())};
-
-  // Tensor r_scores_mma{thr_mma_qk.make_fragment_C(p_mma)};
-  // clear(r_scores_mma); // Zero the accumulator
+  if (thread0()) {
+    print(k_manager.idty_tensor);
+  }
 
   // // start with the lowest possible value
   // auto m{make_tensor<DType>(mma_m)};
@@ -778,6 +703,35 @@ static constexpr auto q_copy_atom() {
       Layout<Shape<_1, EPLType>>{});
 }
 
+static constexpr auto k_copy_atom() {
+  // ensures no repeat across the head dimension
+
+  constexpr int elements_per_load{sizeof(VectorizedType) / sizeof(TensorDType)};
+  constexpr int threads_per_row{HeadDimType::value / elements_per_load};
+
+  static_assert(
+      HeadDimType::value % threads_per_row == 0,
+      "the head dimension cannot be properly tiled with this thread layout");
+
+  using TPRType = Int<threads_per_row>;
+  using EPLType = Int<elements_per_load>;
+  constexpr int rows{threads_per_block / threads_per_row};
+  using RowType = Int<rows>;
+
+  static_assert(
+      threads_per_block % threads_per_row == 0,
+      "the head dimension cannot be properly tiled with this thread count");
+
+  static_assert(
+      BPagedType::value % rows == 0,
+      "The Page Size cannot be properly tiled with this thread count");
+
+  return make_tiled_copy(
+      Copy_Atom<UniversalCopy<VectorizedType>, TensorDType>{},
+      Layout<Shape<RowType, TPRType>, Stride<TPRType, _1>>{},
+      Layout<Shape<_1, EPLType>>{});
+}
+
   template<
     typename QOLayoutType,
     typename CacheSeqlenLayoutType,
@@ -798,12 +752,13 @@ static constexpr auto q_copy_atom() {
 
     const auto tmma{get_tiled_mma()};
     const auto tc_q{q_copy_atom()};
+    const auto tc_k{k_copy_atom()};
     const auto scale{rsqrt(static_cast<TensorDType>(HeadDimType::value))};
 
     auto kernel_fptr{paged_mha_cc_kernel<
         FloatEngineType, IntEngineType, QOLayoutType, KVLayoutType,
         PagedTableLayout, CacheSeqlenLayoutType, CuSeqlenQLayoutType,
-        CuSeqlenKNewLayoutType, decltype(tmma), decltype(tc_q), causal_mask, BQ, BKV>};
+        CuSeqlenKNewLayoutType, decltype(tmma), decltype(tc_q), decltype(tc_k), causal_mask, BQ, BKV>};
 
     size_t smem_size{sizeof(SharedStorage<BQ, BKV, HeadDimType::value>)};
 
@@ -814,7 +769,7 @@ static constexpr auto q_copy_atom() {
                          cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
     kernel_fptr<<<grid_dim, block_dim, smem_size>>>(
-        q, Kcache, Vcache, o, paged_table, cache_seqlen, cu_seqlens_q, cu_seqlens_k_new, scale, tmma, tc_q);
+        q, Kcache, Vcache, o, paged_table, cache_seqlen, cu_seqlens_q, cu_seqlens_k_new, scale, tmma, tc_q, tc_k);
   }
 };
 

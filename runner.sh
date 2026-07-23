@@ -162,19 +162,34 @@ if [ "$RUN_ALL" = true ]; then
     ctest --test-dir "$BUILD_DIR" --output-on-failure "${RUN_ARGS[@]}"
 fi
 
+# Locate a built test binary by name under $BUILD_DIR/tests (any subdirectory)
+find_test_binary() {
+    find "$BUILD_DIR/tests" -name "$1" -type f -executable 2>/dev/null | head -1
+}
+
 # Run specific target if requested
 if [ -n "$RUN_TARGET" ]; then
+    RUN_PATH=$(find_test_binary "$RUN_TARGET")
+    if [ -z "$RUN_PATH" ]; then
+        echo "Could not find built binary for target: $RUN_TARGET"
+        exit 1
+    fi
     echo ""
-    echo "Running: $RUN_TARGET ${RUN_ARGS[*]}"
+    echo "Running: $RUN_PATH ${RUN_ARGS[*]}"
     echo "----------------------------------------"
-    "$BUILD_DIR/tests/$RUN_TARGET" "${RUN_ARGS[@]}"
+    "$RUN_PATH" "${RUN_ARGS[@]}"
 fi
 
 # Profile specific target if requested
 if [ -n "$PROFILE_TARGET" ]; then
+    PROFILE_PATH=$(find_test_binary "$PROFILE_TARGET")
+    if [ -z "$PROFILE_PATH" ]; then
+        echo "Could not find built binary for target: $PROFILE_TARGET"
+        exit 1
+    fi
     REPORT_NAME="${PROFILE_OUTPUT:-$PROFILE_TARGET}"
     echo ""
-    echo "Profiling: $PROFILE_TARGET ${RUN_ARGS[*]}"
+    echo "Profiling: $PROFILE_PATH ${RUN_ARGS[*]}"
     echo "----------------------------------------"
     ncu \
         -o "$REPORT_NAME" \
@@ -182,7 +197,7 @@ if [ -n "$PROFILE_TARGET" ]; then
         --set=full \
         --import-source=yes \
         $PROFILE_OPTS \
-        "$BUILD_DIR/tests/$PROFILE_TARGET" "${RUN_ARGS[@]}"
+        "$PROFILE_PATH" "${RUN_ARGS[@]}"
     echo ""
     echo "Report saved: ${REPORT_NAME}.ncu-rep"
 fi

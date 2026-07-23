@@ -62,17 +62,20 @@ struct PagedCopyManager{
   ThrCopyType tc;
 
   template <int head_dim, int page_size, int bkv>
-  COBRA_S_DEVICE auto create_paged_identity_tensor(const int N_KV) {
+  COBRA_S_DEVICE auto create_paged_identity_tensor(const int N_KV, const ThrCopyType & tc) {
     Tensor idty{make_identity_tensor(make_shape(N_KV, Int<head_dim>{}))};
     Tensor tiled_idty{local_tile(idty, make_shape(Int<bkv>{}, Int<head_dim>{}), make_coord(_, _0{}))};
-    return local_tile(tiled_idty, make_shape(Int<page_size>{}, Int<head_dim>{}), make_coord(_, _0{}));
+    Tensor paged_idty {local_tile(tiled_idty, make_shape(Int<page_size>{}, Int<head_dim>{}), make_coord(_, _0{}))};
+    return tc.partition_S(paged_idty);
   }
 
   static constexpr int head_dim{shape<2>(CacheLayoutType{}).value};
   static constexpr int page_size{shape<1>(CacheLayoutType{}).value};
-  using IdentityTensorType = decltype(create_paged_identity_tensor<head_dim, page_size, BKV>(declval<int>()));
+  using IdentityTensorType = decltype(create_paged_identity_tensor<head_dim, page_size, BKV>(declval<int>(), declval<ThrCopyType &>()));
 
   const IdentityTensorType idty_tensor;
+
+  static constexpr int pages_per_block{shape<3>(typename IdentityTensorType::layout_type{})};
 
   template <int head_dim, int page_size>
   COBRA_S_DEVICE auto slice_dest(Tensor<DstEngineType, DstLayoutType> & dest, ThrCopyType & thr_copy) {
@@ -93,22 +96,41 @@ struct PagedCopyManager{
   ): 
   cache(cache), page_vector(page_vector), tiled_copy(tiled_copy), 
   NKV(NKV), tc(tiled_copy.get_slice(threadIdx.x)), 
-  idty_tensor(create_paged_identity_tensor<head_dim, page_size, BKV>(NKV)),
+  idty_tensor(create_paged_identity_tensor<head_dim, page_size, BKV>(NKV, tc)),
   paged_dest(slice_dest<head_dim, page_size>(dest, tc)){}
 
-  // COBRA_DEVICE auto paged_copy(
-  //   int iteration
-  // ){
-  //   int pages_per_block{shape<2>(idty_tensor)};
-  //   int page_idx{iteration * pages_per_block};
+  COBRA_DEVICE auto paged_copy(int iteration){
+    Tensor iter_idty{idty_tensor(_, _, _, _, iteration)};
 
-  //   for (int i{0}; i < pages_per_block; ++i){
-  //     Tensor page{cache(page_idx, _, _)};
-  //     copy(paged_tiled_copy, cache(page_idx, _, _), dst(_, i, _));
-  //     page_idx++;
-  //   }
+    int source_page{iteration * pages_per_block};
 
-  // }
+    constexpr int rows_processed_per_thread{shape<1>(typename IdentityTensorType::layout_type{})};
+
+    #pragma unroll
+    for (int i_page{0}; i_page < pages_per_block; ++i_page){
+      int page{page_vector(source_page)};
+
+      Tensor paged_idty{iter_idty(_, _, _, i_page)};
+      Tensor dest{paged_dest(_, _, _, i_page)};
+
+      if (page == -1){
+        return;
+      }
+
+      Tensor source_tensor{tc.partition_S(cache(page, _, _))};
+
+      #pragma unroll
+      for (int row{0}; row < rows_processed_per_thread; ++row){
+
+        if (thread0()){
+          print(paged_idty(0, row, 0)); print("\n");
+        }
+
+      }
+
+      source_page++;
+    }
+  }
 };
 
 
@@ -533,21 +555,15 @@ __global__ void paged_mha_cc_kernel(
 
   auto mma_m{select<1>(q_mma.shape())};
 
-  if (thread0()) {
-    print(k_manager.idty_tensor);
-  }
-
-  // // start with the lowest possible value
+  // start with the lowest possible value
   // auto m{make_tensor<DType>(mma_m)};
   // auto l{make_tensor<DType>(mma_m)};
   // fill(m, -INFINITY);
   // clear(l); // zero the sums
 
-  // // Do the block that needs predication first
+  // Do the block that needs predication first
+  k_manager.paged_copy(iters - 1);
 
-  // MHAType::matmul<true>(tK_global_part_iter(_, _, _, iters - 1), tK_shared_part,
-  //                       tc_qk, q_mma, k_mma, r_scores_mma,
-  //                       k_idty_part(_, _, _, iters - 1), t_mma, N_kv);
 
   // MHAType::update_statistics<true>(m, l, r_scores_mma, p_mma, r_out_mma,
   //                                  scores_slice_idty(_, _, _, iters - 1), scale,
